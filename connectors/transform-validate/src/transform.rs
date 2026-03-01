@@ -1,3 +1,9 @@
+//! Rule evaluation engine for the validation transform.
+//!
+//! Evaluates compiled validation rules against each Arrow `RecordBatch`, partitions
+//! rows into valid/invalid sets, emits metrics, and routes invalid rows according
+//! to the stream's error policy (fail, skip, or dead-letter queue).
+
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 

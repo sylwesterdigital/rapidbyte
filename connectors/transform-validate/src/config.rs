@@ -1,3 +1,8 @@
+//! Validation transform configuration and rule compilation.
+//!
+//! Parses user-defined `RuleSpec` entries (not-null, regex, range, unique) from
+//! JSON config and compiles them into an optimized `CompiledConfig` for evaluation.
+
 use std::collections::BTreeMap;
 
 use bigdecimal::BigDecimal;

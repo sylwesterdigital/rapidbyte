@@ -1,3 +1,8 @@
+//! Validation transform connector for Rapidbyte.
+//!
+//! Applies rule-based data contract assertions (not-null, regex, range, unique)
+//! to in-flight Arrow batches, filtering or failing rows that violate constraints.
+
 mod config;
 mod transform;
 
