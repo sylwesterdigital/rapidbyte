@@ -25,7 +25,7 @@ impl io::Write for FrameWriter<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.imports
             .frame_write(self.handle, buf)
-            .map_err(|e| io::Error::other(e.message.clone()))?;
+            .map_err(io::Error::other)?;
         Ok(buf.len())
     }
 

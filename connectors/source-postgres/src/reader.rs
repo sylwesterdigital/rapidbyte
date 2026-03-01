@@ -309,105 +309,101 @@ pub async fn read_stream(
         let exhausted = rows.is_empty();
 
         if !exhausted {
-            let mut valid_rows: Vec<tokio_postgres::Row> = Vec::with_capacity(rows.len());
-            for row in rows {
-                if estimated_row_bytes > max_record_bytes {
-                    if stream.policies.on_data_error == DataErrorPolicy::Fail {
-                        loop_error = Some(format!(
-                            "Record exceeds max_record_bytes ({estimated_row_bytes} > {max_record_bytes})",
-                        ));
-                        break;
-                    }
-                    records_skipped += 1;
-                    ctx.log(
-                        LogLevel::Warn,
-                        &format!(
-                            "Skipping oversized record: {estimated_row_bytes} bytes > max_record_bytes {max_record_bytes}",
-                        ),
-                    );
-                    continue;
-                }
-                valid_rows.push(row);
-            }
-
-            if loop_error.is_some() {
-                break;
-            }
-
-            for row in valid_rows {
-                if !accumulated_rows.is_empty()
-                    && estimated_bytes + estimated_row_bytes >= max_batch_bytes
-                {
-                    if let Err(e) = emit_accumulated_rows(
-                        &mut accumulated_rows,
-                        &columns,
-                        &arrow_schema,
-                        ctx,
-                        &mut state,
-                        &mut estimated_bytes,
-                    ) {
-                        loop_error = Some(e);
-                        break;
-                    }
-                }
-
-                if loop_error.is_some() {
+            if estimated_row_bytes > max_record_bytes {
+                if stream.policies.on_data_error == DataErrorPolicy::Fail {
+                    loop_error = Some(format!(
+                        "Record exceeds max_record_bytes ({estimated_row_bytes} > {max_record_bytes})",
+                    ));
                     break;
                 }
-
-                estimated_bytes += estimated_row_bytes;
-
-                // ── Cursor extraction ─────────────────────────────────
-                // IMPORTANT: PostgreSQL SERIAL is INT4 (i32), not INT8 (i64).
-                // tokio-postgres `try_get()` requires exact type matches, so we
-                // must chain i64 -> i32 fallbacks. The host orchestrator currently
-                // hardcodes CursorType::Utf8 for incremental state, so the catch-all
-                // arm is common. Do not remove the i32/i16 fallbacks or incremental
-                // tracking can silently stop advancing on SERIAL/SMALLSERIAL columns.
-                if let Some(ref mut t) = tracker {
-                    let col_idx = t.col_idx();
-                    if t.is_int_strategy() {
-                        let val = row
-                            .try_get::<_, i64>(col_idx)
-                            .ok()
-                            .or_else(|| row.try_get::<_, i32>(col_idx).ok().map(i64::from))
-                            .or_else(|| row.try_get::<_, i16>(col_idx).ok().map(i64::from));
-                        if let Some(val) = val {
-                            t.observe_int(val);
-                        }
-                    } else {
-                        let val = row
-                            .try_get::<_, String>(col_idx)
-                            .ok()
-                            .or_else(|| row.try_get::<_, i64>(col_idx).ok().map(|n| n.to_string()))
-                            .or_else(|| row.try_get::<_, i32>(col_idx).ok().map(|n| n.to_string()))
-                            .or_else(|| {
-                                row.try_get::<_, NaiveDateTime>(col_idx)
-                                    .ok()
-                                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
-                            })
-                            .or_else(|| {
-                                row.try_get::<_, chrono::DateTime<chrono::Utc>>(col_idx)
-                                    .ok()
-                                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
-                            })
-                            .or_else(|| {
-                                row.try_get::<_, chrono::NaiveDate>(col_idx)
-                                    .ok()
-                                    .map(|d| d.to_string())
-                            })
-                            .or_else(|| {
-                                row.try_get::<_, serde_json::Value>(col_idx)
-                                    .ok()
-                                    .map(|v| v.to_string())
-                            });
-                        if let Some(val) = val {
-                            t.observe_text(&val);
+                records_skipped += rows.len() as u64;
+                ctx.log(
+                    LogLevel::Warn,
+                    &format!(
+                        "Skipping {} oversized records: {estimated_row_bytes} bytes > max_record_bytes {max_record_bytes}",
+                        rows.len(),
+                    ),
+                );
+            } else {
+                for row in rows {
+                    if !accumulated_rows.is_empty()
+                        && estimated_bytes + estimated_row_bytes >= max_batch_bytes
+                    {
+                        if let Err(e) = emit_accumulated_rows(
+                            &mut accumulated_rows,
+                            &columns,
+                            &arrow_schema,
+                            ctx,
+                            &mut state,
+                            &mut estimated_bytes,
+                        ) {
+                            loop_error = Some(e);
+                            break;
                         }
                     }
-                }
 
-                accumulated_rows.push(row);
+                    if loop_error.is_some() {
+                        break;
+                    }
+
+                    estimated_bytes += estimated_row_bytes;
+
+                    // ── Cursor extraction ─────────────────────────────────
+                    // IMPORTANT: PostgreSQL SERIAL is INT4 (i32), not INT8 (i64).
+                    // tokio-postgres `try_get()` requires exact type matches, so we
+                    // must chain i64 -> i32 fallbacks. The host orchestrator currently
+                    // hardcodes CursorType::Utf8 for incremental state, so the catch-all
+                    // arm is common. Do not remove the i32/i16 fallbacks or incremental
+                    // tracking can silently stop advancing on SERIAL/SMALLSERIAL columns.
+                    if let Some(ref mut t) = tracker {
+                        let col_idx = t.col_idx();
+                        if t.is_int_strategy() {
+                            let val = row
+                                .try_get::<_, i64>(col_idx)
+                                .ok()
+                                .or_else(|| row.try_get::<_, i32>(col_idx).ok().map(i64::from))
+                                .or_else(|| row.try_get::<_, i16>(col_idx).ok().map(i64::from));
+                            if let Some(val) = val {
+                                t.observe_int(val);
+                            }
+                        } else {
+                            let val = row
+                                .try_get::<_, String>(col_idx)
+                                .ok()
+                                .or_else(|| {
+                                    row.try_get::<_, i64>(col_idx).ok().map(|n| n.to_string())
+                                })
+                                .or_else(|| {
+                                    row.try_get::<_, i32>(col_idx).ok().map(|n| n.to_string())
+                                })
+                                .or_else(|| {
+                                    row.try_get::<_, NaiveDateTime>(col_idx)
+                                        .ok()
+                                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
+                                })
+                                .or_else(|| {
+                                    row.try_get::<_, chrono::DateTime<chrono::Utc>>(col_idx)
+                                        .ok()
+                                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
+                                })
+                                .or_else(|| {
+                                    row.try_get::<_, chrono::NaiveDate>(col_idx)
+                                        .ok()
+                                        .map(|d| d.to_string())
+                                })
+                                .or_else(|| {
+                                    row.try_get::<_, serde_json::Value>(col_idx)
+                                        .ok()
+                                        .map(|v| v.to_string())
+                                });
+                            if let Some(val) = val {
+                                t.observe_text(&val);
+                            }
+                        }
+                    }
+
+                    accumulated_rows.push(row);
+                }
             }
         }
 

@@ -48,7 +48,7 @@ impl Drop for HostTcpStream {
 }
 
 fn to_io_error(err: ConnectorError) -> io::Error {
-    io::Error::other(err.to_string())
+    io::Error::other(err)
 }
 
 impl AsyncRead for HostTcpStream {

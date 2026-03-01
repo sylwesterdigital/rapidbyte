@@ -2,10 +2,7 @@
 
 use rapidbyte_types::stream::PartitionStrategy;
 
-use crate::config::types::{PipelineConfig, SourcePartitionMode};
-
-const MIN_COPY_FLUSH_BYTES: u64 = 1024 * 1024;
-const MAX_COPY_FLUSH_BYTES: u64 = 32 * 1024 * 1024;
+use crate::config::types::{PipelineConfig, MAX_COPY_FLUSH_BYTES, MIN_COPY_FLUSH_BYTES};
 
 /// Resolved runtime overrides for a stream execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,19 +44,14 @@ pub fn resolve_stream_autotune(
     let parallelism = pinned_parallelism.unwrap_or_else(|| baseline_parallelism.max(1));
 
     let partition_strategy = if source_connector_id == "source-postgres" {
-        autotune_cfg
-            .pin_source_partition_mode
-            .map(|mode| match mode {
-                SourcePartitionMode::Mod => PartitionStrategy::Mod,
-                SourcePartitionMode::Range => PartitionStrategy::Range,
-            })
+        autotune_cfg.pin_source_partition_mode
     } else {
         None
     };
 
     let copy_flush_bytes_override = autotune_cfg.pin_copy_flush_bytes.map(|bytes| {
-        let bytes = u64::try_from(bytes).unwrap_or(MAX_COPY_FLUSH_BYTES);
-        bytes.clamp(MIN_COPY_FLUSH_BYTES, MAX_COPY_FLUSH_BYTES)
+        let bytes = u64::try_from(bytes).unwrap_or(MAX_COPY_FLUSH_BYTES as u64);
+        bytes.clamp(MIN_COPY_FLUSH_BYTES as u64, MAX_COPY_FLUSH_BYTES as u64)
     });
 
     StreamAutotuneDecision {
@@ -127,7 +119,7 @@ destination:
         let decision = resolve_stream_autotune(&config, 3, "source-postgres");
         assert_eq!(
             decision.copy_flush_bytes_override,
-            Some(MAX_COPY_FLUSH_BYTES)
+            Some(MAX_COPY_FLUSH_BYTES as u64)
         );
     }
 

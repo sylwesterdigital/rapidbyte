@@ -12,26 +12,10 @@ use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::stream::SchemaEvolutionPolicy;
 
 use self::drift::detect_schema_drift;
+use crate::pg_error::format_pg_error;
 use crate::type_map::arrow_to_pg_type;
 
 pub(crate) use self::staging::{prepare_staging, swap_staging_table};
-
-fn format_pg_error(prefix: &str, error: &tokio_postgres::Error) -> String {
-    if let Some(db_error) = error.as_db_error() {
-        let detail = db_error.detail().unwrap_or("n/a");
-        let hint = db_error.hint().unwrap_or("n/a");
-        format!(
-            "{prefix}: {} (sqlstate={} severity={} detail={} hint={})",
-            db_error.message(),
-            db_error.code().code(),
-            db_error.severity(),
-            detail,
-            hint
-        )
-    } else {
-        format!("{prefix}: {error}")
-    }
-}
 
 fn is_pg_type_typname_race(code: &str, message: &str, detail: &str) -> bool {
     code == "23505"
@@ -51,37 +35,6 @@ fn is_concurrent_create_table_race(error: &tokio_postgres::Error) -> bool {
     )
 }
 
-async fn acquire_ddl_lock(client: &Client, lock_name: &str) -> Result<(), String> {
-    client
-        .query_one(
-            "SELECT pg_advisory_lock(hashtext($1)::bigint)",
-            &[&lock_name],
-        )
-        .await
-        .map_err(|e| {
-            format_pg_error(
-                &format!("Failed to acquire DDL advisory lock '{lock_name}'"),
-                &e,
-            )
-        })?;
-    Ok(())
-}
-
-async fn release_ddl_lock(client: &Client, lock_name: &str) -> Result<(), String> {
-    client
-        .query_one(
-            "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
-            &[&lock_name],
-        )
-        .await
-        .map_err(|e| {
-            format_pg_error(
-                &format!("Failed to release DDL advisory lock '{lock_name}'"),
-                &e,
-            )
-        })?;
-    Ok(())
-}
 
 /// Bundles the mutable schema-tracking sets used during DDL orchestration.
 pub(crate) struct SchemaState {
@@ -204,9 +157,7 @@ impl SchemaState {
         }
 
         let lock_name = format!("rb:ddl:schema:{target_schema}");
-        acquire_ddl_lock(client, &lock_name).await?;
-
-        let result = async {
+        crate::pg_error::with_ddl_lock(client, &lock_name, || async {
             let create_schema = format!(
                 "CREATE SCHEMA IF NOT EXISTS {}",
                 quote_identifier(target_schema)
@@ -246,16 +197,8 @@ impl SchemaState {
             }
 
             Ok(())
-        }
-        .await;
-
-        let unlock_result = release_ddl_lock(client, &lock_name).await;
-        match (result, unlock_result) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(err), Ok(())) => Err(err),
-            (Ok(()), Err(unlock_err)) => Err(unlock_err),
-            (Err(err), Err(_unlock_err)) => Err(err),
-        }
+        })
+        .await
     }
 }
 

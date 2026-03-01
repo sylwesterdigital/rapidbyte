@@ -7,6 +7,14 @@ pub enum StateError {
     #[error("state backend error: {0}")]
     Backend(Box<dyn std::error::Error + Send + Sync>),
 
+    /// Backend failure with operation context (preserves error source chain).
+    #[error("{context}: {source}")]
+    BackendContext {
+        context: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     /// File-system I/O failure (e.g. creating the database directory).
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
@@ -23,13 +31,16 @@ impl StateError {
         Self::Backend(Box::new(err))
     }
 
-    /// Wrap backend errors with operation context for easier diagnosis.
+    /// Wrap backend errors with operation context, preserving the error chain.
     #[must_use]
     pub fn backend_context(
         context: &str,
         err: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
-        Self::Backend(Box::new(std::io::Error::other(format!("{context}: {err}"))))
+        Self::BackendContext {
+            context: context.to_string(),
+            source: Box::new(err),
+        }
     }
 }
 

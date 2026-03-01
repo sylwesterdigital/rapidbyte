@@ -37,6 +37,7 @@ use crate::socket::{
 use crate::socket::{socket_poll_timeout_ms, wait_socket_ready, SocketInterest};
 
 const MAX_SOCKET_READ_BYTES: u64 = 64 * 1024;
+const MAX_STATE_KEY_LEN: usize = 1024;
 const CHECKPOINT_KIND_SOURCE: u32 = 0;
 const CHECKPOINT_KIND_DEST: u32 = 1;
 const CHECKPOINT_KIND_TRANSFORM: u32 = 2;
@@ -400,18 +401,15 @@ impl ComponentHostState {
             ));
         }
 
-        let compress_start = Instant::now();
-        let payload: bytes::Bytes = if let Some(codec) = self.batch.compression {
-            crate::compression::compress_bytes(codec, &payload)
-                .map_err(|e| ConnectorError::internal("COMPRESS_FAILED", e.to_string()))?
-        } else {
-            payload
-        };
-        let compress_elapsed_nanos = if self.batch.compression.is_some() {
-            compress_start.elapsed().as_nanos() as u64
-        } else {
-            0
-        };
+        let (payload, compress_elapsed_nanos): (bytes::Bytes, u64) =
+            if let Some(codec) = self.batch.compression {
+                let start = Instant::now();
+                let compressed = crate::compression::compress_bytes(codec, &payload)
+                    .map_err(|e| ConnectorError::internal("COMPRESS_FAILED", e.to_string()))?;
+                (compressed, start.elapsed().as_nanos() as u64)
+            } else {
+                (payload, 0)
+            };
 
         let sender =
             self.batch.sender.as_ref().ok_or_else(|| {
@@ -451,19 +449,16 @@ impl ComponentHostState {
             Frame::EndStream => return Ok(None),
         };
 
-        let decompress_start = Instant::now();
-        let payload: bytes::Bytes = if let Some(codec) = self.batch.compression {
-            crate::compression::decompress(codec, &payload)
-                .map_err(|e| ConnectorError::internal("DECOMPRESS_FAILED", e.to_string()))?
-                .into()
-        } else {
-            payload // Bytes, zero-copy
-        };
-        let decompress_elapsed_nanos = if self.batch.compression.is_some() {
-            decompress_start.elapsed().as_nanos() as u64
-        } else {
-            0
-        };
+        let (payload, decompress_elapsed_nanos): (bytes::Bytes, u64) =
+            if let Some(codec) = self.batch.compression {
+                let start = Instant::now();
+                let decompressed = crate::compression::decompress(codec, &payload)
+                    .map_err(|e| ConnectorError::internal("DECOMPRESS_FAILED", e.to_string()))?
+                    .into();
+                (decompressed, start.elapsed().as_nanos() as u64)
+            } else {
+                (payload, 0) // Bytes, zero-copy
+            };
 
         // Insert as sealed read-only frame
         let handle = self.frames.insert_sealed(payload);
@@ -492,25 +487,8 @@ impl ComponentHostState {
         scope: u32,
         key: String,
     ) -> Result<Option<String>, ConnectorError> {
-        if key.len() > 1024 {
-            return Err(ConnectorError::config(
-                "KEY_TOO_LONG",
-                format!("Key length {} exceeds 1024", key.len()),
-            ));
-        }
-
-        let scope = match scope {
-            0 => StateScope::Pipeline,
-            1 => StateScope::Stream,
-            2 => StateScope::ConnectorInstance,
-            _ => {
-                return Err(ConnectorError::config(
-                    "INVALID_SCOPE",
-                    format!("Invalid scope: {scope}"),
-                ))
-            }
-        };
-
+        validate_state_key(&key)?;
+        let scope = parse_state_scope(scope)?;
         let scoped_key = self.scoped_state_key(scope, &key);
         self.identity
             .state_backend
@@ -525,25 +503,8 @@ impl ComponentHostState {
         key: String,
         value: String,
     ) -> Result<(), ConnectorError> {
-        if key.len() > 1024 {
-            return Err(ConnectorError::config(
-                "KEY_TOO_LONG",
-                format!("Key length {} exceeds 1024", key.len()),
-            ));
-        }
-
-        let scope = match scope {
-            0 => StateScope::Pipeline,
-            1 => StateScope::Stream,
-            2 => StateScope::ConnectorInstance,
-            _ => {
-                return Err(ConnectorError::config(
-                    "INVALID_SCOPE",
-                    format!("Invalid scope: {scope}"),
-                ))
-            }
-        };
-
+        validate_state_key(&key)?;
+        let scope = parse_state_scope(scope)?;
         let scoped_key = self.scoped_state_key(scope, &key);
         let cursor = CursorState {
             cursor_field: Some(key),
@@ -568,25 +529,8 @@ impl ComponentHostState {
         expected: Option<String>,
         new_value: String,
     ) -> Result<bool, ConnectorError> {
-        if key.len() > 1024 {
-            return Err(ConnectorError::config(
-                "KEY_TOO_LONG",
-                format!("Key length {} exceeds 1024", key.len()),
-            ));
-        }
-
-        let scope = match scope {
-            0 => StateScope::Pipeline,
-            1 => StateScope::Stream,
-            2 => StateScope::ConnectorInstance,
-            _ => {
-                return Err(ConnectorError::config(
-                    "INVALID_SCOPE",
-                    format!("Invalid scope: {scope}"),
-                ))
-            }
-        };
-
+        validate_state_key(&key)?;
+        let scope = parse_state_scope(scope)?;
         let scoped_key = self.scoped_state_key(scope, &key);
         self.identity
             .state_backend
@@ -611,10 +555,15 @@ impl ComponentHostState {
             pipeline = self.identity.pipeline.as_str(),
             stream = %self.current_stream(),
             "Received checkpoint: {}",
-            serde_json::to_string(&envelope).unwrap_or_default()
+            payload_json
         );
 
-        let payload = envelope.get("payload").cloned().unwrap_or(envelope.clone());
+        let payload = match envelope {
+            serde_json::Value::Object(mut map) => map
+                .remove("payload")
+                .unwrap_or(serde_json::Value::Object(map)),
+            other => other,
+        };
         match kind {
             CHECKPOINT_KIND_SOURCE => {
                 if let Ok(cp) = serde_json::from_value::<Checkpoint>(payload) {
@@ -652,10 +601,15 @@ impl ComponentHostState {
             pipeline = self.identity.pipeline.as_str(),
             stream = %self.current_stream(),
             "Received metric: {}",
-            serde_json::to_string(&metric_json).unwrap_or_default()
+            payload_json
         );
 
-        let payload = metric_json.get("payload").cloned().unwrap_or(metric_json);
+        let payload = match metric_json {
+            serde_json::Value::Object(mut map) => map
+                .remove("payload")
+                .unwrap_or(serde_json::Value::Object(map)),
+            other => other,
+        };
         let metric = serde_json::from_value::<Metric>(payload)
             .map_err(|e| ConnectorError::internal("PARSE_METRIC", e.to_string()))?;
 
@@ -916,7 +870,9 @@ impl ComponentHostState {
             stream_name,
             record_json,
             error_message,
-            error_category: parse_error_category(&error_category),
+            error_category: error_category
+                .parse::<ErrorCategory>()
+                .unwrap_or(ErrorCategory::Internal),
             failed_at: Timestamp::new(Utc::now().to_rfc3339()),
         });
         Ok(())
@@ -953,18 +909,25 @@ fn lock_mutex<'a, T>(
         .map_err(|_| ConnectorError::internal("MUTEX_POISONED", format!("{name} mutex poisoned")))
 }
 
-fn parse_error_category(raw: &str) -> ErrorCategory {
-    match raw {
-        "config" => ErrorCategory::Config,
-        "auth" => ErrorCategory::Auth,
-        "permission" => ErrorCategory::Permission,
-        "rate_limit" => ErrorCategory::RateLimit,
-        "transient_network" => ErrorCategory::TransientNetwork,
-        "transient_db" => ErrorCategory::TransientDb,
-        "data" => ErrorCategory::Data,
-        "schema" => ErrorCategory::Schema,
-        "frame" => ErrorCategory::Frame,
-        _ => ErrorCategory::Internal,
+fn validate_state_key(key: &str) -> Result<(), ConnectorError> {
+    if key.len() > MAX_STATE_KEY_LEN {
+        return Err(ConnectorError::config(
+            "KEY_TOO_LONG",
+            format!("Key length {} exceeds {MAX_STATE_KEY_LEN}", key.len()),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_state_scope(scope: u32) -> Result<StateScope, ConnectorError> {
+    match scope {
+        0 => Ok(StateScope::Pipeline),
+        1 => Ok(StateScope::Stream),
+        2 => Ok(StateScope::ConnectorInstance),
+        _ => Err(ConnectorError::config(
+            "INVALID_SCOPE",
+            format!("Invalid scope: {scope}"),
+        )),
     }
 }
 
@@ -1052,14 +1015,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_error_category_known() {
-        assert_eq!(parse_error_category("config"), ErrorCategory::Config);
-        assert_eq!(parse_error_category("schema"), ErrorCategory::Schema);
+    fn error_category_from_str_known() {
+        assert_eq!("config".parse::<ErrorCategory>(), Ok(ErrorCategory::Config));
+        assert_eq!("schema".parse::<ErrorCategory>(), Ok(ErrorCategory::Schema));
     }
 
     #[test]
-    fn parse_error_category_unknown() {
-        assert_eq!(parse_error_category("bogus"), ErrorCategory::Internal);
+    fn error_category_from_str_unknown() {
+        assert!("bogus".parse::<ErrorCategory>().is_err());
     }
 
     #[test]

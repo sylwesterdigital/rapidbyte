@@ -13,6 +13,27 @@ use arrow::record_batch::RecordBatch;
 
 use crate::error::ConnectorError;
 
+/// Write a `RecordBatch` as Arrow IPC stream format into any `Write` sink.
+///
+/// # Errors
+///
+/// Returns `Err` if IPC writer initialization, encoding, or finishing fails.
+pub fn encode_ipc_into<W: std::io::Write>(
+    batch: &RecordBatch,
+    writer: &mut W,
+) -> Result<(), ConnectorError> {
+    let mut ipc_writer = StreamWriter::try_new(writer, batch.schema().as_ref()).map_err(|e| {
+        ConnectorError::internal("ARROW_IPC_ENCODE", format!("IPC writer init: {e}"))
+    })?;
+    ipc_writer
+        .write(batch)
+        .map_err(|e| ConnectorError::internal("ARROW_IPC_ENCODE", format!("IPC write: {e}")))?;
+    ipc_writer
+        .finish()
+        .map_err(|e| ConnectorError::internal("ARROW_IPC_ENCODE", format!("IPC finish: {e}")))?;
+    Ok(())
+}
+
 /// Encode a RecordBatch into Arrow IPC stream bytes.
 ///
 /// # Errors
@@ -21,15 +42,7 @@ use crate::error::ConnectorError;
 pub fn encode_ipc(batch: &RecordBatch) -> Result<Vec<u8>, ConnectorError> {
     let capacity = batch.get_array_memory_size() + 1024;
     let mut buf = Vec::with_capacity(capacity);
-    let mut writer = StreamWriter::try_new(&mut buf, batch.schema().as_ref()).map_err(|e| {
-        ConnectorError::internal("ARROW_IPC_ENCODE", format!("IPC writer init: {e}"))
-    })?;
-    writer
-        .write(batch)
-        .map_err(|e| ConnectorError::internal("ARROW_IPC_ENCODE", format!("IPC write: {e}")))?;
-    writer
-        .finish()
-        .map_err(|e| ConnectorError::internal("ARROW_IPC_ENCODE", format!("IPC finish: {e}")))?;
+    encode_ipc_into(batch, &mut buf)?;
     Ok(buf)
 }
 

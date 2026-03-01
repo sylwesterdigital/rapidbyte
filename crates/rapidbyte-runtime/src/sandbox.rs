@@ -23,11 +23,20 @@ pub struct SandboxOverrides {
 /// When neither provides a value, returns `None`.
 #[must_use]
 pub fn resolve_min_limit(manifest: Option<u64>, pipeline: Option<u64>) -> Option<u64> {
-    match (manifest, pipeline) {
-        (Some(m), Some(p)) => Some(m.min(p)),
-        (Some(m), None) => Some(m),
-        (None, Some(p)) => Some(p),
-        (None, None) => None,
+    [manifest, pipeline].into_iter().flatten().min()
+}
+
+fn intersect_string_lists(manifest: &[String], pipeline: Option<&[String]>) -> Vec<String> {
+    match pipeline {
+        None => manifest.to_vec(),
+        Some(allowed) => {
+            let allowed_set: HashSet<&str> = allowed.iter().map(String::as_str).collect();
+            manifest
+                .iter()
+                .filter(|item| allowed_set.contains(item.as_str()))
+                .cloned()
+                .collect()
+        }
     }
 }
 
@@ -37,17 +46,7 @@ pub fn intersect_env_vars(
     manifest_vars: &[String],
     pipeline_vars: Option<&[String]>,
 ) -> Vec<String> {
-    match pipeline_vars {
-        None => manifest_vars.to_vec(),
-        Some(allowed) => {
-            let allowed_set: HashSet<&str> = allowed.iter().map(String::as_str).collect();
-            manifest_vars
-                .iter()
-                .filter(|v| allowed_set.contains(v.as_str()))
-                .cloned()
-                .collect()
-        }
-    }
+    intersect_string_lists(manifest_vars, pipeline_vars)
 }
 
 /// Intersect manifest-declared preopens with pipeline-allowed preopens.
@@ -56,17 +55,7 @@ pub fn intersect_preopens(
     manifest_preopens: &[String],
     pipeline_preopens: Option<&[String]>,
 ) -> Vec<String> {
-    match pipeline_preopens {
-        None => manifest_preopens.to_vec(),
-        Some(allowed) => {
-            let allowed_set: HashSet<&str> = allowed.iter().map(String::as_str).collect();
-            manifest_preopens
-                .iter()
-                .filter(|p| allowed_set.contains(p.as_str()))
-                .cloned()
-                .collect()
-        }
-    }
+    intersect_string_lists(manifest_preopens, pipeline_preopens)
 }
 
 /// Build a WASI context with network disabled; connectors use host `connect-tcp`.

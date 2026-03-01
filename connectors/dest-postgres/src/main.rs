@@ -9,6 +9,7 @@ mod copy;
 mod ddl;
 mod decode;
 mod insert;
+mod pg_error;
 mod type_map;
 mod watermark;
 mod writer;

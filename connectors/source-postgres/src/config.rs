@@ -69,13 +69,6 @@ impl Config {
         Ok(())
     }
 
-    #[must_use]
-    pub fn connection_string(&self) -> String {
-        format!(
-            "host={} port={} user={} password={} dbname={}",
-            self.host, self.port, self.user, self.password, self.database
-        )
-    }
 }
 
 #[cfg(test)]

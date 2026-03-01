@@ -35,9 +35,39 @@ pub enum ErrorCategory {
     Frame,
 }
 
-impl fmt::Display for ErrorCategory {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
+impl ErrorCategory {
+    /// Default error scope for this category.
+    #[must_use]
+    pub fn default_scope(self) -> ErrorScope {
+        match self {
+            Self::Data => ErrorScope::Record,
+            Self::Frame => ErrorScope::Batch,
+            _ => ErrorScope::Stream,
+        }
+    }
+
+    /// Whether errors of this category are retryable by default.
+    #[must_use]
+    pub fn default_retryable(self) -> bool {
+        matches!(
+            self,
+            Self::RateLimit | Self::TransientNetwork | Self::TransientDb
+        )
+    }
+
+    /// Default backoff class for this category.
+    #[must_use]
+    pub fn default_backoff(self) -> BackoffClass {
+        match self {
+            Self::RateLimit => BackoffClass::Slow,
+            _ => BackoffClass::Normal,
+        }
+    }
+
+    /// Wire-format string for storage and display.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
             Self::Config => "config",
             Self::Auth => "auth",
             Self::Permission => "permission",
@@ -48,8 +78,33 @@ impl fmt::Display for ErrorCategory {
             Self::Schema => "schema",
             Self::Internal => "internal",
             Self::Frame => "frame",
-        };
-        f.write_str(s)
+        }
+    }
+}
+
+impl fmt::Display for ErrorCategory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ErrorCategory {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "config" => Ok(Self::Config),
+            "auth" => Ok(Self::Auth),
+            "permission" => Ok(Self::Permission),
+            "rate_limit" => Ok(Self::RateLimit),
+            "transient_network" => Ok(Self::TransientNetwork),
+            "transient_db" => Ok(Self::TransientDb),
+            "data" => Ok(Self::Data),
+            "schema" => Ok(Self::Schema),
+            "internal" => Ok(Self::Internal),
+            "frame" => Ok(Self::Frame),
+            _ => Err(()),
+        }
     }
 }
 
@@ -139,22 +194,21 @@ pub struct ConnectorError {
 }
 
 impl ConnectorError {
-    fn new(
+    /// Build an error using the category's default scope, retryable, and backoff.
+    fn from_category(
         category: ErrorCategory,
-        scope: ErrorScope,
-        retryable: bool,
-        backoff_class: BackoffClass,
         code: impl Into<String>,
         message: impl Into<String>,
     ) -> Self {
+        let retryable = category.default_retryable();
         Self {
             category,
-            scope,
+            scope: category.default_scope(),
             code: code.into(),
             message: message.into(),
             retryable,
             retry_after_ms: None,
-            backoff_class,
+            backoff_class: category.default_backoff(),
             safe_to_retry: retryable,
             commit_state: None,
             details: None,
@@ -164,40 +218,19 @@ impl ConnectorError {
     /// Configuration error (not retryable).
     #[must_use]
     pub fn config(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(
-            ErrorCategory::Config,
-            ErrorScope::Stream,
-            false,
-            BackoffClass::Normal,
-            code,
-            message,
-        )
+        Self::from_category(ErrorCategory::Config, code, message)
     }
 
     /// Authentication error (not retryable).
     #[must_use]
     pub fn auth(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(
-            ErrorCategory::Auth,
-            ErrorScope::Stream,
-            false,
-            BackoffClass::Normal,
-            code,
-            message,
-        )
+        Self::from_category(ErrorCategory::Auth, code, message)
     }
 
     /// Permission error (not retryable).
     #[must_use]
     pub fn permission(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(
-            ErrorCategory::Permission,
-            ErrorScope::Stream,
-            false,
-            BackoffClass::Normal,
-            code,
-            message,
-        )
+        Self::from_category(ErrorCategory::Permission, code, message)
     }
 
     /// Rate limit error (retryable, slow backoff).
@@ -207,14 +240,7 @@ impl ConnectorError {
         message: impl Into<String>,
         retry_after_ms: Option<u64>,
     ) -> Self {
-        let mut err = Self::new(
-            ErrorCategory::RateLimit,
-            ErrorScope::Stream,
-            true,
-            BackoffClass::Slow,
-            code,
-            message,
-        );
+        let mut err = Self::from_category(ErrorCategory::RateLimit, code, message);
         err.retry_after_ms = retry_after_ms;
         err
     }
@@ -222,79 +248,37 @@ impl ConnectorError {
     /// Transient network error (retryable, normal backoff).
     #[must_use]
     pub fn transient_network(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(
-            ErrorCategory::TransientNetwork,
-            ErrorScope::Stream,
-            true,
-            BackoffClass::Normal,
-            code,
-            message,
-        )
+        Self::from_category(ErrorCategory::TransientNetwork, code, message)
     }
 
     /// Transient database error (retryable, normal backoff).
     #[must_use]
     pub fn transient_db(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(
-            ErrorCategory::TransientDb,
-            ErrorScope::Stream,
-            true,
-            BackoffClass::Normal,
-            code,
-            message,
-        )
+        Self::from_category(ErrorCategory::TransientDb, code, message)
     }
 
     /// Data validation error (not retryable, record scope).
     #[must_use]
     pub fn data(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(
-            ErrorCategory::Data,
-            ErrorScope::Record,
-            false,
-            BackoffClass::Normal,
-            code,
-            message,
-        )
+        Self::from_category(ErrorCategory::Data, code, message)
     }
 
     /// Schema mismatch error (not retryable).
     #[must_use]
     pub fn schema(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(
-            ErrorCategory::Schema,
-            ErrorScope::Stream,
-            false,
-            BackoffClass::Normal,
-            code,
-            message,
-        )
+        Self::from_category(ErrorCategory::Schema, code, message)
     }
 
     /// Internal connector error (not retryable).
     #[must_use]
     pub fn internal(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(
-            ErrorCategory::Internal,
-            ErrorScope::Stream,
-            false,
-            BackoffClass::Normal,
-            code,
-            message,
-        )
+        Self::from_category(ErrorCategory::Internal, code, message)
     }
 
     /// Frame lifecycle error (not retryable).
     #[must_use]
     pub fn frame(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(
-            ErrorCategory::Frame,
-            ErrorScope::Batch,
-            false,
-            BackoffClass::Normal,
-            code,
-            message,
-        )
+        Self::from_category(ErrorCategory::Frame, code, message)
     }
 
     /// Attach structured diagnostic details.
@@ -381,5 +365,29 @@ mod tests {
     fn display_format() {
         let err = ConnectorError::config("BAD_PORT", "port must be positive");
         assert_eq!(err.to_string(), "[config] BAD_PORT: port must be positive");
+    }
+
+    #[test]
+    fn error_category_from_str_roundtrips_with_as_str() {
+        let categories = [
+            ErrorCategory::Config,
+            ErrorCategory::Auth,
+            ErrorCategory::Permission,
+            ErrorCategory::RateLimit,
+            ErrorCategory::TransientNetwork,
+            ErrorCategory::TransientDb,
+            ErrorCategory::Data,
+            ErrorCategory::Schema,
+            ErrorCategory::Internal,
+            ErrorCategory::Frame,
+        ];
+        for cat in categories {
+            assert_eq!(cat.as_str().parse::<ErrorCategory>(), Ok(cat));
+        }
+    }
+
+    #[test]
+    fn error_category_from_str_unknown_returns_err() {
+        assert!("unknown_variant".parse::<ErrorCategory>().is_err());
     }
 }

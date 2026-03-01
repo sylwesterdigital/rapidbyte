@@ -36,7 +36,6 @@ pub trait Source: Sized {
         config: &Self::Config,
         ctx: &Context,
     ) -> Result<ValidationResult, ConnectorError> {
-        let _ = ctx;
         default_validation(config, ctx)
     }
 
@@ -64,7 +63,6 @@ pub trait Destination: Sized {
         config: &Self::Config,
         ctx: &Context,
     ) -> Result<ValidationResult, ConnectorError> {
-        let _ = ctx;
         default_validation(config, ctx)
     }
 
@@ -90,7 +88,6 @@ pub trait Transform: Sized {
         config: &Self::Config,
         ctx: &Context,
     ) -> Result<ValidationResult, ConnectorError> {
-        let _ = ctx;
         default_validation(config, ctx)
     }
 

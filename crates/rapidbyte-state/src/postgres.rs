@@ -15,13 +15,13 @@ use crate::backend::StateBackend;
 use crate::error::{self, StateError};
 
 /// Idempotent DDL for state tables (`PostgreSQL` dialect).
-const CREATE_TABLES: &str = r"
+const CREATE_TABLES: &str = r#"
 CREATE TABLE IF NOT EXISTS sync_cursors (
     pipeline TEXT NOT NULL,
     stream TEXT NOT NULL,
     cursor_field TEXT,
     cursor_value TEXT,
-    updated_at TEXT NOT NULL DEFAULT (now()::text),
+    updated_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
     PRIMARY KEY (pipeline, stream)
 );
 
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     pipeline TEXT NOT NULL,
     stream TEXT NOT NULL,
     status TEXT NOT NULL,
-    started_at TEXT NOT NULL DEFAULT (now()::text),
+    started_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
     finished_at TEXT,
     records_read BIGINT DEFAULT 0,
     records_written BIGINT DEFAULT 0,
@@ -47,11 +47,11 @@ CREATE TABLE IF NOT EXISTS dlq_records (
     error_message TEXT NOT NULL,
     error_category TEXT NOT NULL,
     failed_at TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (now()::text)
+    created_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_dlq_pipeline_run ON dlq_records (pipeline, run_id);
-";
+"#;
 
 /// `PostgreSQL`-backed state storage.
 ///
@@ -168,7 +168,7 @@ impl StateBackend for PostgresStateBackend {
         let mut client = self.lock_client()?;
         client
             .execute(
-                "UPDATE sync_runs SET status = $1, finished_at = now()::text, \
+                "UPDATE sync_runs SET status = $1, finished_at = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), \
                  records_read = $2, records_written = $3, bytes_read = $4, error_message = $5 \
                  WHERE id = $6",
                 &[
@@ -242,9 +242,7 @@ impl StateBackend for PostgresStateBackend {
             )
             .map_err(|e| StateError::backend_context("insert_dlq_records: prepare", e))?;
 
-        let mut count = 0u64;
         for record in records {
-            let error_category = record.error_category.to_string();
             tx.execute(
                 &stmt,
                 &[
@@ -253,17 +251,16 @@ impl StateBackend for PostgresStateBackend {
                     &record.stream_name.as_str(),
                     &record.record_json.as_str(),
                     &record.error_message.as_str(),
-                    &error_category.as_str(),
+                    &record.error_category.as_str(),
                     &record.failed_at.as_str(),
                 ],
             )
             .map_err(|e| StateError::backend_context("insert_dlq_records: execute", e))?;
-            count += 1;
         }
         tx.commit()
             .map_err(|e| StateError::backend_context("insert_dlq_records: commit", e))?;
 
-        Ok(count)
+        Ok(records.len() as u64)
     }
 }
 

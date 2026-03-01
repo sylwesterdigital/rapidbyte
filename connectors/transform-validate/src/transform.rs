@@ -80,8 +80,14 @@ pub async fn run(
                     }
                     DataErrorPolicy::Skip => {}
                     DataErrorPolicy::Dlq => {
-                        for invalid in &evaluation.invalid_rows {
-                            let record_json = row_to_json(batch, invalid.row_index)?;
+                        let invalid_indices: Vec<u32> = evaluation
+                            .invalid_rows
+                            .iter()
+                            .map(|r| r.row_index as u32)
+                            .collect();
+                        let dlq_batch = select_rows(batch, &invalid_indices)?;
+                        for (i, invalid) in evaluation.invalid_rows.iter().enumerate() {
+                            let record_json = row_to_json_from_batch(&dlq_batch, i)?;
                             ctx.emit_dlq_record(
                                 &record_json,
                                 &invalid.message,
@@ -178,23 +184,30 @@ fn evaluate_batch(batch: &RecordBatch, config: &CompiledConfig) -> BatchEvaluati
     }
 }
 
+struct UniqueFieldState {
+    keys: Vec<String>,
+    counts: HashMap<String, usize>,
+}
+
 fn build_unique_counts(
     batch: &RecordBatch,
     config: &CompiledConfig,
     field_to_index: &HashMap<String, usize>,
-) -> HashMap<String, HashMap<String, usize>> {
-    let mut unique_counts: HashMap<String, HashMap<String, usize>> = HashMap::new();
+) -> HashMap<String, UniqueFieldState> {
+    let mut unique_counts: HashMap<String, UniqueFieldState> = HashMap::new();
     for rule in &config.rules {
         if let CompiledRule::Unique { field } = rule {
             let mut counts = HashMap::new();
+            let mut keys = Vec::with_capacity(batch.num_rows());
             if let Some(index) = field_to_index.get(field) {
                 let column = batch.column(*index);
                 for row in 0..batch.num_rows() {
                     let key = unique_key(column.as_ref(), row);
-                    *counts.entry(key).or_insert(0) += 1;
+                    *counts.entry(key.clone()).or_insert(0) += 1;
+                    keys.push(key);
                 }
             }
-            unique_counts.insert(field.clone(), counts);
+            unique_counts.insert(field.clone(), UniqueFieldState { keys, counts });
         }
     }
     unique_counts
@@ -205,7 +218,7 @@ fn evaluate_rule(
     batch: &RecordBatch,
     row: usize,
     field_to_index: &HashMap<String, usize>,
-    unique_counts: &HashMap<String, HashMap<String, usize>>,
+    unique_counts: &HashMap<String, UniqueFieldState>,
 ) -> Option<RuleFailure> {
     match rule {
         CompiledRule::NotNull { field } => evaluate_not_null_rule(field, batch, row, field_to_index),
@@ -363,7 +376,7 @@ fn evaluate_unique_rule(
     batch: &RecordBatch,
     row: usize,
     field_to_index: &HashMap<String, usize>,
-    unique_counts: &HashMap<String, HashMap<String, usize>>,
+    unique_counts: &HashMap<String, UniqueFieldState>,
 ) -> Option<RuleFailure> {
     let Some(index) = field_to_index.get(field) else {
         return Some(RuleFailure {
@@ -372,15 +385,16 @@ fn evaluate_unique_rule(
             message: format!("assert_unique({field}) failed: column missing"),
         });
     };
-    let column = batch.column(*index);
-    let key = unique_key(column.as_ref(), row);
-    if unique_counts
-        .get(field)
-        .and_then(|counts| counts.get(&key))
+    let field_state = unique_counts.get(field)?;
+    let key = &field_state.keys[row];
+    if field_state
+        .counts
+        .get(key.as_str())
         .copied()
         .unwrap_or_default()
         > 1
     {
+        let column = batch.column(*index);
         return Some(RuleFailure {
             rule: "unique",
             field: field.to_string(),
@@ -443,7 +457,7 @@ fn select_rows(batch: &RecordBatch, indices: &[u32]) -> Result<RecordBatch, Conn
     })
 }
 
-fn row_to_json(batch: &RecordBatch, row: usize) -> Result<String, ConnectorError> {
+fn row_to_json_from_batch(batch: &RecordBatch, row: usize) -> Result<String, ConnectorError> {
     let single = select_rows(batch, &[row as u32])?;
     let mut writer = LineDelimitedWriter::new(Vec::new());
     writer.write_batches(&[&single]).map_err(|e| {

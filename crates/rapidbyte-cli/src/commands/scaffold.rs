@@ -35,9 +35,7 @@ pub fn run(name: &str, output: Option<&str>) -> Result<()> {
     } else if name.starts_with("dest-") {
         Role::Destination
     } else {
-        bail!(
-            "Connector name must start with 'source-' or 'dest-', got '{name}'"
-        );
+        bail!("Connector name must start with 'source-' or 'dest-', got '{name}'");
     };
 
     // Compute output directory

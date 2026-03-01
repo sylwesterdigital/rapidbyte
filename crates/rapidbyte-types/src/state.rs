@@ -124,8 +124,10 @@ pub struct RunStats {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CursorState {
     /// Column used for incremental sync (e.g. `"updated_at"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor_field: Option<String>,
     /// Last-seen value of the cursor column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor_value: Option<String>,
     /// ISO-8601 UTC timestamp of when this cursor was last written.
     pub updated_at: String,

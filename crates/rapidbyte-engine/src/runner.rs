@@ -287,137 +287,135 @@ pub(crate) fn run_destination_stream(
     let host_state = builder.build().map_err(PipelineError::Infrastructure)?;
 
     let timeout = overrides.and_then(|o| o.timeout_seconds);
-    (|| {
-        let mut store = module.new_store(host_state, timeout);
-        let linker = create_component_linker(&module.engine, "destination", |linker| {
-            dest_bindings::RapidbyteDestination::add_to_linker::<_, HasSelf<_>>(linker, |state| {
-                state
-            })
-            .context("Failed to add rapidbyte destination host imports")?;
-            Ok(())
+    let mut store = module.new_store(host_state, timeout);
+    let linker = create_component_linker(&module.engine, "destination", |linker| {
+        dest_bindings::RapidbyteDestination::add_to_linker::<_, HasSelf<_>>(linker, |state| {
+            state
         })
+        .context("Failed to add rapidbyte destination host imports")?;
+        Ok(())
+    })
+    .map_err(PipelineError::Infrastructure)?;
+    let bindings = dest_bindings::RapidbyteDestination::instantiate(
+        &mut store,
+        &module.component,
+        &linker,
+    )
+    .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
+
+    let iface = bindings.rapidbyte_connector_destination();
+    let vm_setup_secs = vm_setup_start.elapsed().as_secs_f64();
+
+    let dest_config_json = serde_json::to_string(dest_config)
+        .context("Failed to serialize destination config")
         .map_err(PipelineError::Infrastructure)?;
-        let bindings = dest_bindings::RapidbyteDestination::instantiate(
-            &mut store,
-            &module.component,
-            &linker,
-        )
+
+    tracing::info!(
+        connector = connector_id,
+        version = connector_version,
+        stream = stream_ctx.stream_name,
+        "Opening destination connector for stream"
+    );
+    let session = iface
+        .call_open(&mut store, &dest_config_json)
+        .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?
+        .map_err(|err| PipelineError::Connector(dest_error_to_sdk(err)))?;
+
+    let recv_start = Instant::now();
+    let ctx_json = serde_json::to_string(stream_ctx)
+        .context("Failed to serialize StreamContext")
+        .map_err(PipelineError::Infrastructure)?;
+
+    tracing::info!(
+        stream = stream_ctx.stream_name,
+        "Starting destination write"
+    );
+    let run_request = dest_bindings::rapidbyte::connector::types::RunRequest {
+        phase: dest_bindings::rapidbyte::connector::types::RunPhase::Write,
+        stream_context_json: ctx_json,
+        dry_run: false,
+        max_records: None,
+    };
+    let run_result = iface
+        .call_run(&mut store, session, &run_request)
         .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
 
-        let iface = bindings.rapidbyte_connector_destination();
-        let vm_setup_secs = vm_setup_start.elapsed().as_secs_f64();
-
-        let dest_config_json = serde_json::to_string(dest_config)
-            .context("Failed to serialize destination config")
-            .map_err(PipelineError::Infrastructure)?;
-
-        tracing::info!(
-            connector = connector_id,
-            version = connector_version,
-            stream = stream_ctx.stream_name,
-            "Opening destination connector for stream"
-        );
-        let session = iface
-            .call_open(&mut store, &dest_config_json)
-            .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?
-            .map_err(|err| PipelineError::Connector(dest_error_to_sdk(err)))?;
-
-        let recv_start = Instant::now();
-        let ctx_json = serde_json::to_string(stream_ctx)
-            .context("Failed to serialize StreamContext")
-            .map_err(PipelineError::Infrastructure)?;
-
-        tracing::info!(
-            stream = stream_ctx.stream_name,
-            "Starting destination write"
-        );
-        let run_request = dest_bindings::rapidbyte::connector::types::RunRequest {
-            phase: dest_bindings::rapidbyte::connector::types::RunPhase::Write,
-            stream_context_json: ctx_json,
-            dry_run: false,
-            max_records: None,
-        };
-        let run_result = iface
-            .call_run(&mut store, session, &run_request)
-            .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
-
-        let summary = match run_result {
-            Ok(summary) => {
-                let Some(summary) = summary.write else {
-                    let _ = iface.call_close(&mut store, session);
-                    return Err(PipelineError::Infrastructure(anyhow::anyhow!(
-                        "destination run summary missing write section"
-                    )));
-                };
-                WriteSummary {
-                    records_written: summary.records_written,
-                    bytes_written: summary.bytes_written,
-                    batches_written: summary.batches_written,
-                    checkpoint_count: summary.checkpoint_count,
-                    records_failed: summary.records_failed,
-                    perf: None,
-                }
-            }
-            Err(err) => {
+    let summary = match run_result {
+        Ok(summary) => {
+            let Some(summary) = summary.write else {
                 let _ = iface.call_close(&mut store, session);
-                return Err(PipelineError::Connector(dest_error_to_sdk(err)));
+                return Err(PipelineError::Infrastructure(anyhow::anyhow!(
+                    "destination run summary missing write section"
+                )));
+            };
+            WriteSummary {
+                records_written: summary.records_written,
+                bytes_written: summary.bytes_written,
+                batches_written: summary.batches_written,
+                checkpoint_count: summary.checkpoint_count,
+                records_failed: summary.records_failed,
+                perf: None,
             }
-        };
-
-        tracing::info!(
-            stream = stream_ctx.stream_name,
-            records = summary.records_written,
-            bytes = summary.bytes_written,
-            "Destination write complete for stream"
-        );
-
-        {
-            let mut s = stats.lock().map_err(|_| {
-                PipelineError::Infrastructure(anyhow::anyhow!("run stats mutex poisoned"))
-            })?;
-            s.records_written += summary.records_written;
         }
+        Err(err) => {
+            let _ = iface.call_close(&mut store, session);
+            return Err(PipelineError::Connector(dest_error_to_sdk(err)));
+        }
+    };
 
-        let recv_secs = recv_start.elapsed().as_secs_f64();
+    tracing::info!(
+        stream = stream_ctx.stream_name,
+        records = summary.records_written,
+        bytes = summary.bytes_written,
+        "Destination write complete for stream"
+    );
 
-        tracing::info!(
-            connector = connector_id,
-            version = connector_version,
-            stream = stream_ctx.stream_name,
-            "Closing destination connector for stream"
-        );
-        handle_close_result(
-            iface.call_close(&mut store, session),
-            "Destination",
-            &stream_ctx.stream_name,
-            |err| dest_error_to_sdk(err).to_string(),
-        );
+    {
+        let mut s = stats.lock().map_err(|_| {
+            PipelineError::Infrastructure(anyhow::anyhow!("run stats mutex poisoned"))
+        })?;
+        s.records_written += summary.records_written;
+    }
 
-        let checkpoints = dest_checkpoints
-            .lock()
-            .map_err(|_| {
-                PipelineError::Infrastructure(anyhow::anyhow!(
-                    "destination checkpoint mutex poisoned"
-                ))
-            })?
-            .drain(..)
-            .collect::<Vec<_>>();
-        let dest_host_timings = dest_timings
-            .lock()
-            .map_err(|_| {
-                PipelineError::Infrastructure(anyhow::anyhow!("destination timing mutex poisoned"))
-            })?
-            .clone();
+    let recv_secs = recv_start.elapsed().as_secs_f64();
 
-        Ok(DestRunResult {
-            duration_secs: phase_start.elapsed().as_secs_f64(),
-            summary,
-            vm_setup_secs,
-            recv_secs,
-            checkpoints,
-            host_timings: dest_host_timings,
-        })
-    })()
+    tracing::info!(
+        connector = connector_id,
+        version = connector_version,
+        stream = stream_ctx.stream_name,
+        "Closing destination connector for stream"
+    );
+    handle_close_result(
+        iface.call_close(&mut store, session),
+        "Destination",
+        &stream_ctx.stream_name,
+        |err| dest_error_to_sdk(err).to_string(),
+    );
+
+    let checkpoints = dest_checkpoints
+        .lock()
+        .map_err(|_| {
+            PipelineError::Infrastructure(anyhow::anyhow!(
+                "destination checkpoint mutex poisoned"
+            ))
+        })?
+        .drain(..)
+        .collect::<Vec<_>>();
+    let dest_host_timings = dest_timings
+        .lock()
+        .map_err(|_| {
+            PipelineError::Infrastructure(anyhow::anyhow!("destination timing mutex poisoned"))
+        })?
+        .clone();
+
+    Ok(DestRunResult {
+        duration_secs: phase_start.elapsed().as_secs_f64(),
+        summary,
+        vm_setup_secs,
+        recv_secs,
+        checkpoints,
+        host_timings: dest_host_timings,
+    })
 }
 
 /// Run a transform connector for a single stream.

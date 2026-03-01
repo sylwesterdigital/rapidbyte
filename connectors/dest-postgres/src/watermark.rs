@@ -7,74 +7,18 @@
 use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 
-fn format_pg_error(prefix: &str, error: &tokio_postgres::Error) -> String {
-    if let Some(db_error) = error.as_db_error() {
-        let detail = db_error.detail().unwrap_or("n/a");
-        let hint = db_error.hint().unwrap_or("n/a");
-        format!(
-            "{prefix}: {} (sqlstate={} severity={} detail={} hint={})",
-            db_error.message(),
-            db_error.code().code(),
-            db_error.severity(),
-            detail,
-            hint
-        )
-    } else {
-        format!("{prefix}: {error}")
-    }
-}
+use crate::pg_error::format_pg_error;
 
 /// Build the fully-qualified watermarks table name for the given schema.
 fn watermarks_table(target_schema: &str) -> String {
     format!("{}.__rb_watermarks", quote_identifier(target_schema))
 }
 
-async fn with_ddl_lock<F, Fut, T>(client: &Client, lock_name: &str, f: F) -> Result<T, String>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<T, String>>,
-{
-    client
-        .query_one(
-            "SELECT pg_advisory_lock(hashtext($1)::bigint)",
-            &[&lock_name],
-        )
-        .await
-        .map_err(|e| {
-            format_pg_error(
-                &format!("Failed to acquire DDL advisory lock '{lock_name}'"),
-                &e,
-            )
-        })?;
-
-    let result = f().await;
-
-    let unlock_result = client
-        .query_one(
-            "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
-            &[&lock_name],
-        )
-        .await
-        .map_err(|e| {
-            format_pg_error(
-                &format!("Failed to release DDL advisory lock '{lock_name}'"),
-                &e,
-            )
-        });
-
-    match (result, unlock_result) {
-        (Ok(value), Ok(_)) => Ok(value),
-        (Err(err), Ok(_)) => Err(err),
-        (Ok(_), Err(unlock_err)) => Err(unlock_err),
-        (Err(err), Err(_unlock_err)) => Err(err),
-    }
-}
-
 /// Ensure the `__rb_watermarks` metadata table exists, creating the schema
 /// first if necessary.
 pub(crate) async fn ensure_table(client: &Client, target_schema: &str) -> Result<(), String> {
     let lock_name = format!("rb:ddl:schema:{target_schema}");
-    with_ddl_lock(client, &lock_name, || async {
+    crate::pg_error::with_ddl_lock(client, &lock_name, || async {
         let create_schema = format!(
             "CREATE SCHEMA IF NOT EXISTS {}",
             quote_identifier(target_schema)

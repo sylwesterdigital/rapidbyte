@@ -5,11 +5,8 @@ use rapidbyte_types::wire::SyncMode;
 
 use crate::config::types::{
     parse_byte_size, PipelineConfig, PipelineLimits, PipelineParallelism, PipelinePermissions,
-    PipelineWriteMode,
+    PipelineWriteMode, MAX_COPY_FLUSH_BYTES, MIN_COPY_FLUSH_BYTES,
 };
-
-const MIN_COPY_FLUSH_BYTES: usize = 1024 * 1024;
-const MAX_COPY_FLUSH_BYTES: usize = 32 * 1024 * 1024;
 
 /// Validate host patterns in `allowed_hosts` lists.
 /// Only `*.domain` single-level wildcards are supported.

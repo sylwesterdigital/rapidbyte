@@ -28,8 +28,7 @@ pub struct ManifestBuilder {
 }
 
 impl ManifestBuilder {
-    /// Start building a source connector manifest.
-    pub fn source(id: impl Into<String>) -> Self {
+    fn with_roles(id: impl Into<String>, roles: Roles) -> Self {
         Self {
             manifest: ConnectorManifest {
                 id: id.into(),
@@ -41,66 +40,50 @@ impl ManifestBuilder {
                 protocol_version: ProtocolVersion::V4,
                 permissions: Permissions::default(),
                 limits: ResourceLimits::default(),
-                roles: Roles {
-                    source: Some(SourceCapabilities {
-                        supported_sync_modes: vec![],
-                        features: vec![],
-                    }),
-                    ..Default::default()
-                },
+                roles,
                 config_schema: None,
             },
             rerun_files: vec!["build.rs".to_string()],
         }
+    }
+
+    /// Start building a source connector manifest.
+    pub fn source(id: impl Into<String>) -> Self {
+        Self::with_roles(
+            id,
+            Roles {
+                source: Some(SourceCapabilities {
+                    supported_sync_modes: vec![],
+                    features: vec![],
+                }),
+                ..Default::default()
+            },
+        )
     }
 
     /// Start building a destination connector manifest.
     pub fn destination(id: impl Into<String>) -> Self {
-        Self {
-            manifest: ConnectorManifest {
-                id: id.into(),
-                name: String::new(),
-                version: String::new(),
-                description: String::new(),
-                author: None,
-                license: None,
-                protocol_version: ProtocolVersion::V4,
-                permissions: Permissions::default(),
-                limits: ResourceLimits::default(),
-                roles: Roles {
-                    destination: Some(DestinationCapabilities {
-                        supported_write_modes: vec![],
-                        features: vec![],
-                    }),
-                    ..Default::default()
-                },
-                config_schema: None,
+        Self::with_roles(
+            id,
+            Roles {
+                destination: Some(DestinationCapabilities {
+                    supported_write_modes: vec![],
+                    features: vec![],
+                }),
+                ..Default::default()
             },
-            rerun_files: vec!["build.rs".to_string()],
-        }
+        )
     }
 
     /// Start building a transform connector manifest.
     pub fn transform(id: impl Into<String>) -> Self {
-        Self {
-            manifest: ConnectorManifest {
-                id: id.into(),
-                name: String::new(),
-                version: String::new(),
-                description: String::new(),
-                author: None,
-                license: None,
-                protocol_version: ProtocolVersion::V4,
-                permissions: Permissions::default(),
-                limits: ResourceLimits::default(),
-                roles: Roles {
-                    transform: Some(TransformCapabilities {}),
-                    ..Default::default()
-                },
-                config_schema: None,
+        Self::with_roles(
+            id,
+            Roles {
+                transform: Some(TransformCapabilities {}),
+                ..Default::default()
             },
-            rerun_files: vec!["build.rs".to_string()],
-        }
+        )
     }
 
     // -- Metadata ----------------------------------------------------

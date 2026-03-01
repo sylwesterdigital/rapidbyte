@@ -461,7 +461,6 @@ impl<'a> WriteSession<'a> {
 
         // Watermark resume: skip already-committed batches
         if self.watermark_records > 0 && self.cumulative_records < self.watermark_records {
-            let batch_rows: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
             self.cumulative_records += batch_rows;
             if self.cumulative_records <= self.watermark_records {
                 self.ctx.log(

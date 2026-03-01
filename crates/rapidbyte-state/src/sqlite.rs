@@ -110,7 +110,10 @@ impl SqliteStateBackend {
     /// Convert a `SQLite` datetime string to ISO-8601.
     fn sqlite_to_iso8601(raw: &str) -> String {
         NaiveDateTime::parse_from_str(raw, SQLITE_DATETIME_FMT).map_or_else(
-            |_| raw.to_string(),
+            |e| {
+                tracing::warn!(raw, %e, "failed to parse SQLite datetime, returning raw value");
+                raw.to_string()
+            },
             |ndt| format!("{}Z", ndt.format("%Y-%m-%dT%H:%M:%S")),
         )
     }
@@ -118,7 +121,10 @@ impl SqliteStateBackend {
     /// Convert an ISO-8601 string to `SQLite` datetime format.
     fn iso8601_to_sqlite(iso: &str) -> String {
         chrono::DateTime::parse_from_rfc3339(iso).map_or_else(
-            |_| iso.to_string(),
+            |e| {
+                tracing::warn!(iso, %e, "failed to parse ISO-8601 datetime, storing raw value");
+                iso.to_string()
+            },
             |dt| dt.format(SQLITE_DATETIME_FMT).to_string(),
         )
     }
@@ -313,7 +319,6 @@ impl StateBackend for SqliteStateBackend {
             )
             .map_err(|e| StateError::backend_context("insert_dlq_records: prepare", e))?;
 
-        let mut count = 0u64;
         for record in records {
             stmt.execute(rusqlite::params![
                 pipeline.as_str(),
@@ -321,17 +326,16 @@ impl StateBackend for SqliteStateBackend {
                 record.stream_name,
                 record.record_json,
                 record.error_message,
-                record.error_category.to_string(),
+                record.error_category.as_str(),
                 record.failed_at.as_str(),
             ])
             .map_err(|e| StateError::backend_context("insert_dlq_records: execute", e))?;
-            count += 1;
         }
         drop(stmt);
         tx.commit()
             .map_err(|e| StateError::backend_context("insert_dlq_records: commit", e))?;
 
-        Ok(count)
+        Ok(records.len() as u64)
     }
 }
 

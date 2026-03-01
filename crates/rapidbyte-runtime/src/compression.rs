@@ -54,13 +54,7 @@ pub fn decompress(codec: CompressionCodec, data: &[u8]) -> Result<Vec<u8>, Compr
 ///
 /// Returns an error if compression fails.
 pub fn compress_bytes(codec: CompressionCodec, data: &[u8]) -> Result<Bytes, CompressionError> {
-    match codec {
-        CompressionCodec::Lz4 => Ok(Bytes::from(lz4_flex::compress_prepend_size(data))),
-        CompressionCodec::Zstd => Ok(Bytes::from(
-            zstd::bulk::compress(data, ZSTD_COMPRESSION_LEVEL)
-                .map_err(CompressionError::ZstdCompress)?,
-        )),
-    }
+    compress(codec, data).map(Bytes::from)
 }
 
 #[cfg(test)]

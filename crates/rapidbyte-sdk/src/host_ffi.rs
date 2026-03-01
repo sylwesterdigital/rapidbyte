@@ -303,7 +303,7 @@ impl HostImports for WasmHostImports {
             stream_name,
             record_json,
             error_message,
-            &error_category.to_string(),
+            error_category.as_str(),
         )
         .map_err(from_component_error)
     }
@@ -468,17 +468,7 @@ pub fn emit_batch(batch: &RecordBatch) -> Result<(), ConnectorError> {
     // Stream IPC directly into host frame -- no guest Vec<u8>
     {
         let mut writer = crate::frame_writer::FrameWriter::new(handle, imports);
-        let mut ipc_writer =
-            arrow::ipc::writer::StreamWriter::try_new(&mut writer, batch.schema().as_ref())
-                .map_err(|e| {
-                    ConnectorError::internal("ARROW_IPC_ENCODE", format!("IPC writer init: {e}"))
-                })?;
-        ipc_writer
-            .write(batch)
-            .map_err(|e| ConnectorError::internal("ARROW_IPC_ENCODE", format!("IPC write: {e}")))?;
-        ipc_writer.finish().map_err(|e| {
-            ConnectorError::internal("ARROW_IPC_ENCODE", format!("IPC finish: {e}"))
-        })?;
+        crate::arrow::ipc::encode_ipc_into(batch, &mut writer)?;
     }
 
     imports.frame_seal(handle)?;

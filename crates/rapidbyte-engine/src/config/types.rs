@@ -4,8 +4,13 @@ use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use rapidbyte_types::compression::CompressionCodec;
-use rapidbyte_types::stream::{DataErrorPolicy, SchemaEvolutionPolicy};
+use rapidbyte_types::stream::{DataErrorPolicy, PartitionStrategy, SchemaEvolutionPolicy};
 use rapidbyte_types::wire::{SyncMode, WriteMode};
+
+/// Minimum allowed value for `pin_copy_flush_bytes` (1 MiB).
+pub(crate) const MIN_COPY_FLUSH_BYTES: usize = 1024 * 1024;
+/// Maximum allowed value for `pin_copy_flush_bytes` (32 MiB).
+pub(crate) const MAX_COPY_FLUSH_BYTES: usize = 32 * 1024 * 1024;
 
 const DEFAULT_STATE_BACKEND: StateBackendKind = StateBackendKind::Sqlite;
 const DEFAULT_MAX_MEMORY: &str = "256mb";
@@ -234,19 +239,12 @@ impl<'de> Deserialize<'de> for PipelineParallelism {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SourcePartitionMode {
-    Mod,
-    Range,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AutotuneConfig {
     pub enabled: bool,
     pub pin_parallelism: Option<u32>,
-    pub pin_source_partition_mode: Option<SourcePartitionMode>,
+    pub pin_source_partition_mode: Option<PartitionStrategy>,
     pub pin_copy_flush_bytes: Option<usize>,
 }
 
@@ -495,7 +493,7 @@ resources:
         assert_eq!(config.resources.autotune.pin_parallelism, Some(8));
         assert_eq!(
             config.resources.autotune.pin_source_partition_mode,
-            Some(SourcePartitionMode::Range)
+            Some(PartitionStrategy::Range)
         );
         assert_eq!(
             config.resources.autotune.pin_copy_flush_bytes,

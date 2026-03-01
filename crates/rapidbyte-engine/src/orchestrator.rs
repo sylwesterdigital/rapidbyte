@@ -1318,7 +1318,7 @@ async fn finalize_run(
     attempt: u32,
     start: Instant,
     modules: &LoadedModules,
-    aggregated: AggregatedStreamResults,
+    mut aggregated: AggregatedStreamResults,
 ) -> Result<PipelineResult, PipelineError> {
     if let Some(err) = aggregated.first_error {
         let state_for_complete = state.clone();
@@ -1339,7 +1339,7 @@ async fn finalize_run(
 
         let state_for_dlq = state.clone();
         let pipeline_id_for_dlq = pipeline_id.clone();
-        let dlq_records = aggregated.dlq_records.clone();
+        let dlq_records = std::mem::take(&mut aggregated.dlq_records);
         tokio::task::spawn_blocking(move || {
             crate::dlq::persist_dlq_records(
                 state_for_dlq.as_ref(),
@@ -1388,8 +1388,8 @@ async fn finalize_run(
 
     let state_for_cursor = state.clone();
     let pipeline_id_for_cursor = pipeline_id.clone();
-    let source_checkpoints = aggregated.source_checkpoints.clone();
-    let dest_checkpoints = aggregated.dest_checkpoints.clone();
+    let source_checkpoints = std::mem::take(&mut aggregated.source_checkpoints);
+    let dest_checkpoints = std::mem::take(&mut aggregated.dest_checkpoints);
     let cursors_advanced = tokio::task::spawn_blocking(move || {
         correlate_and_persist_cursors(
             state_for_cursor.as_ref(),
@@ -1415,7 +1415,7 @@ async fn finalize_run(
 
     let state_for_dlq = state.clone();
     let pipeline_id_for_dlq = pipeline_id.clone();
-    let dlq_records = aggregated.dlq_records.clone();
+    let dlq_records = std::mem::take(&mut aggregated.dlq_records);
     tokio::task::spawn_blocking(move || {
         crate::dlq::persist_dlq_records(
             state_for_dlq.as_ref(),

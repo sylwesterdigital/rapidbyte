@@ -21,7 +21,7 @@ pub mod ipc;
 pub mod schema;
 pub mod types;
 
-pub use ipc::{decode_ipc, encode_ipc};
+pub use ipc::{decode_ipc, encode_ipc, encode_ipc_into};
 pub use schema::build_arrow_schema;
 pub use types::arrow_data_type;
 

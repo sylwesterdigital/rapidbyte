@@ -13,26 +13,10 @@ use tokio_postgres::Client;
 use rapidbyte_sdk::prelude::*;
 
 use crate::decode::{downcast_columns, sql_param_value, SqlParamValue, WriteTarget};
+use crate::pg_error::format_pg_error;
 
 /// Maximum rows per multi-value INSERT statement (PG parameter limit).
 const CHUNK_SIZE: usize = 1000;
-
-fn format_pg_error(prefix: &str, error: &tokio_postgres::Error) -> String {
-    if let Some(db_error) = error.as_db_error() {
-        let detail = db_error.detail().unwrap_or("n/a");
-        let hint = db_error.hint().unwrap_or("n/a");
-        format!(
-            "{prefix}: {} (sqlstate={} severity={} detail={} hint={})",
-            db_error.message(),
-            db_error.code().code(),
-            db_error.severity(),
-            detail,
-            hint
-        )
-    } else {
-        format!("{prefix}: {error}")
-    }
-}
 
 /// Write batches via multi-value INSERT. Returns rows written.
 ///
