@@ -14,6 +14,10 @@ use arrow::record_batch::RecordBatch;
 use crate::error::ConnectorError;
 
 /// Encode a RecordBatch into Arrow IPC stream bytes.
+///
+/// # Errors
+///
+/// Returns `Err` if Arrow IPC stream writer initialization or encoding fails.
 pub fn encode_ipc(batch: &RecordBatch) -> Result<Vec<u8>, ConnectorError> {
     let capacity = batch.get_array_memory_size() + 1024;
     let mut buf = Vec::with_capacity(capacity);
@@ -30,6 +34,10 @@ pub fn encode_ipc(batch: &RecordBatch) -> Result<Vec<u8>, ConnectorError> {
 }
 
 /// Decode Arrow IPC stream bytes into schema and record batches.
+///
+/// # Errors
+///
+/// Returns `Err` if Arrow IPC stream reader initialization or batch deserialization fails.
 pub fn decode_ipc(ipc_bytes: &[u8]) -> Result<(Arc<Schema>, Vec<RecordBatch>), ConnectorError> {
     let cursor = Cursor::new(ipc_bytes);
     let reader = StreamReader::try_new(cursor, None).map_err(|e| {

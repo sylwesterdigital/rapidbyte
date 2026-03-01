@@ -16,6 +16,11 @@ pub struct HostTcpStream {
 }
 
 impl HostTcpStream {
+    /// Connect to a remote host via the host-proxied TCP stack.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the host denies the connection or the TCP handshake fails.
     pub fn connect(host: &str, port: u16) -> Result<Self, ConnectorError> {
         let handle = host_ffi::connect_tcp(host, port)?;
         Ok(Self {

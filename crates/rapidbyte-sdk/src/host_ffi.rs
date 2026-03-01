@@ -123,6 +123,10 @@ fn host_imports() -> &'static dyn HostImports {
 /// Installs a custom host imports implementation.
 ///
 /// This is primarily intended for tests and native simulation.
+///
+/// # Errors
+///
+/// Returns `Err` if the host imports have already been initialized.
 pub fn set_host_imports(imports: Box<dyn HostImports>) -> Result<(), Box<dyn HostImports>> {
     HOST_IMPORTS.set(imports)
 }
@@ -451,6 +455,10 @@ pub fn log(level: i32, message: &str) {
 ///
 /// Streams IPC encoding directly into a host frame via `FrameWriter`,
 /// eliminating the guest-side `Vec<u8>` IPC buffer allocation.
+///
+/// # Errors
+///
+/// Returns `Err` if frame creation, IPC encoding, or frame sealing fails.
 pub fn emit_batch(batch: &RecordBatch) -> Result<(), ConnectorError> {
     let imports = host_imports();
 
@@ -493,6 +501,10 @@ fn decode_next_batch_frame(
 /// Receive the next Arrow RecordBatch from the host pipeline.
 ///
 /// Returns `None` when there are no more batches.
+///
+/// # Errors
+///
+/// Returns `Err` if frame reading or IPC decoding fails.
 #[allow(clippy::type_complexity)]
 pub fn next_batch(
     max_bytes: u64,
@@ -520,14 +532,29 @@ pub fn next_batch(
     Ok(Some((schema, batches)))
 }
 
+/// Retrieve a value from the host state backend.
+///
+/// # Errors
+///
+/// Returns `Err` if the host state backend rejects the read.
 pub fn state_get(scope: StateScope, key: &str) -> Result<Option<String>, ConnectorError> {
     host_imports().state_get(scope, key)
 }
 
+/// Store a value in the host state backend.
+///
+/// # Errors
+///
+/// Returns `Err` if the host state backend rejects the write.
 pub fn state_put(scope: StateScope, key: &str, value: &str) -> Result<(), ConnectorError> {
     host_imports().state_put(scope, key, value)
 }
 
+/// Atomically compare-and-set a value in the host state backend.
+///
+/// # Errors
+///
+/// Returns `Err` if the host state backend rejects the CAS operation.
 pub fn state_compare_and_set(
     scope: StateScope,
     key: &str,
@@ -537,6 +564,11 @@ pub fn state_compare_and_set(
     host_imports().state_compare_and_set(scope, key, expected, new_value)
 }
 
+/// Submit a checkpoint to the host runtime.
+///
+/// # Errors
+///
+/// Returns `Err` if the host rejects the checkpoint.
 pub fn checkpoint(
     connector_id: &str,
     stream_name: &str,
@@ -545,10 +577,20 @@ pub fn checkpoint(
     host_imports().checkpoint(connector_id, stream_name, cp)
 }
 
+/// Emit a metric to the host runtime.
+///
+/// # Errors
+///
+/// Returns `Err` if metric emission fails.
 pub fn metric(connector_id: &str, stream_name: &str, m: &Metric) -> Result<(), ConnectorError> {
     host_imports().metric(connector_id, stream_name, m)
 }
 
+/// Emit a dead-letter queue record to the host runtime.
+///
+/// # Errors
+///
+/// Returns `Err` if DLQ record emission fails.
 pub fn emit_dlq_record(
     stream_name: &str,
     record_json: &str,
@@ -558,14 +600,29 @@ pub fn emit_dlq_record(
     host_imports().emit_dlq_record(stream_name, record_json, error_message, error_category)
 }
 
+/// Open a TCP connection through the host runtime.
+///
+/// # Errors
+///
+/// Returns `Err` if the host denies the connection or TCP connect fails.
 pub fn connect_tcp(host: &str, port: u16) -> Result<u64, ConnectorError> {
     host_imports().connect_tcp(host, port)
 }
 
+/// Read data from a host-managed socket.
+///
+/// # Errors
+///
+/// Returns `Err` if the socket read operation fails.
 pub fn socket_read(handle: u64, len: u64) -> Result<SocketReadResult, ConnectorError> {
     host_imports().socket_read(handle, len)
 }
 
+/// Write data to a host-managed socket.
+///
+/// # Errors
+///
+/// Returns `Err` if the socket write operation fails.
 pub fn socket_write(handle: u64, data: &[u8]) -> Result<SocketWriteResult, ConnectorError> {
     host_imports().socket_write(handle, data)
 }
