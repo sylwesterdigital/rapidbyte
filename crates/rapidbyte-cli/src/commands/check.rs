@@ -31,7 +31,7 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
     print_validation("Destination", &result.destination_validation);
 
     for (i, tv) in result.transform_validations.iter().enumerate() {
-        let label = format!("Transform[{}]", i);
+        let label = format!("Transform[{i}]");
         print_validation(&label, tv);
     }
 

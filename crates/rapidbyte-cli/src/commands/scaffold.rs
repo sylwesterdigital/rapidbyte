@@ -13,7 +13,7 @@ enum Role {
 }
 
 impl Role {
-    fn as_str(&self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
             Role::Source => "source",
             Role::Destination => "destination",
@@ -27,6 +27,7 @@ impl Role {
 ///
 /// Returns `Err` if the connector name is invalid, the output directory
 /// cannot be created, or file writing fails.
+#[allow(clippy::too_many_lines)] // Scaffolding requires writing many files with sequential steps.
 pub fn run(name: &str, output: Option<&str>) -> Result<()> {
     // Determine role from name prefix
     let role = if name.starts_with("source-") {
@@ -35,8 +36,7 @@ pub fn run(name: &str, output: Option<&str>) -> Result<()> {
         Role::Destination
     } else {
         bail!(
-            "Connector name must start with 'source-' or 'dest-', got '{}'",
-            name
+            "Connector name must start with 'source-' or 'dest-', got '{name}'"
         );
     };
 
@@ -432,7 +432,7 @@ pub async fn validate(config: &Config) -> Result<ValidationResult, ConnectorErro
 }
 
 fn gen_reader_rs() -> String {
-    r#"use rapidbyte_sdk::prelude::*;
+    r"use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
 pub async fn read_stream(config: &Config, ctx: &Context, stream: &StreamContext) -> Result<ReadSummary, ConnectorError> {
@@ -447,12 +447,12 @@ pub async fn read_stream(config: &Config, ctx: &Context, stream: &StreamContext)
         perf: None,
     })
 }
-"#
+"
     .to_string()
 }
 
 fn gen_schema_rs() -> String {
-    r#"use rapidbyte_sdk::prelude::*;
+    r"use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
 pub fn discover_catalog(config: &Config) -> Result<Catalog, ConnectorError> {
@@ -460,12 +460,12 @@ pub fn discover_catalog(config: &Config) -> Result<Catalog, ConnectorError> {
     let _ = config;
     Ok(Catalog { streams: vec![] })
 }
-"#
+"
     .to_string()
 }
 
 fn gen_writer_rs() -> String {
-    r#"use rapidbyte_sdk::prelude::*;
+    r"use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
 pub async fn write_stream(config: &Config, ctx: &Context, stream: &StreamContext) -> Result<WriteSummary, ConnectorError> {
@@ -480,6 +480,6 @@ pub async fn write_stream(config: &Config, ctx: &Context, stream: &StreamContext
         perf: None,
     })
 }
-"#
+"
     .to_string()
 }

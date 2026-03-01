@@ -1,5 +1,7 @@
 //! Rapidbyte CLI binary — parse arguments, dispatch subcommands.
 
+#![warn(clippy::pedantic)]
+
 mod commands;
 mod logging;
 
@@ -71,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
         } => commands::run::execute(&pipeline, dry_run, limit).await,
         Commands::Check { pipeline } => commands::check::execute(&pipeline).await,
         Commands::Discover { pipeline } => commands::discover::execute(&pipeline).await,
-        Commands::Connectors => commands::connectors::execute().await,
+        Commands::Connectors => commands::connectors::execute(),
         Commands::Scaffold { name, output } => {
             commands::scaffold::run(&name, output.as_deref())?;
             Ok(())

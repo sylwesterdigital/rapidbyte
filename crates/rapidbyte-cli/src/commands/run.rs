@@ -1,5 +1,9 @@
 //! Pipeline execution subcommand (run).
 
+// u64/i64/usize → f64 casts are intentional lossy conversions for display and
+// timing computations where sub-millisecond precision loss is acceptable.
+#![allow(clippy::cast_precision_loss)]
+
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -22,6 +26,7 @@ struct ProcessCpuMetrics {
 /// # Errors
 ///
 /// Returns `Err` if pipeline parsing, validation, or execution fails.
+#[allow(clippy::too_many_lines)] // Output formatting requires many sequential println calls.
 pub async fn execute(pipeline_path: &Path, dry_run: bool, limit: Option<u64>) -> Result<()> {
     // 1. Parse pipeline YAML
     let config = parser::parse_pipeline(pipeline_path)
@@ -61,7 +66,7 @@ pub async fn execute(pipeline_path: &Path, dry_run: bool, limit: Option<u64>) ->
             println!("  Bytes written:   {}", format_bytes(counts.bytes_written));
             if counts.records_read > 0 {
                 let avg_row_bytes = counts.bytes_read / counts.records_read;
-                println!("  Avg row size:    {} B", avg_row_bytes);
+                println!("  Avg row size:    {avg_row_bytes} B");
             }
             println!("  Duration:        {:.2}s", result.duration_secs);
             println!(
@@ -118,7 +123,7 @@ pub async fn execute(pipeline_path: &Path, dry_run: bool, limit: Option<u64>) ->
                     result.transform_count, result.transform_duration_secs,
                 );
                 for (i, ms) in result.transform_module_load_ms.iter().enumerate() {
-                    println!("    Transform[{}] load: {}ms", i, ms);
+                    println!("    Transform[{i}] load: {ms}ms");
                 }
             }
             println!("  Source load:     {}ms", source.module_load_ms);
@@ -137,7 +142,7 @@ pub async fn execute(pipeline_path: &Path, dry_run: bool, limit: Option<u64>) ->
 
             // Machine-readable JSON for benchmarking tools
             let json = bench_json_from_result(&result, cpu_metrics.as_ref(), peak_rss_mb);
-            println!("@@BENCH_JSON@@{}", json);
+            println!("@@BENCH_JSON@@{json}");
         }
         PipelineOutcome::DryRun(result) => {
             use arrow::util::pretty::pretty_format_batches;
@@ -211,7 +216,7 @@ fn format_bytes(bytes: u64) -> String {
     } else if bytes >= 1024 {
         format!("{:.2} KB", bytes as f64 / 1024.0)
     } else {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     }
 }
 
@@ -296,6 +301,7 @@ fn process_peak_rss_mb() -> Option<f64> {
     }
 }
 
+#[allow(clippy::too_many_lines)] // Flat JSON serialization requires one insert per field.
 fn bench_json_from_result(
     result: &rapidbyte_engine::result::PipelineResult,
     cpu_metrics: Option<&ProcessCpuMetrics>,

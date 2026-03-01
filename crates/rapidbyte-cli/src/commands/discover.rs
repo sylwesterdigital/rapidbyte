@@ -34,12 +34,12 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
         let modes: Vec<String> = stream
             .supported_sync_modes
             .iter()
-            .map(|m| format!("{:?}", m))
+            .map(|m| format!("{m:?}"))
             .collect();
         println!("  Sync modes:  {}", modes.join(", "));
 
         if let Some(ref cursor) = stream.source_defined_cursor {
-            println!("  Cursor:      {}", cursor);
+            println!("  Cursor:      {cursor}");
         }
 
         if let Some(ref pk) = stream.source_defined_primary_key {
@@ -61,7 +61,7 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
 
     // 5. Print machine-readable JSON
     let json = serde_json::to_string(&catalog)?;
-    println!("@@CATALOG_JSON@@{}", json);
+    println!("@@CATALOG_JSON@@{json}");
 
     Ok(())
 }
