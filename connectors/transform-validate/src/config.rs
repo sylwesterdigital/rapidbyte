@@ -208,6 +208,12 @@ pub struct RangeRule {
 }
 
 impl Config {
+    /// Compile user-defined rule specs into an optimized `CompiledConfig`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the rule list is empty, a field selector is blank,
+    /// a regex pattern is invalid, or a range rule has invalid or inverted bounds.
     pub fn compile(&self) -> Result<CompiledConfig, String> {
         if self.rules.is_empty() {
             return Err("rules must not be empty".to_string());

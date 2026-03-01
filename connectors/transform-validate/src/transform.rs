@@ -29,6 +29,11 @@ struct RuleFailure {
     message: String,
 }
 
+/// Run the validation transform for a single stream.
+///
+/// # Errors
+///
+/// Returns `Err` if a failing row is encountered and the stream error policy is `Fail`.
 pub async fn run(
     ctx: &Context,
     stream: &StreamContext,
