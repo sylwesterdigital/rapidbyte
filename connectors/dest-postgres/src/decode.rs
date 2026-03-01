@@ -25,6 +25,7 @@ static UNIX_EPOCH_DATE: LazyLock<NaiveDate> =
 // ── Qualified name helper ────────────────────────────────────────────
 
 /// Build a schema-qualified table name: `"schema"."table"`.
+#[must_use]
 pub(crate) fn qualified_name(schema: &str, table: &str) -> String {
     format!("{}.{}", quote_identifier(schema), quote_identifier(table))
 }
@@ -32,6 +33,7 @@ pub(crate) fn qualified_name(schema: &str, table: &str) -> String {
 // ── Column filtering ─────────────────────────────────────────────────
 
 /// Indices of Arrow columns that are not in the ignored set.
+#[must_use]
 pub(crate) fn active_column_indices(
     arrow_schema: &Arc<Schema>,
     ignored_columns: &HashSet<String>,
@@ -42,6 +44,7 @@ pub(crate) fn active_column_indices(
 }
 
 /// Build ON CONFLICT clause for upsert mode. Returns None for non-upsert modes.
+#[must_use]
 pub(crate) fn build_upsert_clause(
     write_mode: Option<&WriteMode>,
     arrow_schema: &Arc<Schema>,
@@ -82,6 +85,7 @@ pub(crate) fn build_upsert_clause(
 }
 
 /// Build type-null flags: true for columns whose type is incompatible (values forced to NULL).
+#[must_use]
 pub(crate) fn type_null_flags(
     active_cols: &[usize],
     arrow_schema: &Schema,
@@ -123,6 +127,11 @@ pub(crate) enum TypedCol<'a> {
 }
 
 /// Pre-downcast active columns from a `RecordBatch` into `TypedCol` references.
+///
+/// # Errors
+///
+/// Returns `Err` if an Arrow column has an unsupported data type for the
+/// `PostgreSQL` write path.
 pub(crate) fn downcast_columns<'a>(
     batch: &'a RecordBatch,
     active_cols: &[usize],

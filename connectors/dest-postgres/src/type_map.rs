@@ -3,6 +3,7 @@
 use rapidbyte_sdk::arrow::datatypes::DataType;
 
 /// Map Arrow data types back to `PostgreSQL` column types.
+#[must_use]
 pub(crate) fn arrow_to_pg_type(dt: &DataType) -> &'static str {
     match dt {
         DataType::Int16 => "SMALLINT",
@@ -50,6 +51,7 @@ fn normalize_pg_type(t: &str) -> &str {
 }
 
 /// Check if an `information_schema` type and DDL type refer to the same type.
+#[must_use]
 pub(crate) fn pg_types_compatible(info_schema_type: &str, ddl_type: &str) -> bool {
     let a = info_schema_type.to_lowercase();
     let b = ddl_type.to_lowercase();
