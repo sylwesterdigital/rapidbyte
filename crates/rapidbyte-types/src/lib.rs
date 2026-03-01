@@ -2,6 +2,21 @@
 //!
 //! Dependency-boundary-safe for both host runtime and WASI connector targets.
 //! All types use serde for serialization across the host/guest boundary.
+//!
+//! | Module         | Responsibility |
+//! |----------------|----------------|
+//! | `arrow`        | Arrow data type mappings |
+//! | `catalog`      | Catalog, stream, and column schema definitions |
+//! | `checkpoint`   | Checkpoint and state scope types |
+//! | `compression`  | Compression codec enum |
+//! | `cursor`       | Cursor info and value types for incremental sync |
+//! | `envelope`     | DLQ record and payload envelope types |
+//! | `error`        | `ConnectorError`, `ValidationResult`, error categories |
+//! | `manifest`     | Connector manifest and permission types |
+//! | `metric`       | Metric, summary types (read/write/transform) |
+//! | `state`        | Run state, pipeline ID, cursor state types |
+//! | `stream`       | Stream context, limits, policies |
+//! | `wire`         | Wire protocol enums (sync mode, write mode, role) |
 
 #![warn(clippy::pedantic)]
 
