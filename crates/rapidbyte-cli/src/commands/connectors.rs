@@ -19,11 +19,11 @@ pub fn execute() -> Result<()> {
     let mut found = false;
 
     for dir in &dirs {
-        if !dir.exists() {
-            continue;
-        }
-
-        let entries = std::fs::read_dir(dir)?;
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
         for entry in entries {
             let entry = entry?;
             let path = entry.path();

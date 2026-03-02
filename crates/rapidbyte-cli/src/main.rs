@@ -1,6 +1,7 @@
 //! Rapidbyte CLI binary — parse arguments, dispatch subcommands.
 
 #![warn(clippy::pedantic)]
+#![recursion_limit = "256"]
 
 mod commands;
 mod logging;

@@ -2,10 +2,8 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
-use rapidbyte_engine::config::parser;
-use rapidbyte_engine::config::validator;
 use rapidbyte_engine::orchestrator;
 
 /// Execute the `discover` command: discover available streams from a source connector.
@@ -14,12 +12,7 @@ use rapidbyte_engine::orchestrator;
 ///
 /// Returns `Err` if pipeline parsing, validation, or schema discovery fails.
 pub async fn execute(pipeline_path: &Path) -> Result<()> {
-    // 1. Parse pipeline YAML
-    let config = parser::parse_pipeline(pipeline_path)
-        .with_context(|| format!("Failed to parse pipeline: {}", pipeline_path.display()))?;
-
-    // 2. Validate pipeline structure
-    validator::validate_pipeline(&config)?;
+    let config = super::load_pipeline(pipeline_path)?;
 
     // 3. Discover catalog from source connector
     let catalog =

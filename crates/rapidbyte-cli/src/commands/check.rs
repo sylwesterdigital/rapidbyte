@@ -2,11 +2,9 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rapidbyte_types::error::ValidationStatus;
 
-use rapidbyte_engine::config::parser;
-use rapidbyte_engine::config::validator;
 use rapidbyte_engine::orchestrator;
 
 /// Execute the `check` command: validate pipeline config and connector connectivity.
@@ -15,12 +13,7 @@ use rapidbyte_engine::orchestrator;
 ///
 /// Returns `Err` if pipeline parsing, validation, or connectivity check fails.
 pub async fn execute(pipeline_path: &Path) -> Result<()> {
-    // 1. Parse pipeline YAML
-    let config = parser::parse_pipeline(pipeline_path)
-        .with_context(|| format!("Failed to parse pipeline: {}", pipeline_path.display()))?;
-
-    // 2. Validate pipeline structure
-    validator::validate_pipeline(&config)?;
+    let config = super::load_pipeline(pipeline_path)?;
     println!("Pipeline structure: OK");
 
     // 3. Check connectors and state

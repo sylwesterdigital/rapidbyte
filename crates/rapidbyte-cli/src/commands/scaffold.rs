@@ -80,10 +80,9 @@ pub fn run(name: &str, output: Option<&str>) -> Result<()> {
     )?;
 
     // Write .cargo/config.toml
-    let cargo_config = gen_cargo_config();
     write_file(
         &cargo_dir.join("config.toml"),
-        &cargo_config,
+        gen_cargo_config(),
         &mut created_files,
     )?;
 
@@ -101,22 +100,22 @@ pub fn run(name: &str, output: Option<&str>) -> Result<()> {
             )?;
             write_file(
                 &src_dir.join("config.rs"),
-                &gen_config(),
+                gen_config(),
                 &mut created_files,
             )?;
             write_file(
                 &src_dir.join("client.rs"),
-                &gen_client_rs(),
+                gen_client_rs(),
                 &mut created_files,
             )?;
             write_file(
                 &src_dir.join("reader.rs"),
-                &gen_reader_rs(),
+                gen_reader_rs(),
                 &mut created_files,
             )?;
             write_file(
                 &src_dir.join("schema.rs"),
-                &gen_schema_rs(),
+                gen_schema_rs(),
                 &mut created_files,
             )?;
         }
@@ -128,17 +127,17 @@ pub fn run(name: &str, output: Option<&str>) -> Result<()> {
             )?;
             write_file(
                 &src_dir.join("config.rs"),
-                &gen_config(),
+                gen_config(),
                 &mut created_files,
             )?;
             write_file(
                 &src_dir.join("client.rs"),
-                &gen_client_rs(),
+                gen_client_rs(),
                 &mut created_files,
             )?;
             write_file(
                 &src_dir.join("writer.rs"),
-                &gen_writer_rs(),
+                gen_writer_rs(),
                 &mut created_files,
             )?;
         }
@@ -181,17 +180,25 @@ fn write_file(path: &Path, content: &str, created: &mut Vec<PathBuf>) -> Result<
     Ok(())
 }
 
+/// Uppercase the first character of a string, leaving the rest unchanged.
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => {
+            let mut result = String::with_capacity(s.len());
+            for uc in c.to_uppercase() {
+                result.push(uc);
+            }
+            result.push_str(chars.as_str());
+            result
+        }
+    }
+}
+
 /// Convert `source-mysql` -> `SourceMysql`, `dest-snowflake` -> `DestSnowflake`.
 fn to_struct_name(name: &str) -> String {
-    name.split('-')
-        .map(|part| {
-            let mut chars = part.chars();
-            match chars.next() {
-                None => String::new(),
-                Some(c) => c.to_uppercase().to_string() + chars.as_str(),
-            }
-        })
-        .collect()
+    name.split('-').map(capitalize_first).collect()
 }
 
 /// Extract the service name: `source-mysql` -> `MySQL`, `dest-snowflake` -> `Snowflake`.
@@ -202,13 +209,7 @@ fn extract_service_name(name: &str, role: Role) -> String {
         Role::Destination => "dest-",
     };
     let suffix = name.strip_prefix(prefix).unwrap_or(name);
-
-    // Title-case: first char uppercase, rest lowercase
-    let mut chars = suffix.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
-    }
+    capitalize_first(suffix)
 }
 
 // ---------------------------------------------------------------------------
@@ -241,11 +242,10 @@ rapidbyte-sdk = {{ path = "../../crates/rapidbyte-sdk", default-features = false
     )
 }
 
-fn gen_cargo_config() -> String {
+fn gen_cargo_config() -> &'static str {
     r#"[build]
 target = "wasm32-wasip2"
 "#
-    .to_string()
 }
 
 fn gen_build_rs(name: &str, display_name: &str, role: Role, service_name: &str) -> String {
@@ -374,7 +374,7 @@ impl Destination for {struct_name} {{
     )
 }
 
-fn gen_config() -> String {
+fn gen_config() -> &'static str {
     r#"use rapidbyte_sdk::ConfigSchema;
 use serde::Deserialize;
 
@@ -410,10 +410,9 @@ impl Config {
     }
 }
 "#
-    .to_string()
 }
 
-fn gen_client_rs() -> String {
+fn gen_client_rs() -> &'static str {
     r#"use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
@@ -426,10 +425,9 @@ pub async fn validate(config: &Config) -> Result<ValidationResult, ConnectorErro
     })
 }
 "#
-    .to_string()
 }
 
-fn gen_reader_rs() -> String {
+fn gen_reader_rs() -> &'static str {
     r"use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
@@ -446,10 +444,9 @@ pub async fn read_stream(config: &Config, ctx: &Context, stream: &StreamContext)
     })
 }
 "
-    .to_string()
 }
 
-fn gen_schema_rs() -> String {
+fn gen_schema_rs() -> &'static str {
     r"use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
@@ -459,10 +456,9 @@ pub fn discover_catalog(config: &Config) -> Result<Catalog, ConnectorError> {
     Ok(Catalog { streams: vec![] })
 }
 "
-    .to_string()
 }
 
-fn gen_writer_rs() -> String {
+fn gen_writer_rs() -> &'static str {
     r"use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
@@ -479,5 +475,4 @@ pub async fn write_stream(config: &Config, ctx: &Context, stream: &StreamContext
     })
 }
 "
-    .to_string()
 }
