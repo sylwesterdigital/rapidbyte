@@ -13,6 +13,8 @@ members = [
 exclude = [
     "connectors/source-postgres",
     "connectors/dest-postgres",
+    "connectors/transform-sql",
+    "connectors/transform-validate",
 ]
 
 [workspace.package]
@@ -20,6 +22,7 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 rust-version = "1.75"
+description = "Data pipeline engine using WASI component connectors"
 
 [workspace.dependencies]
 tokio = { version = "1.36", features = ["full"] }
