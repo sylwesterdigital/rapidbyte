@@ -202,14 +202,6 @@ fn read_u64(cur: &mut Cursor<&[u8]>) -> Result<u64, DecodeError> {
     Ok(u64::from_be_bytes(buf))
 }
 
-#[allow(dead_code)]
-fn read_i64(cur: &mut Cursor<&[u8]>) -> Result<i64, DecodeError> {
-    let mut buf = [0u8; 8];
-    cur.read_exact(&mut buf)
-        .map_err(|_| DecodeError::UnexpectedEof)?;
-    Ok(i64::from_be_bytes(buf))
-}
-
 /// Read a null-terminated C string from the cursor.
 fn read_cstring(cur: &mut Cursor<&[u8]>) -> Result<String, DecodeError> {
     let mut bytes = Vec::new();

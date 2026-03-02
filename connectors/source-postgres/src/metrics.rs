@@ -2,6 +2,17 @@
 
 use rapidbyte_sdk::prelude::*;
 
+/// Maximum number of rows per Arrow `RecordBatch`.
+pub(crate) const BATCH_SIZE: usize = 10_000;
+
+/// Cumulative emit counters shared by both full-refresh and CDC read paths.
+pub(crate) struct EmitState {
+    pub(crate) total_records: u64,
+    pub(crate) total_bytes: u64,
+    pub(crate) batches_emitted: u64,
+    pub(crate) arrow_encode_nanos: u64,
+}
+
 /// Emit cumulative source read counters for a stream.
 pub(crate) fn emit_read_metrics(ctx: &Context, total_records: u64, total_bytes: u64) {
     let _ = ctx.metric(&Metric {

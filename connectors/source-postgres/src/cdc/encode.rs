@@ -10,9 +10,9 @@ use rapidbyte_sdk::arrow::array::{
     Array, BooleanBuilder, Date32Builder, Float32Builder, Float64Builder, Int16Builder,
     Int32Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder,
 };
-use rapidbyte_sdk::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use rapidbyte_sdk::arrow::datatypes::{DataType, Field, Schema};
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
-use rapidbyte_sdk::prelude::ArrowDataType;
+use rapidbyte_sdk::prelude::{arrow_data_type, ArrowDataType};
 
 use super::pgoutput::{CdcOp, ColumnDef, ColumnValue, TupleData};
 use crate::types::oid_to_arrow_type;
@@ -43,13 +43,7 @@ impl RelationInfo {
         let mut fields: Vec<Field> = columns
             .iter()
             .map(|col| {
-                let arrow_type = oid_to_arrow_type(col.type_oid);
-                let dt = match arrow_type {
-                    ArrowDataType::TimestampMicros => {
-                        DataType::Timestamp(TimeUnit::Microsecond, None)
-                    }
-                    other => arrow_data_type_to_data_type(other),
-                };
+                let dt = arrow_data_type(oid_to_arrow_type(col.type_oid));
                 Field::new(&col.name, dt, true)
             })
             .collect();
@@ -66,24 +60,6 @@ impl RelationInfo {
             columns,
             arrow_schema,
         }
-    }
-}
-
-/// Convert an `ArrowDataType` to the concrete Arrow `DataType`.
-///
-/// Mirrors `rapidbyte_sdk::arrow::types::arrow_data_type` but kept local
-/// to avoid adding a public-API coupling for internal CDC encoding.
-fn arrow_data_type_to_data_type(proto: ArrowDataType) -> DataType {
-    match proto {
-        ArrowDataType::Boolean => DataType::Boolean,
-        ArrowDataType::Int16 => DataType::Int16,
-        ArrowDataType::Int32 => DataType::Int32,
-        ArrowDataType::Int64 => DataType::Int64,
-        ArrowDataType::Float32 => DataType::Float32,
-        ArrowDataType::Float64 => DataType::Float64,
-        ArrowDataType::Date32 => DataType::Date32,
-        ArrowDataType::TimestampMicros => DataType::Timestamp(TimeUnit::Microsecond, None),
-        _ => DataType::Utf8,
     }
 }
 
@@ -338,6 +314,7 @@ fn parse_timestamp_micros(s: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rapidbyte_sdk::arrow::datatypes::TimeUnit;
 
     /// Helper: build a `RelationInfo` for a two-column table (id int4, name text).
     fn test_relation() -> RelationInfo {

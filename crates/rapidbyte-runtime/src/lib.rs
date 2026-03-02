@@ -38,7 +38,9 @@ pub use bindings::{
     transform_validation_to_sdk,
 };
 pub use compression::CompressionCodec;
-pub use connector::{load_connector_manifest, parse_connector_ref, resolve_connector_path};
+pub use connector::{
+    connector_search_dirs, load_connector_manifest, parse_connector_ref, resolve_connector_path,
+};
 pub use engine::{create_component_linker, HasStoreLimits, LoadedComponent, WasmRuntime};
 pub use frame::FrameTable;
 pub use host_state::{ComponentHostState, Frame, HostTimings};

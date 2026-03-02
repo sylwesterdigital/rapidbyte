@@ -16,12 +16,9 @@ use rapidbyte_sdk::stream::{DataErrorPolicy, PartitionStrategy};
 
 use crate::cursor::CursorTracker;
 use crate::encode;
-use crate::metrics::{emit_read_metrics, emit_read_perf_metrics};
+use crate::metrics::{emit_read_metrics, emit_read_perf_metrics, EmitState, BATCH_SIZE};
 use crate::query;
 use crate::types::Column;
-
-/// Maximum number of rows per Arrow `RecordBatch`.
-const BATCH_SIZE: usize = 10_000;
 
 /// Number of rows to fetch per server-side cursor iteration.
 const FETCH_CHUNK: usize = 10_000;
@@ -104,13 +101,6 @@ pub(crate) fn estimate_row_bytes(columns: &[Column]) -> usize {
         total += 1;
     }
     total
-}
-
-struct EmitState {
-    total_records: u64,
-    total_bytes: u64,
-    batches_emitted: u64,
-    arrow_encode_nanos: u64,
 }
 
 /// Encode and emit all currently accumulated rows as one Arrow IPC batch.

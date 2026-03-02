@@ -17,7 +17,7 @@ use wasmtime::StoreLimits;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use rapidbyte_state::StateBackend;
-use rapidbyte_types::checkpoint::{Checkpoint, StateScope};
+use rapidbyte_types::checkpoint::{Checkpoint, CheckpointKind, StateScope};
 use rapidbyte_types::envelope::{DlqRecord, Timestamp};
 use rapidbyte_types::error::{ConnectorError, ErrorCategory};
 use rapidbyte_types::manifest::Permissions;
@@ -38,17 +38,9 @@ use crate::socket::{socket_poll_timeout_ms, wait_socket_ready, SocketInterest};
 
 const MAX_SOCKET_READ_BYTES: u64 = 64 * 1024;
 const MAX_STATE_KEY_LEN: usize = 1024;
-const CHECKPOINT_KIND_SOURCE: u32 = 0;
-const CHECKPOINT_KIND_DEST: u32 = 1;
-const CHECKPOINT_KIND_TRANSFORM: u32 = 2;
 
 /// Default maximum DLQ records kept in memory per run.
 pub const DEFAULT_DLQ_LIMIT: usize = 10_000;
-
-#[allow(clippy::cast_precision_loss)]
-fn counter_metric_to_f64(value: u64) -> f64 {
-    value as f64
-}
 
 /// Channel frame type for batch routing between connector stages.
 pub enum Frame {
@@ -558,35 +550,36 @@ impl ComponentHostState {
             payload_json
         );
 
+        let checkpoint_kind = CheckpointKind::try_from(kind).map_err(|k| {
+            ConnectorError::config(
+                "INVALID_CHECKPOINT_KIND",
+                format!("Invalid checkpoint kind: {k}"),
+            )
+        })?;
+
         let payload = match envelope {
             serde_json::Value::Object(mut map) => map
                 .remove("payload")
                 .unwrap_or(serde_json::Value::Object(map)),
             other => other,
         };
-        match kind {
-            CHECKPOINT_KIND_SOURCE => {
+        match checkpoint_kind {
+            CheckpointKind::Source => {
                 if let Ok(cp) = serde_json::from_value::<Checkpoint>(payload) {
                     lock_mutex(&self.checkpoints.source, "source_checkpoints")?.push(cp);
                 }
             }
-            CHECKPOINT_KIND_DEST => {
+            CheckpointKind::Dest => {
                 if let Ok(cp) = serde_json::from_value::<Checkpoint>(payload) {
                     lock_mutex(&self.checkpoints.dest, "dest_checkpoints")?.push(cp);
                 }
             }
-            CHECKPOINT_KIND_TRANSFORM => {
+            CheckpointKind::Transform => {
                 tracing::debug!(
                     pipeline = self.identity.pipeline.as_str(),
                     stream = %self.current_stream(),
                     "Received transform checkpoint"
                 );
-            }
-            _ => {
-                return Err(ConnectorError::config(
-                    "INVALID_CHECKPOINT_KIND",
-                    format!("Invalid checkpoint kind: {kind}"),
-                ));
             }
         }
 
@@ -615,7 +608,8 @@ impl ComponentHostState {
 
         let value = match metric.value {
             MetricValue::Gauge(v) | MetricValue::Histogram(v) => v,
-            MetricValue::Counter(v) => counter_metric_to_f64(v),
+            #[allow(clippy::cast_precision_loss)]
+            MetricValue::Counter(v) => v as f64,
             _ => return Ok(()),
         };
 
@@ -698,7 +692,7 @@ impl ComponentHostState {
             .map_err(|e| ConnectorError::internal("SOCKET_CONFIG", e.to_string()))?;
 
         let handle = self.sockets.next_handle;
-        self.sockets.next_handle = self.sockets.next_handle.saturating_add(1);
+        self.sockets.next_handle = self.sockets.next_handle.wrapping_add(1);
         self.sockets.sockets.insert(
             handle,
             SocketEntry {

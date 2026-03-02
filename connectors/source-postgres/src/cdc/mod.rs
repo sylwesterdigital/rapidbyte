@@ -16,13 +16,10 @@ use tokio_postgres::Client;
 use rapidbyte_sdk::prelude::*;
 
 use crate::config::Config;
-use crate::metrics::emit_read_metrics;
+use crate::metrics::{emit_read_metrics, EmitState, BATCH_SIZE};
 
 use encode::{encode_cdc_batch, CdcRow, RelationInfo};
 use pgoutput::{CdcOp, PgOutputMessage, TupleData};
-
-/// Maximum number of change rows per Arrow `RecordBatch`.
-const BATCH_SIZE: usize = 10_000;
 
 /// Maximum WAL changes consumed per CDC invocation to avoid unbounded memory use.
 /// Type is i32 because `pg_logical_slot_get_binary_changes()` expects int4.
@@ -46,18 +43,11 @@ fn cdc_max_changes() -> i32 {
     })
 }
 
-struct CdcEmitState {
-    total_records: u64,
-    total_bytes: u64,
-    batches_emitted: u64,
-    arrow_encode_nanos: u64,
-}
-
 fn emit_batch(
     rows: &mut Vec<CdcRow>,
     relation: &RelationInfo,
     ctx: &Context,
-    state: &mut CdcEmitState,
+    state: &mut EmitState,
 ) -> Result<(), String> {
     let encode_start = Instant::now();
     let batch = encode_cdc_batch(rows, relation)?;
@@ -133,7 +123,7 @@ pub async fn read_cdc_changes(
     let query_secs = query_start.elapsed().as_secs_f64();
 
     let fetch_start = Instant::now();
-    let mut state = CdcEmitState {
+    let mut state = EmitState {
         total_records: 0,
         total_bytes: 0,
         batches_emitted: 0,

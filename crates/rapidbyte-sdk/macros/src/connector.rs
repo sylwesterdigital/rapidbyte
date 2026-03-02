@@ -37,21 +37,19 @@ impl Parse for ConnectorRole {
 pub fn expand(role: ConnectorRole, input: ItemStruct) -> Result<TokenStream> {
     let struct_name = &input.ident;
 
-    let (world_name, trait_path, bindings_mod) = match role {
+    let bindings_mod = quote! { __rb_bindings };
+    let (world_name, trait_path) = match role {
         ConnectorRole::Source => (
             "rapidbyte-source",
             quote! { ::rapidbyte_sdk::connector::Source },
-            quote! { __rb_bindings },
         ),
         ConnectorRole::Destination => (
             "rapidbyte-destination",
             quote! { ::rapidbyte_sdk::connector::Destination },
-            quote! { __rb_bindings },
         ),
         ConnectorRole::Transform => (
             "rapidbyte-transform",
             quote! { ::rapidbyte_sdk::connector::Transform },
-            quote! { __rb_bindings },
         ),
     };
 
@@ -97,7 +95,6 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
     quote! {
         use std::cell::RefCell;
         use std::sync::OnceLock;
-        use ::rapidbyte_sdk::error::{BackoffClass, CommitState, ErrorCategory, ErrorScope};
 
         static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
         static CONFIG_JSON: OnceLock<String> = OnceLock::new();

@@ -67,7 +67,7 @@ impl FrameTable {
     #[allow(clippy::cast_possible_truncation)] // host is 64-bit; u64 == usize
     pub fn alloc(&mut self, capacity: u64) -> u64 {
         let handle = self.next_handle;
-        self.next_handle += 1;
+        self.next_handle = self.next_handle.wrapping_add(1);
         let buf = BytesMut::with_capacity(capacity as usize);
         self.frames.insert(handle, FrameState::Writable(buf));
         handle
@@ -195,7 +195,7 @@ impl FrameTable {
     /// frame handle.
     pub fn insert_sealed(&mut self, data: Bytes) -> u64 {
         let handle = self.next_handle;
-        self.next_handle += 1;
+        self.next_handle = self.next_handle.wrapping_add(1);
         self.frames.insert(handle, FrameState::Sealed(data));
         handle
     }

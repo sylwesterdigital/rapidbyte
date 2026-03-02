@@ -8,7 +8,7 @@ use anyhow::Result;
 ///
 /// Returns `Err` if directory scanning or manifest parsing fails.
 pub fn execute() -> Result<()> {
-    let dirs = connector_dirs();
+    let dirs = rapidbyte_runtime::connector_search_dirs();
 
     if dirs.is_empty() {
         println!("No connector directories found.");
@@ -69,22 +69,4 @@ pub fn execute() -> Result<()> {
     }
 
     Ok(())
-}
-
-fn connector_dirs() -> Vec<std::path::PathBuf> {
-    let mut dirs = Vec::new();
-
-    if let Ok(dir) = std::env::var("RAPIDBYTE_CONNECTOR_DIR") {
-        dirs.push(std::path::PathBuf::from(dir));
-    }
-
-    if let Ok(home) = std::env::var("HOME") {
-        dirs.push(
-            std::path::PathBuf::from(home)
-                .join(".rapidbyte")
-                .join("plugins"),
-        );
-    }
-
-    dirs
 }

@@ -19,6 +19,19 @@ pub enum CheckpointKind {
     Transform,
 }
 
+impl TryFrom<u32> for CheckpointKind {
+    type Error = u32;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Source),
+            1 => Ok(Self::Dest),
+            2 => Ok(Self::Transform),
+            other => Err(other),
+        }
+    }
+}
+
 /// Scope for key-value state operations.
 ///
 /// Connectors can store arbitrary state at different scopes via

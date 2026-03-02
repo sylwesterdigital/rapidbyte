@@ -36,7 +36,7 @@ use crate::result::{
 };
 use crate::runner::{
     run_destination_stream, run_discover, run_source_stream, run_transform_stream,
-    validate_connector,
+    validate_connector, TransformRunResult,
 };
 
 struct StreamResult {
@@ -190,8 +190,7 @@ fn resolve_auto_parallelism_for_cores(config: &PipelineConfig, available_cores: 
         1
     } else {
         let per_stream_budget = (cap / eligible_streams).max(1);
-        let per_stream_target = per_stream_budget;
-        (eligible_streams * per_stream_target).min(cap)
+        (eligible_streams * per_stream_budget).min(cap)
     };
 
     #[allow(clippy::cast_precision_loss)]
@@ -243,6 +242,27 @@ struct DestTimingMaxima {
     flush_secs: f64,
     commit_secs: f64,
     arrow_decode_secs: f64,
+}
+
+fn build_source_timing(
+    src_timing_maxima: &SourceTimingMaxima,
+    src_timings: &HostTimings,
+    src_perf: Option<&rapidbyte_types::metric::ReadPerf>,
+    source_module_load_ms: u64,
+) -> SourceTiming {
+    SourceTiming {
+        duration_secs: src_timing_maxima.duration_secs,
+        module_load_ms: source_module_load_ms,
+        connect_secs: src_perf.map_or(src_timing_maxima.connect_secs, |p| p.connect_secs),
+        query_secs: src_perf.map_or(src_timing_maxima.query_secs, |p| p.query_secs),
+        fetch_secs: src_perf.map_or(src_timing_maxima.fetch_secs, |p| p.fetch_secs),
+        arrow_encode_secs: src_perf.map_or(src_timing_maxima.arrow_encode_secs, |p| {
+            p.arrow_encode_secs
+        }),
+        emit_nanos: src_timings.emit_batch_nanos,
+        compress_nanos: src_timings.compress_nanos,
+        emit_count: src_timings.emit_batch_count,
+    }
 }
 
 fn observe_dest_timing(maxima: &mut DestTimingMaxima, stream: &StreamResult) {
@@ -431,24 +451,12 @@ async fn execute_pipeline_once(
         let src_perf = aggregated.total_read_summary.perf.as_ref();
         return Ok(PipelineOutcome::DryRun(DryRunResult {
             streams: aggregated.dry_run_streams,
-            source: SourceTiming {
-                duration_secs: aggregated.src_timing_maxima.duration_secs,
-                module_load_ms: modules.source_module_load_ms,
-                connect_secs: src_perf.map_or(aggregated.src_timing_maxima.connect_secs, |p| {
-                    p.connect_secs
-                }),
-                query_secs: src_perf
-                    .map_or(aggregated.src_timing_maxima.query_secs, |p| p.query_secs),
-                fetch_secs: src_perf
-                    .map_or(aggregated.src_timing_maxima.fetch_secs, |p| p.fetch_secs),
-                arrow_encode_secs: src_perf
-                    .map_or(aggregated.src_timing_maxima.arrow_encode_secs, |p| {
-                        p.arrow_encode_secs
-                    }),
-                emit_nanos: aggregated.src_timings.emit_batch_nanos,
-                compress_nanos: aggregated.src_timings.compress_nanos,
-                emit_count: aggregated.src_timings.emit_batch_count,
-            },
+            source: build_source_timing(
+                &aggregated.src_timing_maxima,
+                &aggregated.src_timings,
+                src_perf,
+                modules.source_module_load_ms,
+            ),
             transform_count: config.transforms.len(),
             transform_duration_secs: aggregated.transform_durations.iter().sum(),
             duration_secs,
@@ -735,6 +743,56 @@ fn execution_parallelism(config: &PipelineConfig, stream_ctxs: &[StreamContext])
     usize::try_from(resolved.max(1)).unwrap_or(usize::MAX)
 }
 
+struct CollectedTransforms {
+    durations: Vec<f64>,
+    first_error: Option<PipelineError>,
+}
+
+async fn collect_transform_results(
+    transform_handles: Vec<(
+        usize,
+        tokio::task::JoinHandle<Result<TransformRunResult, PipelineError>>,
+    )>,
+    stream_name: &str,
+) -> Result<CollectedTransforms, PipelineError> {
+    let mut durations = Vec::new();
+    let mut first_error: Option<PipelineError> = None;
+    for (i, t_handle) in transform_handles {
+        let result = t_handle.await.map_err(|e| {
+            PipelineError::Infrastructure(anyhow::anyhow!(
+                "Transform {i} task panicked for stream '{stream_name}': {e}"
+            ))
+        })?;
+        match result {
+            Ok(tr) => {
+                tracing::info!(
+                    transform_index = i,
+                    stream = stream_name,
+                    duration_secs = tr.duration_secs,
+                    records_in = tr.summary.records_in,
+                    records_out = tr.summary.records_out,
+                    "Transform stage completed for stream"
+                );
+                durations.push(tr.duration_secs);
+            }
+            Err(e) => {
+                tracing::error!(
+                    transform_index = i,
+                    stream = stream_name,
+                    "Transform failed: {e}",
+                );
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+        }
+    }
+    Ok(CollectedTransforms {
+        durations,
+        first_error,
+    })
+}
+
 #[allow(clippy::too_many_lines, clippy::similar_names)]
 async fn execute_streams(
     config: &PipelineConfig,
@@ -764,14 +822,12 @@ async fn execute_streams(
     let source_manifest_limits = connectors
         .source_manifest
         .as_ref()
-        .map(|m| &m.limits)
-        .cloned()
+        .map(|m| m.limits.clone())
         .unwrap_or_default();
     let dest_manifest_limits = connectors
         .dest_manifest
         .as_ref()
-        .map(|m| &m.limits)
-        .cloned()
+        .map(|m| m.limits.clone())
         .unwrap_or_default();
     let transform_overrides: Vec<Option<SandboxOverrides>> = config
         .transforms
@@ -808,7 +864,7 @@ async fn execute_streams(
         ),
         transform_overrides,
         compression: stream_build.compression,
-        channel_capacity: usize::max(1, stream_build.limits.max_inflight_batches as usize),
+        channel_capacity: (stream_build.limits.max_inflight_batches as usize).max(1),
     });
 
     let mut stream_join_set: JoinSet<Result<StreamResult, PipelineError>> = JoinSet::new();
@@ -816,7 +872,7 @@ async fn execute_streams(
 
     if !options.dry_run {
         let preflight_streams = destination_preflight_streams(&stream_build.stream_ctxs);
-        let preflight_parallelism = usize::max(1, usize::min(parallelism, preflight_streams.len()));
+        let preflight_parallelism = parallelism.min(preflight_streams.len()).max(1);
         tracing::info!(
             unique_streams = preflight_streams.len(),
             preflight_parallelism,
@@ -1002,42 +1058,11 @@ async fn execute_streams(
                     ))
                 })?;
 
-                let mut transform_durations = Vec::new();
-                let mut first_transform_error: Option<PipelineError> = None;
-                for (i, t_handle) in transform_handles {
-                    let result = t_handle.await.map_err(|e| {
-                        PipelineError::Infrastructure(anyhow::anyhow!(
-                            "Transform {} task panicked for stream '{}': {}",
-                            i,
-                            stream_ctx.stream_name,
-                            e
-                        ))
-                    })?;
-                    match result {
-                        Ok(result) => {
-                            tracing::info!(
-                                transform_index = i,
-                                stream = stream_ctx.stream_name,
-                                duration_secs = result.duration_secs,
-                                records_in = result.summary.records_in,
-                                records_out = result.summary.records_out,
-                                "Transform stage completed for stream (dry-run)"
-                            );
-                            transform_durations.push(result.duration_secs);
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                transform_index = i,
-                                stream = stream_ctx.stream_name,
-                                "Transform failed: {}",
-                                e
-                            );
-                            if first_transform_error.is_none() {
-                                first_transform_error = Some(e);
-                            }
-                        }
-                    }
-                }
+                let transforms = collect_transform_results(
+                    transform_handles,
+                    &stream_ctx.stream_name,
+                )
+                .await?;
 
                 let mut collected = collector_handle.await.map_err(|e| {
                     PipelineError::Infrastructure(anyhow::anyhow!(
@@ -1049,7 +1074,7 @@ async fn execute_streams(
 
                 drop(permit);
 
-                if let Some(transform_err) = first_transform_error {
+                if let Some(transform_err) = transforms.first_error {
                     return Err(transform_err);
                 }
 
@@ -1079,7 +1104,7 @@ async fn execute_streams(
                     dst_duration: 0.0,
                     vm_setup_secs: 0.0,
                     recv_secs: 0.0,
-                    transform_durations,
+                    transform_durations: transforms.durations,
                     dry_run_result: Some(collected),
                 })
             } else {
@@ -1110,42 +1135,11 @@ async fn execute_streams(
                     ))
                 })?;
 
-                let mut transform_durations = Vec::new();
-                let mut first_transform_error: Option<PipelineError> = None;
-                for (i, t_handle) in transform_handles {
-                    let result = t_handle.await.map_err(|e| {
-                        PipelineError::Infrastructure(anyhow::anyhow!(
-                            "Transform {} task panicked for stream '{}': {}",
-                            i,
-                            stream_ctx.stream_name,
-                            e
-                        ))
-                    })?;
-                    match result {
-                        Ok(result) => {
-                            tracing::info!(
-                                transform_index = i,
-                                stream = stream_ctx.stream_name,
-                                duration_secs = result.duration_secs,
-                                records_in = result.summary.records_in,
-                                records_out = result.summary.records_out,
-                                "Transform stage completed for stream"
-                            );
-                            transform_durations.push(result.duration_secs);
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                transform_index = i,
-                                stream = stream_ctx.stream_name,
-                                "Transform failed: {}",
-                                e
-                            );
-                            if first_transform_error.is_none() {
-                                first_transform_error = Some(e);
-                            }
-                        }
-                    }
-                }
+                let transforms = collect_transform_results(
+                    transform_handles,
+                    &stream_ctx.stream_name,
+                )
+                .await?;
 
                 let dst_result = dst_handle.await.map_err(|e| {
                     PipelineError::Infrastructure(anyhow::anyhow!(
@@ -1157,7 +1151,7 @@ async fn execute_streams(
 
                 drop(permit);
 
-                if let Some(transform_err) = first_transform_error {
+                if let Some(transform_err) = transforms.first_error {
                     return Err(transform_err);
                 }
 
@@ -1179,7 +1173,7 @@ async fn execute_streams(
                     dst_duration: dst.duration_secs,
                     vm_setup_secs: dst.vm_setup_secs,
                     recv_secs: dst.recv_secs,
-                    transform_durations,
+                    transform_durations: transforms.durations,
                     dry_run_result: None,
                 })
             }
@@ -1453,22 +1447,12 @@ async fn finalize_run(
             bytes_read: aggregated.total_read_summary.bytes_read,
             bytes_written: aggregated.total_write_summary.bytes_written,
         },
-        source: SourceTiming {
-            duration_secs: aggregated.src_timing_maxima.duration_secs,
-            module_load_ms: modules.source_module_load_ms,
-            connect_secs: src_perf.map_or(aggregated.src_timing_maxima.connect_secs, |p| {
-                p.connect_secs
-            }),
-            query_secs: src_perf.map_or(aggregated.src_timing_maxima.query_secs, |p| p.query_secs),
-            fetch_secs: src_perf.map_or(aggregated.src_timing_maxima.fetch_secs, |p| p.fetch_secs),
-            arrow_encode_secs: src_perf
-                .map_or(aggregated.src_timing_maxima.arrow_encode_secs, |p| {
-                    p.arrow_encode_secs
-                }),
-            emit_nanos: aggregated.src_timings.emit_batch_nanos,
-            compress_nanos: aggregated.src_timings.compress_nanos,
-            emit_count: aggregated.src_timings.emit_batch_count,
-        },
+        source: build_source_timing(
+            &aggregated.src_timing_maxima,
+            &aggregated.src_timings,
+            src_perf,
+            modules.source_module_load_ms,
+        ),
         dest: DestTiming {
             duration_secs: aggregated.dst_timing_maxima.duration_secs,
             module_load_ms: modules.dest_module_load_ms,
@@ -1510,7 +1494,7 @@ async fn collect_dry_run_frames(
     let mut total_rows: u64 = 0;
     let mut total_bytes: u64 = 0;
 
-    while let Some(Frame::Data(data)) = receiver.recv().await {
+    'recv: while let Some(Frame::Data(data)) = receiver.recv().await {
         let ipc_bytes = match compression {
             Some(codec) => {
                 rapidbyte_runtime::compression::decompress(codec, &data).map_err(|e| {
@@ -1531,24 +1515,13 @@ async fn collect_dry_run_frames(
             if let Some(max) = limit {
                 let remaining = max.saturating_sub(total_rows);
                 if remaining == 0 {
-                    return Ok(DryRunStreamResult {
-                        stream_name: String::new(),
-                        batches,
-                        total_rows,
-                        total_bytes,
-                    });
+                    break 'recv;
                 }
                 if rows > remaining {
                     #[allow(clippy::cast_possible_truncation)]
-                    let sliced = batch.slice(0, remaining as usize);
+                    batches.push(batch.slice(0, remaining as usize));
                     total_rows += remaining;
-                    batches.push(sliced);
-                    return Ok(DryRunStreamResult {
-                        stream_name: String::new(),
-                        batches,
-                        total_rows,
-                        total_bytes,
-                    });
+                    break 'recv;
                 }
             }
 

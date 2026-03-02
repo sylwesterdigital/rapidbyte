@@ -64,12 +64,25 @@ pub fn parse_connector_ref(connector_ref: &str) -> (String, String) {
     (name, version)
 }
 
+/// Return the ordered list of directories to search for connector `.wasm` binaries.
+///
+/// Search order:
+/// 1. `RAPIDBYTE_CONNECTOR_DIR` env var (if set)
+/// 2. `~/.rapidbyte/plugins/`
+#[must_use]
+pub fn connector_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(dir) = std::env::var("RAPIDBYTE_CONNECTOR_DIR") {
+        dirs.push(PathBuf::from(dir));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(PathBuf::from(home).join(".rapidbyte").join("plugins"));
+    }
+    dirs
+}
+
 /// Resolve a connector reference (e.g. "rapidbyte/source-postgres@v0.1.0")
 /// to a .wasm file path on disk.
-///
-/// Resolution order:
-/// 1. `RAPIDBYTE_CONNECTOR_DIR` env var
-/// 2. `~/.rapidbyte/plugins/`
 ///
 /// The connector ref is mapped to a filename by extracting the connector name
 /// and replacing hyphens with underscores: "source-postgres" -> `source_postgres.wasm`
@@ -88,20 +101,8 @@ pub fn resolve_connector_path(connector_ref: &str) -> Result<PathBuf> {
 
     let filename = format!("{}.wasm", name.replace('-', "_"));
 
-    // Check RAPIDBYTE_CONNECTOR_DIR first
-    if let Ok(dir) = std::env::var("RAPIDBYTE_CONNECTOR_DIR") {
-        let path = Path::new(&dir).join(&filename);
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-
-    // Fall back to ~/.rapidbyte/plugins/
-    if let Ok(home) = std::env::var("HOME") {
-        let path = PathBuf::from(home)
-            .join(".rapidbyte")
-            .join("plugins")
-            .join(&filename);
+    for dir in connector_search_dirs() {
+        let path = dir.join(&filename);
         if path.exists() {
             return Ok(path);
         }
