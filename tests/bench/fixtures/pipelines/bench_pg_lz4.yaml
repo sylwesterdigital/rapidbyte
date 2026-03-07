@@ -2,7 +2,7 @@ version: "1.0"
 pipeline: bench_pg_lz4
 
 source:
-  use: source-postgres
+  use: postgres
   config:
     host: localhost
     port: 5433
@@ -14,7 +14,7 @@ source:
       sync_mode: full_refresh
 
 destination:
-  use: dest-postgres
+  use: postgres
   config:
     host: localhost
     port: 5433

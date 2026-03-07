@@ -2,7 +2,7 @@ version: "1.0"
 pipeline: bench_pg_transform
 
 source:
-  use: source-postgres
+  use: postgres
   config:
     host: localhost
     port: 5433
@@ -14,7 +14,7 @@ source:
       sync_mode: full_refresh
 
 transforms:
-  - use: transform-sql
+  - use: sql
     config:
       query: >-
         SELECT
@@ -25,7 +25,7 @@ transforms:
         FROM input
 
 destination:
-  use: dest-postgres
+  use: postgres
   config:
     host: localhost
     port: 5433

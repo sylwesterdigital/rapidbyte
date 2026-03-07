@@ -66,7 +66,7 @@ struct Cli {
 
 #[derive(Clone, Debug, Parser)]
 struct RunArgs {
-    connector: Option<String>,
+    plugin: Option<String>,
     rows: Option<u32>,
 
     #[arg(long, value_enum)]
@@ -94,7 +94,7 @@ struct CompareArgs {
     ref2: String,
 
     #[arg(long)]
-    connector: Option<String>,
+    plugin: Option<String>,
 
     #[arg(long)]
     rows: Option<u32>,
@@ -115,7 +115,7 @@ struct CompareArgs {
 #[derive(Debug, Clone)]
 struct BenchContext {
     root: PathBuf,
-    connector_dir: PathBuf,
+    plugin_dir: PathBuf,
     results_file: PathBuf,
     host: String,
     port: u16,
@@ -156,30 +156,30 @@ async fn run_command(args: RunArgs) -> Result<()> {
 
     let build_mode = if args.debug { "debug" } else { "release" };
     let aot = resolve_aot(args.aot, args.no_aot);
-    let connectors = resolve_connectors(args.connector.as_deref())?;
+    let plugins = resolve_plugins(args.plugin.as_deref())?;
 
     println!();
     println!("═══════════════════════════════════════════════");
     println!("  Rapidbyte Benchmark");
-    println!("  Connectors: {}", connectors.join(" "));
+    println!("  Plugins: {}", plugins.join(" "));
     println!("  Profile: {}", args.profile.as_str());
     println!("  Build: {build_mode} | AOT: {aot}");
     println!("═══════════════════════════════════════════════");
     println!();
 
     build_host(&root, build_mode)?;
-    build_connectors(&root, build_mode)?;
-    let connector_dir = stage_connectors(&root, build_mode)?;
-    report_wasm_sizes(&connector_dir)?;
+    build_plugins(&root, build_mode)?;
+    let plugin_dir = stage_plugins(&root, build_mode)?;
+    report_wasm_sizes(&plugin_dir)?;
 
-    let context = init_context(root.clone(), connector_dir).await?;
+    let context = init_context(root.clone(), plugin_dir).await?;
     let rows = args.rows.unwrap_or(args.profile.default_rows());
     let iters = args.iters.unwrap_or(3);
 
-    for connector in connectors {
-        run_connector(
+    for plugin in plugins {
+        run_plugin(
             &context,
-            &connector,
+            &plugin,
             rows,
             args.profile,
             iters,
@@ -224,7 +224,7 @@ async fn compare_command(args: CompareArgs) -> Result<()> {
     println!();
 
     let run_args = RunArgs {
-        connector: args.connector,
+        plugin: args.plugin,
         rows: args.rows,
         profile: args.profile,
         iters: args.iters,
@@ -273,10 +273,10 @@ fn configure_build_env() {
     }
 }
 
-fn resolve_connectors(selected: Option<&str>) -> Result<Vec<String>> {
+fn resolve_plugins(selected: Option<&str>) -> Result<Vec<String>> {
     match selected {
         Some("postgres") | None => Ok(vec!["postgres".to_string()]),
-        Some(other) => bail!("Unknown connector: {other} (supported: postgres)"),
+        Some(other) => bail!("Unknown plugin: {other} (supported: postgres)"),
     }
 }
 
@@ -301,48 +301,56 @@ fn build_host(root: &Path, mode: &str) -> Result<()> {
     )
 }
 
-fn build_connectors(root: &Path, mode: &str) -> Result<()> {
-    let names = ["source-postgres", "dest-postgres", "transform-sql"];
-    for name in names {
-        println!("Building {name} connector ({mode})...");
+fn build_plugins(root: &Path, mode: &str) -> Result<()> {
+    let subpaths = [
+        "sources/postgres",
+        "destinations/postgres",
+        "transforms/sql",
+    ];
+    for subpath in subpaths {
+        println!("Building {subpath} plugin ({mode})...");
         let mut cmd = Command::new("cargo");
         cmd.arg("build")
             .arg("--quiet")
-            .current_dir(root.join("connectors").join(name));
+            .current_dir(root.join("plugins").join(subpath));
         if mode == "release" {
             cmd.arg("--release");
         }
         ensure_success(
             cmd.status()
-                .with_context(|| format!("failed to build connector {name}"))?,
-            &format!("connector build failed for {name}"),
+                .with_context(|| format!("failed to build plugin {subpath}"))?,
+            &format!("plugin build failed for {subpath}"),
         )?;
     }
     Ok(())
 }
 
-fn stage_connectors(root: &Path, mode: &str) -> Result<PathBuf> {
-    let output_dir = root.join("target/connectors");
-    fs::create_dir_all(&output_dir).context("failed to create target/connectors")?;
+fn stage_plugins(root: &Path, mode: &str) -> Result<PathBuf> {
+    let output_dir = root.join("target/plugins");
+    fs::create_dir_all(&output_dir).context("failed to create target/plugins")?;
 
     let wasm_dir = format!("wasm32-wasip2/{mode}");
     let mappings = [
-        ("source-postgres", "source_postgres.wasm"),
-        ("dest-postgres", "dest_postgres.wasm"),
-        ("transform-sql", "transform_sql.wasm"),
+        ("sources/postgres", "source_postgres.wasm", "sources"),
+        ("destinations/postgres", "dest_postgres.wasm", "destinations"),
+        ("transforms/sql", "transform_sql.wasm", "transforms"),
     ];
 
-    for (dir_name, file_name) in mappings {
+    for (subpath, file_name, kind_subdir) in mappings {
+        let kind_dir = output_dir.join(kind_subdir);
+        fs::create_dir_all(&kind_dir)
+            .with_context(|| format!("failed to create {}", kind_dir.display()))?;
+
         let src = root
-            .join("connectors")
-            .join(dir_name)
+            .join("plugins")
+            .join(subpath)
             .join("target")
             .join(&wasm_dir)
             .join(file_name);
-        let dest = output_dir.join(file_name);
+        let dest = kind_dir.join(file_name);
         fs::copy(&src, &dest).with_context(|| {
             format!(
-                "failed to stage connector wasm {} -> {}",
+                "failed to stage plugin wasm {} -> {}",
                 src.display(),
                 dest.display()
             )
@@ -366,36 +374,44 @@ fn stage_connectors(root: &Path, mode: &str) -> Result<PathBuf> {
     Ok(output_dir)
 }
 
-fn report_wasm_sizes(connector_dir: &Path) -> Result<()> {
-    println!("Connector binary sizes:");
-    for entry in fs::read_dir(connector_dir).context("failed to list staged connectors")? {
-        let path = entry?.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("wasm") {
+fn report_wasm_sizes(plugin_dir: &Path) -> Result<()> {
+    println!("Plugin binary sizes:");
+    for kind in ["sources", "destinations", "transforms"] {
+        let kind_dir = plugin_dir.join(kind);
+        if !kind_dir.exists() {
             continue;
         }
-        let size = fs::metadata(&path)?.len();
-        let human = if size >= 1_048_576 {
-            format!("{:.1} MB", size as f64 / 1_048_576.0)
-        } else {
-            format!("{:.0} KB", size as f64 / 1024.0)
-        };
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("unknown");
-        println!("  {name}: {human} ({size} bytes)");
+        for entry in fs::read_dir(&kind_dir)
+            .with_context(|| format!("failed to list staged plugins in {}", kind_dir.display()))?
+        {
+            let path = entry?.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("wasm") {
+                continue;
+            }
+            let size = fs::metadata(&path)?.len();
+            let human = if size >= 1_048_576 {
+                format!("{:.1} MB", size as f64 / 1_048_576.0)
+            } else {
+                format!("{:.0} KB", size as f64 / 1024.0)
+            };
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("unknown");
+            println!("  {kind}/{name}: {human} ({size} bytes)");
+        }
     }
     Ok(())
 }
 
-async fn init_context(root: PathBuf, connector_dir: PathBuf) -> Result<BenchContext> {
+async fn init_context(root: PathBuf, plugin_dir: PathBuf) -> Result<BenchContext> {
     let port = shared_postgres_port()?;
     let results_dir = root.join("target/bench_results");
     fs::create_dir_all(&results_dir).context("failed to create target/bench_results")?;
 
     Ok(BenchContext {
         root,
-        connector_dir,
+        plugin_dir,
         results_file: results_dir.join("results.jsonl"),
         host: "127.0.0.1".to_string(),
         port,
@@ -405,22 +421,22 @@ async fn init_context(root: PathBuf, connector_dir: PathBuf) -> Result<BenchCont
     })
 }
 
-async fn run_connector(
+async fn run_plugin(
     context: &BenchContext,
-    connector: &str,
+    plugin: &str,
     rows: u32,
     profile: Profile,
     iters: u32,
     build_mode: &str,
     aot: bool,
 ) -> Result<()> {
-    if connector != "postgres" {
-        bail!("unsupported connector {connector}");
+    if plugin != "postgres" {
+        bail!("unsupported plugin {plugin}");
     }
 
     println!();
     println!(
-        "Setting up {connector} benchmark ({rows} rows, profile: {})",
+        "Setting up {plugin} benchmark ({rows} rows, profile: {})",
         profile.as_str()
     );
     seed_source_table(context, profile, rows).await?;
@@ -478,7 +494,7 @@ fn run_pipeline_once(
         .arg(pipeline_path)
         .arg("--log-level")
         .arg("warn")
-        .env("RAPIDBYTE_CONNECTOR_DIR", &context.connector_dir)
+        .env("RAPIDBYTE_PLUGIN_DIR", &context.plugin_dir)
         .env("RAPIDBYTE_WASMTIME_AOT", if aot { "1" } else { "0" })
         .env("RAPIDBYTE_BENCH", "1")
         .output()

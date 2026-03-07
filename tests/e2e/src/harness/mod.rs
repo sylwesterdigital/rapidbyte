@@ -1,4 +1,4 @@
-mod connectors;
+mod plugins;
 mod container;
 
 use std::path::PathBuf;
@@ -19,7 +19,7 @@ pub struct HarnessContext {
     pub postgres_db: String,
     pub postgres_user: String,
     pub postgres_pass: String,
-    pub connector_dir: PathBuf,
+    pub plugin_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -53,8 +53,8 @@ pub struct AutotuneOptions {
 
 pub async fn bootstrap() -> Result<HarnessContext> {
     let postgres_port = container::shared_postgres_port()?;
-    let connector_dir = connectors::prepare_connector_dir()?;
-    std::env::set_var("RAPIDBYTE_CONNECTOR_DIR", &connector_dir);
+    let plugin_dir = plugins::prepare_plugin_dir()?;
+    std::env::set_var("RAPIDBYTE_PLUGIN_DIR", &plugin_dir);
 
     Ok(HarnessContext {
         postgres_host: "127.0.0.1".to_string(),
@@ -62,7 +62,7 @@ pub async fn bootstrap() -> Result<HarnessContext> {
         postgres_db: "postgres".to_string(),
         postgres_user: "postgres".to_string(),
         postgres_pass: "postgres".to_string(),
-        connector_dir,
+        plugin_dir,
     })
 }
 
@@ -631,7 +631,7 @@ fn render_pipeline_yaml(
 pipeline: e2e_full_refresh
 
 source:
-  use: source-postgres
+  use: postgres
   config:
     host: {source_host}
     port: {source_port}
@@ -645,7 +645,7 @@ source:
       sync_mode: {sync_mode}{cursor_field}
 
 destination:
-  use: dest-postgres
+  use: postgres
   config:
     host: {dest_host}
     port: {dest_port}
@@ -730,7 +730,7 @@ fn render_transform_yaml(
 pipeline: e2e_transform
 
 source:
-  use: source-postgres
+  use: postgres
   config:
     host: {host}
     port: {port}
@@ -742,13 +742,13 @@ source:
       sync_mode: full_refresh
 
 transforms:
-  - use: transform-sql
+  - use: sql
     config:
       query: >-
         {query}
 
 destination:
-  use: dest-postgres
+  use: postgres
   config:
     host: {host}
     port: {port}
@@ -790,7 +790,7 @@ fn render_validate_transform_yaml(
 pipeline: e2e_validate_transform
 
 source:
-  use: source-postgres
+  use: postgres
   config:
     host: {host}
     port: {port}
@@ -802,13 +802,13 @@ source:
       sync_mode: full_refresh
 
 transforms:
-  - use: transform-validate
+  - use: validate
     config:
       rules:
 {rules}
 
 destination:
-  use: dest-postgres
+  use: postgres
   config:
     host: {host}
     port: {port}
@@ -861,7 +861,7 @@ fn render_cdc_yaml(
 pipeline: e2e_cdc
 
 source:
-  use: source-postgres
+  use: postgres
   config:
     host: {host}
     port: {port}
@@ -875,7 +875,7 @@ source:
       sync_mode: cdc
 
 destination:
-  use: dest-postgres
+  use: postgres
   config:
     host: {host}
     port: {port}

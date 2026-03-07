@@ -158,7 +158,7 @@ def main():
         mbps_vals = [bytes_read / d / 1048576 for d in durations if d > 0]
         mbps = stats(mbps_vals)
 
-        print(f"  connector-postgres/{label}/{rows}")
+        print(f"  plugin-postgres/{label}/{rows}")
         print(f"                        time:   {fmt_ci(s)}")
         print(f"                        thrpt:  [{rps['ci_lo']:,.0f} {rps['mean']:,.0f} {rps['ci_hi']:,.0f}] rows/s")
         print(f"                                [{mbps['ci_lo']:.2f} {mbps['mean']:.2f} {mbps['ci_hi']:.2f}] MB/s")

@@ -28,11 +28,11 @@ fn test_parse_and_validate_fixture_pipeline() {
     let config = parser::parse_pipeline(&fixture_path).expect("Failed to parse fixture pipeline");
 
     assert_eq!(config.pipeline, "test_pg_to_pg");
-    assert_eq!(config.source.use_ref, "source-postgres");
+    assert_eq!(config.source.use_ref, "postgres");
     assert_eq!(config.source.streams.len(), 2);
     assert_eq!(config.source.streams[0].name, "users");
     assert_eq!(config.source.streams[1].name, "orders");
-    assert_eq!(config.destination.use_ref, "dest-postgres");
+    assert_eq!(config.destination.use_ref, "postgres");
     assert_eq!(config.destination.write_mode, PipelineWriteMode::Append);
     assert_eq!(config.destination.config["schema"], "raw");
     assert_eq!(config.state.backend, StateBackendKind::Sqlite);
