@@ -19,7 +19,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use rapidbyte_state::StateBackend;
 use rapidbyte_types::checkpoint::{Checkpoint, CheckpointKind, StateScope};
 use rapidbyte_types::envelope::{DlqRecord, Timestamp};
-use rapidbyte_types::error::{ConnectorError, ErrorCategory};
+use rapidbyte_types::error::{ErrorCategory, PluginError};
 use rapidbyte_types::manifest::Permissions;
 use rapidbyte_types::metric::{Metric, MetricValue};
 use rapidbyte_types::state::{CursorState, PipelineId, StreamName};
@@ -352,22 +352,22 @@ impl ComponentHostState {
         &mut self,
         handle: u64,
         chunk: Vec<u8>,
-    ) -> Result<u64, ConnectorError> {
+    ) -> Result<u64, PluginError> {
         self.frames
             .write(handle, &chunk)
-            .map_err(|e| ConnectorError::frame("FRAME_WRITE_FAILED", e.to_string()))
+            .map_err(|e| PluginError::frame("FRAME_WRITE_FAILED", e.to_string()))
     }
 
-    pub(crate) fn frame_seal_impl(&mut self, handle: u64) -> Result<(), ConnectorError> {
+    pub(crate) fn frame_seal_impl(&mut self, handle: u64) -> Result<(), PluginError> {
         self.frames
             .seal(handle)
-            .map_err(|e| ConnectorError::frame("FRAME_SEAL_FAILED", e.to_string()))
+            .map_err(|e| PluginError::frame("FRAME_SEAL_FAILED", e.to_string()))
     }
 
-    pub(crate) fn frame_len_impl(&mut self, handle: u64) -> Result<u64, ConnectorError> {
+    pub(crate) fn frame_len_impl(&mut self, handle: u64) -> Result<u64, PluginError> {
         self.frames
             .len(handle)
-            .map_err(|e| ConnectorError::frame("FRAME_LEN_FAILED", e.to_string()))
+            .map_err(|e| PluginError::frame("FRAME_LEN_FAILED", e.to_string()))
     }
 
     pub(crate) fn frame_read_impl(
@@ -375,10 +375,10 @@ impl ComponentHostState {
         handle: u64,
         offset: u64,
         len: u64,
-    ) -> Result<Vec<u8>, ConnectorError> {
+    ) -> Result<Vec<u8>, PluginError> {
         self.frames
             .read(handle, offset, len)
-            .map_err(|e| ConnectorError::frame("FRAME_READ_FAILED", e.to_string()))
+            .map_err(|e| PluginError::frame("FRAME_READ_FAILED", e.to_string()))
     }
 
     pub(crate) fn frame_drop_impl(&mut self, handle: u64) {
@@ -388,17 +388,17 @@ impl ComponentHostState {
     // ── Host import implementations ─────────────────────────────────
 
     #[allow(clippy::cast_possible_truncation)]
-    pub(crate) fn emit_batch_impl(&mut self, handle: u64) -> Result<(), ConnectorError> {
+    pub(crate) fn emit_batch_impl(&mut self, handle: u64) -> Result<(), PluginError> {
         let fn_start = Instant::now();
 
         // Consume the sealed frame -> Bytes (zero-copy)
         let payload = self
             .frames
             .consume(handle)
-            .map_err(|e| ConnectorError::frame("EMIT_BATCH_FAILED", e.to_string()))?;
+            .map_err(|e| PluginError::frame("EMIT_BATCH_FAILED", e.to_string()))?;
 
         if payload.is_empty() {
-            return Err(ConnectorError::internal(
+            return Err(PluginError::internal(
                 "EMPTY_BATCH",
                 "Connector emitted a zero-length batch; this is a protocol violation",
             ));
@@ -408,7 +408,7 @@ impl ComponentHostState {
             if let Some(codec) = self.batch.compression {
                 let start = Instant::now();
                 let compressed = crate::compression::compress_bytes(codec, &payload)
-                    .map_err(|e| ConnectorError::internal("COMPRESS_FAILED", e.to_string()))?;
+                    .map_err(|e| PluginError::internal("COMPRESS_FAILED", e.to_string()))?;
                 (compressed, start.elapsed().as_nanos() as u64)
             } else {
                 (payload, 0)
@@ -416,14 +416,14 @@ impl ComponentHostState {
 
         let sender =
             self.batch.sender.as_ref().ok_or_else(|| {
-                ConnectorError::internal("NO_SENDER", "No batch sender configured")
+                PluginError::internal("NO_SENDER", "No batch sender configured")
             })?;
 
         let payload_len = payload.len() as u64;
 
         sender
             .blocking_send(Frame::Data(payload))
-            .map_err(|e| ConnectorError::internal("CHANNEL_SEND", e.to_string()))?;
+            .map_err(|e| PluginError::internal("CHANNEL_SEND", e.to_string()))?;
 
         if let Some(cb) = &self.batch.on_emit {
             cb(payload_len);
@@ -440,11 +440,11 @@ impl ComponentHostState {
     }
 
     #[allow(clippy::cast_possible_truncation)]
-    pub(crate) fn next_batch_impl(&mut self) -> Result<Option<u64>, ConnectorError> {
+    pub(crate) fn next_batch_impl(&mut self) -> Result<Option<u64>, PluginError> {
         let fn_start = Instant::now();
 
         let receiver = self.batch.receiver.as_mut().ok_or_else(|| {
-            ConnectorError::internal("NO_RECEIVER", "No batch receiver configured")
+            PluginError::internal("NO_RECEIVER", "No batch receiver configured")
         })?;
 
         let wait_start = Instant::now();
@@ -462,7 +462,7 @@ impl ComponentHostState {
             if let Some(codec) = self.batch.compression {
                 let start = Instant::now();
                 let decompressed = crate::compression::decompress(codec, &payload)
-                    .map_err(|e| ConnectorError::internal("DECOMPRESS_FAILED", e.to_string()))?
+                    .map_err(|e| PluginError::internal("DECOMPRESS_FAILED", e.to_string()))?
                     .into();
                 (decompressed, start.elapsed().as_nanos() as u64)
             } else {
@@ -495,14 +495,14 @@ impl ComponentHostState {
         &mut self,
         scope: u32,
         key: String,
-    ) -> Result<Option<String>, ConnectorError> {
+    ) -> Result<Option<String>, PluginError> {
         validate_state_key(&key)?;
         let scope = parse_state_scope(scope)?;
         let scoped_key = self.scoped_state_key(scope, &key);
         self.identity
             .state_backend
             .get_cursor(&self.identity.pipeline, &StreamName::new(scoped_key))
-            .map_err(|e| ConnectorError::internal("STATE_BACKEND", e.to_string()))
+            .map_err(|e| PluginError::internal("STATE_BACKEND", e.to_string()))
             .map(|opt| opt.and_then(|cursor| cursor.cursor_value))
     }
 
@@ -511,7 +511,7 @@ impl ComponentHostState {
         scope: u32,
         key: String,
         value: String,
-    ) -> Result<(), ConnectorError> {
+    ) -> Result<(), PluginError> {
         validate_state_key(&key)?;
         let scope = parse_state_scope(scope)?;
         let scoped_key = self.scoped_state_key(scope, &key);
@@ -528,7 +528,7 @@ impl ComponentHostState {
                 &StreamName::new(scoped_key),
                 &cursor,
             )
-            .map_err(|e| ConnectorError::internal("STATE_BACKEND", e.to_string()))
+            .map_err(|e| PluginError::internal("STATE_BACKEND", e.to_string()))
     }
 
     pub(crate) fn state_cas_impl(
@@ -537,7 +537,7 @@ impl ComponentHostState {
         key: String,
         expected: Option<String>,
         new_value: String,
-    ) -> Result<bool, ConnectorError> {
+    ) -> Result<bool, PluginError> {
         validate_state_key(&key)?;
         let scope = parse_state_scope(scope)?;
         let scoped_key = self.scoped_state_key(scope, &key);
@@ -549,16 +549,16 @@ impl ComponentHostState {
                 expected.as_deref(),
                 &new_value,
             )
-            .map_err(|e| ConnectorError::internal("STATE_BACKEND", e.to_string()))
+            .map_err(|e| PluginError::internal("STATE_BACKEND", e.to_string()))
     }
 
     pub(crate) fn checkpoint_impl(
         &mut self,
         kind: u32,
         payload_json: String,
-    ) -> Result<(), ConnectorError> {
+    ) -> Result<(), PluginError> {
         let envelope: serde_json::Value = serde_json::from_str(&payload_json)
-            .map_err(|e| ConnectorError::internal("PARSE_CHECKPOINT", e.to_string()))?;
+            .map_err(|e| PluginError::internal("PARSE_CHECKPOINT", e.to_string()))?;
 
         tracing::debug!(
             pipeline = self.identity.pipeline.as_str(),
@@ -568,7 +568,7 @@ impl ComponentHostState {
         );
 
         let checkpoint_kind = CheckpointKind::try_from(kind).map_err(|k| {
-            ConnectorError::config(
+            PluginError::config(
                 "INVALID_CHECKPOINT_KIND",
                 format!("Invalid checkpoint kind: {k}"),
             )
@@ -603,9 +603,9 @@ impl ComponentHostState {
         Ok(())
     }
 
-    pub(crate) fn metric_impl(&mut self, payload_json: String) -> Result<(), ConnectorError> {
+    pub(crate) fn metric_impl(&mut self, payload_json: String) -> Result<(), PluginError> {
         let metric_json: serde_json::Value = serde_json::from_str(&payload_json)
-            .map_err(|e| ConnectorError::internal("PARSE_METRIC", e.to_string()))?;
+            .map_err(|e| PluginError::internal("PARSE_METRIC", e.to_string()))?;
 
         tracing::debug!(
             pipeline = self.identity.pipeline.as_str(),
@@ -621,7 +621,7 @@ impl ComponentHostState {
             other => other,
         };
         let metric = serde_json::from_value::<Metric>(payload)
-            .map_err(|e| ConnectorError::internal("PARSE_METRIC", e.to_string()))?;
+            .map_err(|e| PluginError::internal("PARSE_METRIC", e.to_string()))?;
 
         let value = match metric.value {
             MetricValue::Gauge(v) | MetricValue::Histogram(v) => v,
@@ -664,16 +664,16 @@ impl ComponentHostState {
         &mut self,
         host: String,
         port: u16,
-    ) -> Result<u64, ConnectorError> {
+    ) -> Result<u64, PluginError> {
         if !self.sockets.acl.allows(&host) {
-            return Err(ConnectorError::permission(
+            return Err(PluginError::permission(
                 "NETWORK_DENIED",
                 format!("Host '{host}' is not allowed by connector permissions"),
             ));
         }
 
         let addrs = resolve_socket_addrs(&host, port).map_err(|e| {
-            ConnectorError::transient_network("DNS_RESOLUTION_FAILED", e.to_string())
+            PluginError::transient_network("DNS_RESOLUTION_FAILED", e.to_string())
         })?;
 
         let mut last_error: Option<(SocketAddr, std::io::Error)> = None;
@@ -695,7 +695,7 @@ impl ComponentHostState {
                 || "no resolved addresses available".to_string(),
                 |(addr, err)| format!("last attempt {addr} failed: {err}"),
             );
-            ConnectorError::transient_network(
+            PluginError::transient_network(
                 "TCP_CONNECT_FAILED",
                 format!("{host}:{port} ({details})"),
             )
@@ -703,10 +703,10 @@ impl ComponentHostState {
 
         stream
             .set_nonblocking(true)
-            .map_err(|e| ConnectorError::internal("SOCKET_CONFIG", e.to_string()))?;
+            .map_err(|e| PluginError::internal("SOCKET_CONFIG", e.to_string()))?;
         stream
             .set_nodelay(true)
-            .map_err(|e| ConnectorError::internal("SOCKET_CONFIG", e.to_string()))?;
+            .map_err(|e| PluginError::internal("SOCKET_CONFIG", e.to_string()))?;
 
         let handle = self.sockets.next_handle;
         self.sockets.next_handle = self.sockets.next_handle.wrapping_add(1);
@@ -727,10 +727,10 @@ impl ComponentHostState {
         &mut self,
         handle: u64,
         len: u64,
-    ) -> Result<SocketReadResult, ConnectorError> {
+    ) -> Result<SocketReadResult, PluginError> {
         let entry =
             self.sockets.sockets.get_mut(&handle).ok_or_else(|| {
-                ConnectorError::internal("INVALID_SOCKET", "Invalid socket handle")
+                PluginError::internal("INVALID_SOCKET", "Invalid socket handle")
             })?;
 
         let read_len = len.clamp(1, MAX_SOCKET_READ_BYTES) as usize;
@@ -779,7 +779,7 @@ impl ComponentHostState {
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             Ok(SocketReadResult::WouldBlock)
                         }
-                        Err(e) => Err(ConnectorError::transient_network(
+                        Err(e) => Err(PluginError::transient_network(
                             "SOCKET_READ_FAILED",
                             e.to_string(),
                         )),
@@ -789,7 +789,7 @@ impl ComponentHostState {
                     Ok(SocketReadResult::WouldBlock)
                 }
             }
-            Err(e) => Err(ConnectorError::transient_network(
+            Err(e) => Err(PluginError::transient_network(
                 "SOCKET_READ_FAILED",
                 e.to_string(),
             )),
@@ -801,10 +801,10 @@ impl ComponentHostState {
         &mut self,
         handle: u64,
         data: Vec<u8>,
-    ) -> Result<SocketWriteResult, ConnectorError> {
+    ) -> Result<SocketWriteResult, PluginError> {
         let entry =
             self.sockets.sockets.get_mut(&handle).ok_or_else(|| {
-                ConnectorError::internal("INVALID_SOCKET", "Invalid socket handle")
+                PluginError::internal("INVALID_SOCKET", "Invalid socket handle")
             })?;
 
         match entry.stream.write(&data) {
@@ -841,7 +841,7 @@ impl ComponentHostState {
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             Ok(SocketWriteResult::WouldBlock)
                         }
-                        Err(e) => Err(ConnectorError::transient_network(
+                        Err(e) => Err(PluginError::transient_network(
                             "SOCKET_WRITE_FAILED",
                             e.to_string(),
                         )),
@@ -851,7 +851,7 @@ impl ComponentHostState {
                     Ok(SocketWriteResult::WouldBlock)
                 }
             }
-            Err(e) => Err(ConnectorError::transient_network(
+            Err(e) => Err(PluginError::transient_network(
                 "SOCKET_WRITE_FAILED",
                 e.to_string(),
             )),
@@ -868,7 +868,7 @@ impl ComponentHostState {
         record_json: String,
         error_message: String,
         error_category: String,
-    ) -> Result<(), ConnectorError> {
+    ) -> Result<(), PluginError> {
         let mut dlq = lock_mutex(&self.checkpoints.dlq_records, "dlq_records")?;
         if dlq.len() >= self.checkpoints.dlq_limit {
             tracing::warn!(
@@ -914,15 +914,15 @@ impl WasiView for ComponentHostState {
 fn lock_mutex<'a, T>(
     mutex: &'a Mutex<T>,
     name: &str,
-) -> std::result::Result<MutexGuard<'a, T>, ConnectorError> {
+) -> std::result::Result<MutexGuard<'a, T>, PluginError> {
     mutex
         .lock()
-        .map_err(|_| ConnectorError::internal("MUTEX_POISONED", format!("{name} mutex poisoned")))
+        .map_err(|_| PluginError::internal("MUTEX_POISONED", format!("{name} mutex poisoned")))
 }
 
-fn validate_state_key(key: &str) -> Result<(), ConnectorError> {
+fn validate_state_key(key: &str) -> Result<(), PluginError> {
     if key.len() > MAX_STATE_KEY_LEN {
-        return Err(ConnectorError::config(
+        return Err(PluginError::config(
             "KEY_TOO_LONG",
             format!("Key length {} exceeds {MAX_STATE_KEY_LEN}", key.len()),
         ));
@@ -930,12 +930,12 @@ fn validate_state_key(key: &str) -> Result<(), ConnectorError> {
     Ok(())
 }
 
-fn parse_state_scope(scope: u32) -> Result<StateScope, ConnectorError> {
+fn parse_state_scope(scope: u32) -> Result<StateScope, PluginError> {
     match scope {
         0 => Ok(StateScope::Pipeline),
         1 => Ok(StateScope::Stream),
         2 => Ok(StateScope::ConnectorInstance),
-        _ => Err(ConnectorError::config(
+        _ => Err(PluginError::config(
             "INVALID_SCOPE",
             format!("Invalid scope: {scope}"),
         )),

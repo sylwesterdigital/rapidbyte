@@ -1,5 +1,5 @@
 //! WIT binding glue: generated Wasmtime component bindings, Host trait impls,
-//! and error/validation type converters for all three connector worlds.
+//! and error/validation type converters for all three plugin worlds.
 
 #![allow(clippy::needless_pass_by_value)]
 
@@ -29,7 +29,7 @@ pub mod transform_bindings {
 // --- Error + validation converters + Host trait impls ---
 
 use rapidbyte_types::error::{
-    BackoffClass, CommitState, ConnectorError, ErrorCategory, ErrorScope, ValidationResult,
+    BackoffClass, CommitState, ErrorCategory, ErrorScope, PluginError, ValidationResult,
     ValidationStatus,
 };
 
@@ -62,15 +62,15 @@ macro_rules! for_each_world {
 macro_rules! define_error_converters {
     ($to_world_fn:ident, $from_world_fn:ident, $module:ident) => {
         fn $to_world_fn(
-            error: ConnectorError,
-        ) -> $module::rapidbyte::connector::types::ConnectorError {
-            use $module::rapidbyte::connector::types::{
+            error: PluginError,
+        ) -> $module::rapidbyte::plugin::types::PluginError {
+            use $module::rapidbyte::plugin::types::{
                 BackoffClass as CBackoffClass, CommitState as CCommitState,
-                ConnectorError as CConnectorError, ErrorCategory as CErrorCategory,
+                PluginError as CPluginError, ErrorCategory as CErrorCategory,
                 ErrorScope as CErrorScope,
             };
 
-            CConnectorError {
+            CPluginError {
                 category: match error.category {
                     ErrorCategory::Config => CErrorCategory::Config,
                     ErrorCategory::Auth => CErrorCategory::Auth,
@@ -108,47 +108,47 @@ macro_rules! define_error_converters {
         }
 
         pub fn $from_world_fn(
-            error: $module::rapidbyte::connector::types::ConnectorError,
-        ) -> ConnectorError {
-            ConnectorError {
+            error: $module::rapidbyte::plugin::types::PluginError,
+        ) -> PluginError {
+            PluginError {
                 category: match error.category {
-                    $module::rapidbyte::connector::types::ErrorCategory::Config => {
+                    $module::rapidbyte::plugin::types::ErrorCategory::Config => {
                         ErrorCategory::Config
                     }
-                    $module::rapidbyte::connector::types::ErrorCategory::Auth => {
+                    $module::rapidbyte::plugin::types::ErrorCategory::Auth => {
                         ErrorCategory::Auth
                     }
-                    $module::rapidbyte::connector::types::ErrorCategory::Permission => {
+                    $module::rapidbyte::plugin::types::ErrorCategory::Permission => {
                         ErrorCategory::Permission
                     }
-                    $module::rapidbyte::connector::types::ErrorCategory::RateLimit => {
+                    $module::rapidbyte::plugin::types::ErrorCategory::RateLimit => {
                         ErrorCategory::RateLimit
                     }
-                    $module::rapidbyte::connector::types::ErrorCategory::TransientNetwork => {
+                    $module::rapidbyte::plugin::types::ErrorCategory::TransientNetwork => {
                         ErrorCategory::TransientNetwork
                     }
-                    $module::rapidbyte::connector::types::ErrorCategory::TransientDb => {
+                    $module::rapidbyte::plugin::types::ErrorCategory::TransientDb => {
                         ErrorCategory::TransientDb
                     }
-                    $module::rapidbyte::connector::types::ErrorCategory::Data => {
+                    $module::rapidbyte::plugin::types::ErrorCategory::Data => {
                         ErrorCategory::Data
                     }
-                    $module::rapidbyte::connector::types::ErrorCategory::Schema => {
+                    $module::rapidbyte::plugin::types::ErrorCategory::Schema => {
                         ErrorCategory::Schema
                     }
-                    $module::rapidbyte::connector::types::ErrorCategory::Internal => {
+                    $module::rapidbyte::plugin::types::ErrorCategory::Internal => {
                         ErrorCategory::Internal
                     }
-                    $module::rapidbyte::connector::types::ErrorCategory::Frame => {
+                    $module::rapidbyte::plugin::types::ErrorCategory::Frame => {
                         ErrorCategory::Frame
                     }
                 },
                 scope: match error.scope {
-                    $module::rapidbyte::connector::types::ErrorScope::PerStream => {
+                    $module::rapidbyte::plugin::types::ErrorScope::PerStream => {
                         ErrorScope::Stream
                     }
-                    $module::rapidbyte::connector::types::ErrorScope::PerBatch => ErrorScope::Batch,
-                    $module::rapidbyte::connector::types::ErrorScope::PerRecord => {
+                    $module::rapidbyte::plugin::types::ErrorScope::PerBatch => ErrorScope::Batch,
+                    $module::rapidbyte::plugin::types::ErrorScope::PerRecord => {
                         ErrorScope::Record
                     }
                 },
@@ -157,21 +157,21 @@ macro_rules! define_error_converters {
                 retryable: error.retryable,
                 retry_after_ms: error.retry_after_ms,
                 backoff_class: match error.backoff_class {
-                    $module::rapidbyte::connector::types::BackoffClass::Fast => BackoffClass::Fast,
-                    $module::rapidbyte::connector::types::BackoffClass::Normal => {
+                    $module::rapidbyte::plugin::types::BackoffClass::Fast => BackoffClass::Fast,
+                    $module::rapidbyte::plugin::types::BackoffClass::Normal => {
                         BackoffClass::Normal
                     }
-                    $module::rapidbyte::connector::types::BackoffClass::Slow => BackoffClass::Slow,
+                    $module::rapidbyte::plugin::types::BackoffClass::Slow => BackoffClass::Slow,
                 },
                 safe_to_retry: error.safe_to_retry,
                 commit_state: error.commit_state.map(|state| match state {
-                    $module::rapidbyte::connector::types::CommitState::BeforeCommit => {
+                    $module::rapidbyte::plugin::types::CommitState::BeforeCommit => {
                         CommitState::BeforeCommit
                     }
-                    $module::rapidbyte::connector::types::CommitState::AfterCommitUnknown => {
+                    $module::rapidbyte::plugin::types::CommitState::AfterCommitUnknown => {
                         CommitState::AfterCommitUnknown
                     }
-                    $module::rapidbyte::connector::types::CommitState::AfterCommitConfirmed => {
+                    $module::rapidbyte::plugin::types::CommitState::AfterCommitConfirmed => {
                         CommitState::AfterCommitConfirmed
                     }
                 }),
@@ -185,11 +185,11 @@ macro_rules! define_error_converters {
 
 macro_rules! impl_host_trait_for_world {
     ($module:ident, $to_world_error:ident) => {
-        impl $module::rapidbyte::connector::host::Host for ComponentHostState {
+        impl $module::rapidbyte::plugin::host::Host for ComponentHostState {
             fn emit_batch(
                 &mut self,
                 handle: u64,
-            ) -> std::result::Result<(), $module::rapidbyte::connector::types::ConnectorError> {
+            ) -> std::result::Result<(), $module::rapidbyte::plugin::types::PluginError> {
                 self.emit_batch_impl(handle).map_err($to_world_error)
             }
 
@@ -197,7 +197,7 @@ macro_rules! impl_host_trait_for_world {
                 &mut self,
             ) -> std::result::Result<
                 Option<u64>,
-                $module::rapidbyte::connector::types::ConnectorError,
+                $module::rapidbyte::plugin::types::PluginError,
             > {
                 self.next_batch_impl().map_err($to_world_error)
             }
@@ -210,7 +210,7 @@ macro_rules! impl_host_trait_for_world {
                 &mut self,
                 kind: u32,
                 payload_json: String,
-            ) -> std::result::Result<(), $module::rapidbyte::connector::types::ConnectorError> {
+            ) -> std::result::Result<(), $module::rapidbyte::plugin::types::PluginError> {
                 self.checkpoint_impl(kind, payload_json)
                     .map_err($to_world_error)
             }
@@ -218,7 +218,7 @@ macro_rules! impl_host_trait_for_world {
             fn metric(
                 &mut self,
                 payload_json: String,
-            ) -> std::result::Result<(), $module::rapidbyte::connector::types::ConnectorError> {
+            ) -> std::result::Result<(), $module::rapidbyte::plugin::types::PluginError> {
                 self.metric_impl(payload_json).map_err($to_world_error)
             }
 
@@ -228,7 +228,7 @@ macro_rules! impl_host_trait_for_world {
                 record_json: String,
                 error_message: String,
                 error_category: String,
-            ) -> std::result::Result<(), $module::rapidbyte::connector::types::ConnectorError> {
+            ) -> std::result::Result<(), $module::rapidbyte::plugin::types::PluginError> {
                 self.emit_dlq_record_impl(stream_name, record_json, error_message, error_category)
                     .map_err($to_world_error)
             }
@@ -239,7 +239,7 @@ macro_rules! impl_host_trait_for_world {
                 key: String,
             ) -> std::result::Result<
                 Option<String>,
-                $module::rapidbyte::connector::types::ConnectorError,
+                $module::rapidbyte::plugin::types::PluginError,
             > {
                 self.state_get_impl(scope, key).map_err($to_world_error)
             }
@@ -249,7 +249,7 @@ macro_rules! impl_host_trait_for_world {
                 scope: u32,
                 key: String,
                 val: String,
-            ) -> std::result::Result<(), $module::rapidbyte::connector::types::ConnectorError> {
+            ) -> std::result::Result<(), $module::rapidbyte::plugin::types::PluginError> {
                 self.state_put_impl(scope, key, val)
                     .map_err($to_world_error)
             }
@@ -260,7 +260,7 @@ macro_rules! impl_host_trait_for_world {
                 key: String,
                 expected: Option<String>,
                 new_val: String,
-            ) -> std::result::Result<bool, $module::rapidbyte::connector::types::ConnectorError>
+            ) -> std::result::Result<bool, $module::rapidbyte::plugin::types::PluginError>
             {
                 self.state_cas_impl(scope, key, expected, new_val)
                     .map_err($to_world_error)
@@ -269,7 +269,7 @@ macro_rules! impl_host_trait_for_world {
             fn frame_new(
                 &mut self,
                 capacity: u64,
-            ) -> std::result::Result<u64, $module::rapidbyte::connector::types::ConnectorError>
+            ) -> std::result::Result<u64, $module::rapidbyte::plugin::types::PluginError>
             {
                 Ok(self.frame_new_impl(capacity))
             }
@@ -278,7 +278,7 @@ macro_rules! impl_host_trait_for_world {
                 &mut self,
                 handle: u64,
                 chunk: Vec<u8>,
-            ) -> std::result::Result<u64, $module::rapidbyte::connector::types::ConnectorError>
+            ) -> std::result::Result<u64, $module::rapidbyte::plugin::types::PluginError>
             {
                 self.frame_write_impl(handle, chunk)
                     .map_err($to_world_error)
@@ -287,14 +287,14 @@ macro_rules! impl_host_trait_for_world {
             fn frame_seal(
                 &mut self,
                 handle: u64,
-            ) -> std::result::Result<(), $module::rapidbyte::connector::types::ConnectorError> {
+            ) -> std::result::Result<(), $module::rapidbyte::plugin::types::PluginError> {
                 self.frame_seal_impl(handle).map_err($to_world_error)
             }
 
             fn frame_len(
                 &mut self,
                 handle: u64,
-            ) -> std::result::Result<u64, $module::rapidbyte::connector::types::ConnectorError>
+            ) -> std::result::Result<u64, $module::rapidbyte::plugin::types::PluginError>
             {
                 self.frame_len_impl(handle).map_err($to_world_error)
             }
@@ -304,7 +304,7 @@ macro_rules! impl_host_trait_for_world {
                 handle: u64,
                 offset: u64,
                 len: u64,
-            ) -> std::result::Result<Vec<u8>, $module::rapidbyte::connector::types::ConnectorError>
+            ) -> std::result::Result<Vec<u8>, $module::rapidbyte::plugin::types::PluginError>
             {
                 self.frame_read_impl(handle, offset, len)
                     .map_err($to_world_error)
@@ -318,7 +318,7 @@ macro_rules! impl_host_trait_for_world {
                 &mut self,
                 host: String,
                 port: u16,
-            ) -> std::result::Result<u64, $module::rapidbyte::connector::types::ConnectorError>
+            ) -> std::result::Result<u64, $module::rapidbyte::plugin::types::PluginError>
             {
                 self.connect_tcp_impl(host, port).map_err($to_world_error)
             }
@@ -328,19 +328,19 @@ macro_rules! impl_host_trait_for_world {
                 handle: u64,
                 len: u64,
             ) -> std::result::Result<
-                $module::rapidbyte::connector::types::SocketReadResult,
-                $module::rapidbyte::connector::types::ConnectorError,
+                $module::rapidbyte::plugin::types::SocketReadResult,
+                $module::rapidbyte::plugin::types::PluginError,
             > {
                 self.socket_read_impl(handle, len)
                     .map(|result| match result {
                         SocketReadResult::Data(data) => {
-                            $module::rapidbyte::connector::types::SocketReadResult::Data(data)
+                            $module::rapidbyte::plugin::types::SocketReadResult::Data(data)
                         }
                         SocketReadResult::Eof => {
-                            $module::rapidbyte::connector::types::SocketReadResult::Eof
+                            $module::rapidbyte::plugin::types::SocketReadResult::Eof
                         }
                         SocketReadResult::WouldBlock => {
-                            $module::rapidbyte::connector::types::SocketReadResult::WouldBlock
+                            $module::rapidbyte::plugin::types::SocketReadResult::WouldBlock
                         }
                     })
                     .map_err($to_world_error)
@@ -351,16 +351,16 @@ macro_rules! impl_host_trait_for_world {
                 handle: u64,
                 data: Vec<u8>,
             ) -> std::result::Result<
-                $module::rapidbyte::connector::types::SocketWriteResult,
-                $module::rapidbyte::connector::types::ConnectorError,
+                $module::rapidbyte::plugin::types::SocketWriteResult,
+                $module::rapidbyte::plugin::types::PluginError,
             > {
                 self.socket_write_impl(handle, data)
                     .map(|result| match result {
                         SocketWriteResult::Written(n) => {
-                            $module::rapidbyte::connector::types::SocketWriteResult::Written(n)
+                            $module::rapidbyte::plugin::types::SocketWriteResult::Written(n)
                         }
                         SocketWriteResult::WouldBlock => {
-                            $module::rapidbyte::connector::types::SocketWriteResult::WouldBlock
+                            $module::rapidbyte::plugin::types::SocketWriteResult::WouldBlock
                         }
                     })
                     .map_err($to_world_error)
@@ -376,17 +376,17 @@ macro_rules! impl_host_trait_for_world {
 macro_rules! define_validation_to_sdk {
     ($fn_name:ident, $module:ident) => {
         pub fn $fn_name(
-            value: $module::rapidbyte::connector::types::ValidationReport,
+            value: $module::rapidbyte::plugin::types::ValidationReport,
         ) -> ValidationResult {
             ValidationResult {
                 status: match value.status {
-                    $module::rapidbyte::connector::types::ValidationStatus::Success => {
+                    $module::rapidbyte::plugin::types::ValidationStatus::Success => {
                         ValidationStatus::Success
                     }
-                    $module::rapidbyte::connector::types::ValidationStatus::Failed => {
+                    $module::rapidbyte::plugin::types::ValidationStatus::Failed => {
                         ValidationStatus::Failed
                     }
-                    $module::rapidbyte::connector::types::ValidationStatus::Warning => {
+                    $module::rapidbyte::plugin::types::ValidationStatus::Warning => {
                         ValidationStatus::Warning
                     }
                 },
@@ -400,7 +400,7 @@ macro_rules! define_world_glue {
     ($module:ident, $to_world_error:ident, $from_world_error:ident, $validation_fn:ident) => {
         define_error_converters!($to_world_error, $from_world_error, $module);
         impl_host_trait_for_world!($module, $to_world_error);
-        impl $module::rapidbyte::connector::types::Host for ComponentHostState {}
+        impl $module::rapidbyte::plugin::types::Host for ComponentHostState {}
         define_validation_to_sdk!($validation_fn, $module);
     };
 }
@@ -412,12 +412,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn v4_world_bindings_exist() {
+    fn v5_world_bindings_exist() {
         let _ = std::any::TypeId::of::<source_bindings::RapidbyteSource>();
         let _ = std::any::TypeId::of::<dest_bindings::RapidbyteDestination>();
         let _ = std::any::TypeId::of::<transform_bindings::RapidbyteTransform>();
 
-        let _: Option<source_bindings::rapidbyte::connector::types::RunRequest> = None;
-        let _: Option<source_bindings::rapidbyte::connector::types::RunSummary> = None;
+        let _: Option<source_bindings::rapidbyte::plugin::types::RunRequest> = None;
+        let _: Option<source_bindings::rapidbyte::plugin::types::RunSummary> = None;
     }
 }
