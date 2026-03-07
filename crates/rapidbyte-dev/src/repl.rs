@@ -147,10 +147,9 @@ async fn handle_source(
 
     let spinner = make_spinner("Connecting...");
 
-    let (catalog, loaded_module, permissions) =
-        connect_source(&connector_ref, &config).await?;
-
+    let result = connect_source(&connector_ref, &config).await;
     spinner.finish_and_clear();
+    let (catalog, loaded_module, permissions) = result?;
 
     let stream_count = catalog.streams.len();
     display::print_success(&format!(
@@ -338,7 +337,7 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
 
     let spinner = make_spinner("Streaming...");
 
-    let batches = tokio::task::spawn_blocking(move || -> Result<Vec<RecordBatch>> {
+    let stream_result = tokio::task::spawn_blocking(move || -> Result<Vec<RecordBatch>> {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Frame>(64);
 
         let state_backend = Arc::new(
@@ -401,18 +400,21 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
         // Collect all frames from the receiver.
         let mut all_batches: Vec<RecordBatch> = Vec::new();
         while let Ok(frame) = rx.try_recv() {
-            if let Frame::Data(bytes) = frame {
-                let decoded = rapidbyte_engine::arrow::ipc_to_record_batches(&bytes)?;
-                all_batches.extend(decoded);
+            match frame {
+                Frame::Data(bytes) => {
+                    let decoded = rapidbyte_engine::arrow::ipc_to_record_batches(&bytes)?;
+                    all_batches.extend(decoded);
+                }
+                Frame::EndStream => break,
             }
         }
 
         Ok(all_batches)
     })
     .await
-    .context("Stream task panicked")??;
-
+    .context("Stream task panicked")?;
     spinner.finish_and_clear();
+    let batches = stream_result?;
 
     if batches.is_empty() {
         display::print_hint("0 rows returned.");
