@@ -57,7 +57,11 @@ pub(crate) async fn run() -> Result<()> {
         source: None,
     };
 
-    let mut editor = Reedline::create();
+    let completer = Box::new(crate::completer::DevCompleter::new());
+    let highlighter = Box::new(crate::highlighter::DevHighlighter);
+    let mut editor = Reedline::create()
+        .with_completer(completer)
+        .with_highlighter(highlighter);
     let prompt = DefaultPrompt::new(
         DefaultPromptSegment::Basic("rb".to_string()),
         DefaultPromptSegment::Empty,

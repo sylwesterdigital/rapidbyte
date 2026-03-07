@@ -9,6 +9,8 @@
 //! |------------|----------------|
 //! | `commands` | Dot-command parser |
 //! | `display`  | Table rendering and styled output |
+//! | `completer`| Tab completion for dot-commands |
+//! | `highlighter`| SQL keyword and dot-command highlighting |
 //! | `repl`     | REPL loop, command dispatch, source operations |
 //! | `workspace`| Arrow workspace with DataFusion SQL |
 
@@ -16,7 +18,9 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub(crate) mod commands;
+pub(crate) mod completer;
 pub(crate) mod display;
+pub(crate) mod highlighter;
 pub(crate) mod repl;
 pub mod workspace;
 

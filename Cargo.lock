@@ -3334,6 +3334,7 @@ dependencies = [
  "console",
  "datafusion",
  "indicatif",
+ "nu-ansi-term",
  "rapidbyte-engine",
  "rapidbyte-runtime",
  "rapidbyte-state",
