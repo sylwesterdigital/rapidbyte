@@ -9,6 +9,7 @@
     clippy::module_name_repetitions
 )]
 
+use std::io::IsTerminal;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -50,6 +51,10 @@ pub(crate) struct ConnectedSource {
 
 /// Run the interactive dev shell REPL loop.
 pub(crate) async fn run() -> Result<()> {
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!("rapidbyte dev requires an interactive terminal");
+    }
+
     print_banner();
 
     let mut state = ReplState {
