@@ -9,9 +9,9 @@ rapidbyte-runtime = { path = "../rapidbyte-runtime" }
 rapidbyte-types = { path = "../rapidbyte-types" }
 rapidbyte-state = { path = "../rapidbyte-state" }
 tokio = { workspace = true }
-arrow = { version = "53", features = ["prettyprint"] }
-datafusion = "43"
-reedline = "0.38"
+arrow = { workspace = true, features = ["prettyprint"] }
+datafusion = { workspace = true }
+reedline = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
