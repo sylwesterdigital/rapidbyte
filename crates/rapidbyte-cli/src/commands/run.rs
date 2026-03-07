@@ -42,7 +42,7 @@ pub async fn execute(pipeline_path: &Path, dry_run: bool, limit: Option<u64>) ->
 
     // 3. Run
     let cpu_start = process_cpu_seconds();
-    let outcome = orchestrator::run_pipeline(&config, &options).await?;
+    let outcome = orchestrator::run_pipeline(&config, &options, None).await?;
     let cpu_end = process_cpu_seconds();
     match outcome {
         PipelineOutcome::Run(result) => {

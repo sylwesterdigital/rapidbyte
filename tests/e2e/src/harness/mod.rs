@@ -312,7 +312,7 @@ impl HarnessContext {
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
         let outcome =
-            rapidbyte_engine::orchestrator::run_pipeline(&config, &ExecutionOptions::default())
+            rapidbyte_engine::orchestrator::run_pipeline(&config, &ExecutionOptions::default(), None)
                 .await
                 .context("pipeline execution failed")?;
 
@@ -398,7 +398,7 @@ impl HarnessContext {
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
         let outcome =
-            rapidbyte_engine::orchestrator::run_pipeline(&config, &ExecutionOptions::default())
+            rapidbyte_engine::orchestrator::run_pipeline(&config, &ExecutionOptions::default(), None)
                 .await
                 .context("pipeline execution failed")?;
 
@@ -428,7 +428,7 @@ impl HarnessContext {
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
         let outcome =
-            rapidbyte_engine::orchestrator::run_pipeline(&config, &ExecutionOptions::default())
+            rapidbyte_engine::orchestrator::run_pipeline(&config, &ExecutionOptions::default(), None)
                 .await
                 .context("pipeline execution failed")?;
 
@@ -532,7 +532,7 @@ impl HarnessContext {
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
         let outcome =
-            rapidbyte_engine::orchestrator::run_pipeline(&config, &ExecutionOptions::default())
+            rapidbyte_engine::orchestrator::run_pipeline(&config, &ExecutionOptions::default(), None)
                 .await
                 .context("pipeline execution failed")?;
 

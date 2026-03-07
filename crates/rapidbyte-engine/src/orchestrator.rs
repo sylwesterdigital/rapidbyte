@@ -27,6 +27,7 @@ use crate::checkpoint::correlate_and_persist_cursors;
 use crate::config::types::{parse_byte_size, PipelineConfig, PipelineParallelism};
 use crate::error::{compute_backoff, PipelineError};
 use crate::execution::{DryRunResult, DryRunStreamResult, ExecutionOptions, PipelineOutcome};
+use crate::progress::{Phase, ProgressEvent};
 use crate::resolve::{
     build_sandbox_overrides, check_state_backend, create_state_backend, load_and_validate_manifest,
     resolve_connectors, validate_config_against_schema, ResolvedConnectors,
@@ -283,15 +284,41 @@ fn observe_dest_timing(maxima: &mut DestTimingMaxima, stream: &StreamResult) {
         .max(stream.dst_host_timings.dest_arrow_decode_secs);
 }
 
+/// Type alias for the progress channel sender used throughout the orchestrator.
+type ProgressTx = Option<tokio::sync::mpsc::UnboundedSender<ProgressEvent>>;
+
+fn send_progress(tx: &ProgressTx, event: ProgressEvent) {
+    if let Some(tx) = tx {
+        let _ = tx.send(event);
+    }
+}
+
 async fn collect_stream_task_results(
     mut stream_join_set: JoinSet<Result<StreamResult, PipelineError>>,
+    progress_tx: &ProgressTx,
 ) -> Result<StreamTaskCollection, PipelineError> {
     let mut successes = Vec::new();
     let mut first_error: Option<PipelineError> = None;
 
     while let Some(joined) = stream_join_set.join_next().await {
         match joined {
-            Ok(Ok(sr)) if first_error.is_none() => successes.push(sr),
+            Ok(Ok(sr)) if first_error.is_none() => {
+                send_progress(
+                    progress_tx,
+                    ProgressEvent::BatchCompleted {
+                        stream: sr.stream_name.clone(),
+                        records: sr.read_summary.records_read,
+                        bytes: sr.read_summary.bytes_read,
+                    },
+                );
+                send_progress(
+                    progress_tx,
+                    ProgressEvent::StreamCompleted {
+                        stream: sr.stream_name.clone(),
+                    },
+                );
+                successes.push(sr);
+            }
             Ok(Ok(_)) => {}
             Ok(Err(error)) => {
                 tracing::error!("Stream failed: {}", error);
@@ -327,13 +354,14 @@ async fn collect_stream_task_results(
 pub async fn run_pipeline(
     config: &PipelineConfig,
     options: &ExecutionOptions,
+    progress_tx: Option<tokio::sync::mpsc::UnboundedSender<ProgressEvent>>,
 ) -> Result<PipelineOutcome, PipelineError> {
     let max_retries = config.resources.max_retries;
     let mut attempt = 0u32;
 
     loop {
         attempt += 1;
-        let result = execute_pipeline_once(config, options, attempt).await;
+        let result = execute_pipeline_once(config, options, attempt, progress_tx.clone()).await;
 
         match result {
             Ok(outcome) => return Ok(outcome),
@@ -397,6 +425,7 @@ async fn execute_pipeline_once(
     config: &PipelineConfig,
     options: &ExecutionOptions,
     attempt: u32,
+    progress_tx: ProgressTx,
 ) -> Result<PipelineOutcome, PipelineError> {
     let start = Instant::now();
     let pipeline_id = PipelineId::new(config.pipeline.clone());
@@ -406,6 +435,12 @@ async fn execute_pipeline_once(
         "Starting pipeline run"
     );
 
+    send_progress(
+        &progress_tx,
+        ProgressEvent::PhaseChange {
+            phase: Phase::Resolving,
+        },
+    );
     let connectors = resolve_connectors(config)?;
     let state = create_state_backend(config).map_err(PipelineError::Infrastructure)?;
 
@@ -425,6 +460,12 @@ async fn execute_pipeline_once(
         .map_err(|e| PipelineError::Infrastructure(e.into()))?
     };
 
+    send_progress(
+        &progress_tx,
+        ProgressEvent::PhaseChange {
+            phase: Phase::Loading,
+        },
+    );
     let modules = load_modules(config, &connectors).await?;
     let config_for_build = config.clone();
     let state_for_build = state.clone();
@@ -436,6 +477,12 @@ async fn execute_pipeline_once(
     .map_err(|e| {
         PipelineError::Infrastructure(anyhow::anyhow!("build_stream_contexts task panicked: {e}"))
     })??;
+    send_progress(
+        &progress_tx,
+        ProgressEvent::PhaseChange {
+            phase: Phase::Running,
+        },
+    );
     let aggregated = execute_streams(
         config,
         &connectors,
@@ -443,8 +490,16 @@ async fn execute_pipeline_once(
         &stream_build,
         state.clone(),
         options,
+        &progress_tx,
     )
     .await?;
+
+    send_progress(
+        &progress_tx,
+        ProgressEvent::PhaseChange {
+            phase: Phase::Finished,
+        },
+    );
 
     if options.dry_run {
         let duration_secs = start.elapsed().as_secs_f64();
@@ -801,6 +856,7 @@ async fn execute_streams(
     stream_build: &StreamBuild,
     state: Arc<dyn StateBackend>,
     options: &ExecutionOptions,
+    progress_tx: &ProgressTx,
 ) -> Result<AggregatedStreamResults, PipelineError> {
     let (source_connector_id, source_connector_version) =
         parse_connector_ref(&config.source.use_ref);
@@ -1211,7 +1267,7 @@ async fn execute_streams(
     let mut transform_durations = Vec::new();
     let mut dry_run_streams: Vec<DryRunStreamResult> = Vec::new();
     let mut stream_metrics: Vec<StreamShardMetric> = Vec::new();
-    let stream_collection = collect_stream_task_results(stream_join_set).await?;
+    let stream_collection = collect_stream_task_results(stream_join_set, progress_tx).await?;
 
     for sr in stream_collection.successes {
         observe_source_timing(&mut src_timing_maxima, &sr);
@@ -1744,7 +1800,7 @@ mod stream_task_collection_tests {
         });
 
         let start = Instant::now();
-        let collected = collect_stream_task_results(join_set)
+        let collected = collect_stream_task_results(join_set, &None)
             .await
             .expect("collector should return first error, not infra panic");
 
