@@ -1,9 +1,9 @@
-//! Proc macros for the Rapidbyte Connector SDK.
+//! Proc macros for the Rapidbyte Plugin SDK.
 //!
 //! This crate is an internal implementation detail of `rapidbyte-sdk`.
 //! Do not depend on it directly — use `rapidbyte_sdk::ConfigSchema` instead.
 
-mod connector;
+mod plugin;
 mod schema;
 
 use proc_macro::TokenStream;
@@ -27,25 +27,25 @@ pub fn derive_config_schema(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Attribute macro that generates all component glue for a connector struct.
+/// Attribute macro that generates all component glue for a plugin struct.
 ///
 /// Replaces `connector_main!`, `embed_manifest!`, and `embed_config_schema!`
 /// with a single annotation:
 ///
 /// ```ignore
-/// #[connector(source)]
+/// #[plugin(source)]
 /// pub struct MySource { ... }
 /// ```
 ///
-/// Accepted roles: `source`, `destination`, `transform`.
+/// Accepted kinds: `source`, `destination`, `transform`.
 ///
 /// The annotated struct must implement the corresponding trait
-/// (`Source`, `Destination`, or `Transform` from `rapidbyte_sdk::connector`).
+/// (`Source`, `Destination`, or `Transform` from `rapidbyte_sdk::plugin`).
 #[proc_macro_attribute]
-pub fn connector(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let role = syn::parse_macro_input!(attr as connector::ConnectorRole);
+pub fn plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let kind = syn::parse_macro_input!(attr as plugin::PluginKind);
     let input = syn::parse_macro_input!(item as syn::ItemStruct);
-    match connector::expand(role, input) {
+    match plugin::expand(kind, input) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }

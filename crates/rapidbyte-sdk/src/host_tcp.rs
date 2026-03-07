@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::error::ConnectorError;
+use crate::error::PluginError;
 use crate::host_ffi::{self, SocketReadResult, SocketWriteResult};
 
 /// TCP stream backed by host-side socket operations.
@@ -21,7 +21,7 @@ impl HostTcpStream {
     /// # Errors
     ///
     /// Returns `Err` if the host denies the connection or the TCP handshake fails.
-    pub fn connect(host: &str, port: u16) -> Result<Self, ConnectorError> {
+    pub fn connect(host: &str, port: u16) -> Result<Self, PluginError> {
         let handle = host_ffi::connect_tcp(host, port)?;
         Ok(Self {
             handle,
@@ -47,7 +47,7 @@ impl Drop for HostTcpStream {
     }
 }
 
-fn to_io_error(err: ConnectorError) -> io::Error {
+fn to_io_error(err: PluginError) -> io::Error {
     io::Error::other(err)
 }
 

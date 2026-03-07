@@ -1,11 +1,11 @@
-//! Convenience re-exports for connector authors.
+//! Convenience re-exports for plugin authors.
 //!
 //! ```ignore
 //! use rapidbyte_sdk::prelude::*;
 //! ```
 
-// Connector traits
-pub use crate::connector::{Destination, Source, Transform};
+// Plugin traits
+pub use crate::plugin::{Destination, Source, Transform};
 
 // Feature traits
 pub use crate::features::{BulkLoadDestination, CdcSource, PartitionedSource};
@@ -15,10 +15,10 @@ pub use crate::stream::{CdcResumeToken, PartitionCoordinates};
 pub use crate::context::{Context, LogLevel};
 
 // Errors
-pub use crate::error::{CommitState, ConnectorError, ValidationResult, ValidationStatus};
+pub use crate::error::{CommitState, PluginError, ValidationResult, ValidationStatus};
 
 // Protocol types — lifecycle
-pub use crate::wire::{ConnectorInfo, Feature, ProtocolVersion};
+pub use crate::wire::{Feature, PluginInfo, ProtocolVersion};
 
 // Protocol types — streams and catalog
 pub use crate::catalog::{Catalog, ColumnSchema, Stream};

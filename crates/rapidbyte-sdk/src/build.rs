@@ -1,14 +1,14 @@
-//! Build-time helpers for connector authors.
+//! Build-time helpers for plugin authors.
 //!
-//! Used in connector `build.rs` to declare and emit manifest metadata.
+//! Used in plugin `build.rs` to declare and emit manifest metadata.
 //! Requires the `build` feature.
 
 use crate::manifest::*;
 use crate::wire::{Feature, ProtocolVersion, SyncMode, WriteMode};
 
-/// Fluent builder for declaring and emitting a connector manifest at build time.
+/// Fluent builder for declaring and emitting a plugin manifest at build time.
 ///
-/// # Example (source connector `build.rs`)
+/// # Example (source plugin `build.rs`)
 ///
 /// ```ignore
 /// use rapidbyte_sdk::build::ManifestBuilder;
@@ -23,21 +23,21 @@ use crate::wire::{Feature, ProtocolVersion, SyncMode, WriteMode};
 /// }
 /// ```
 pub struct ManifestBuilder {
-    manifest: ConnectorManifest,
+    manifest: PluginManifest,
     rerun_files: Vec<String>,
 }
 
 impl ManifestBuilder {
     fn with_roles(id: impl Into<String>, roles: Roles) -> Self {
         Self {
-            manifest: ConnectorManifest {
+            manifest: PluginManifest {
                 id: id.into(),
                 name: String::new(),
                 version: String::new(),
                 description: String::new(),
                 author: None,
                 license: None,
-                protocol_version: ProtocolVersion::V4,
+                protocol_version: ProtocolVersion::V5,
                 permissions: Permissions::default(),
                 limits: ResourceLimits::default(),
                 roles,
@@ -47,7 +47,7 @@ impl ManifestBuilder {
         }
     }
 
-    /// Start building a source connector manifest.
+    /// Start building a source plugin manifest.
     pub fn source(id: impl Into<String>) -> Self {
         Self::with_roles(
             id,
@@ -61,7 +61,7 @@ impl ManifestBuilder {
         )
     }
 
-    /// Start building a destination connector manifest.
+    /// Start building a destination plugin manifest.
     pub fn destination(id: impl Into<String>) -> Self {
         Self::with_roles(
             id,
@@ -75,7 +75,7 @@ impl ManifestBuilder {
         )
     }
 
-    /// Start building a transform connector manifest.
+    /// Start building a transform plugin manifest.
     pub fn transform(id: impl Into<String>) -> Self {
         Self::with_roles(
             id,
@@ -115,7 +115,7 @@ impl ManifestBuilder {
 
     // -- Capabilities ------------------------------------------------
 
-    /// Set supported sync modes (source connectors).
+    /// Set supported sync modes (source plugins).
     pub fn sync_modes(mut self, modes: &[SyncMode]) -> Self {
         if let Some(ref mut src) = self.manifest.roles.source {
             src.supported_sync_modes = modes.to_vec();
@@ -123,7 +123,7 @@ impl ManifestBuilder {
         self
     }
 
-    /// Set supported write modes (destination connectors).
+    /// Set supported write modes (destination plugins).
     pub fn write_modes(mut self, modes: &[WriteMode]) -> Self {
         if let Some(ref mut dst) = self.manifest.roles.destination {
             dst.supported_write_modes = modes.to_vec();
@@ -218,13 +218,13 @@ impl ManifestBuilder {
         if let Some(ref src) = self.manifest.roles.source {
             assert!(
                 !src.supported_sync_modes.is_empty(),
-                "manifest: source connectors must declare at least one sync mode"
+                "manifest: source plugins must declare at least one sync mode"
             );
         }
         if let Some(ref dst) = self.manifest.roles.destination {
             assert!(
                 !dst.supported_write_modes.is_empty(),
-                "manifest: destination connectors must declare at least one write mode"
+                "manifest: destination plugins must declare at least one write mode"
             );
         }
 

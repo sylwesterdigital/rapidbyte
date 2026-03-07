@@ -1,14 +1,14 @@
-//! Rapidbyte Connector SDK.
+//! Rapidbyte Plugin SDK.
 //!
 //! Provides traits, protocol types, and host-import wrappers for building
-//! WASI-based data pipeline connectors.
+//! WASI-based data pipeline plugins.
 
 #[cfg(feature = "runtime")]
 pub mod arrow;
 #[cfg(feature = "build")]
 pub mod build;
 #[cfg(feature = "runtime")]
-pub mod connector;
+pub mod plugin;
 #[cfg(feature = "runtime")]
 pub mod context;
 #[cfg(feature = "runtime")]
@@ -51,6 +51,6 @@ pub trait ConfigSchema {
 #[cfg(feature = "runtime")]
 pub use rapidbyte_sdk_macros::ConfigSchema;
 
-/// Re-export the `#[connector]` attribute macro.
+/// Re-export the `#[plugin]` attribute macro.
 #[cfg(feature = "runtime")]
-pub use rapidbyte_sdk_macros::connector;
+pub use rapidbyte_sdk_macros::plugin;

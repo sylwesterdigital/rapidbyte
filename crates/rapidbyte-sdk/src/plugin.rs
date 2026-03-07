@@ -1,19 +1,19 @@
-//! Async-first connector traits and component export macros.
+//! Async-first plugin traits and component export macros.
 
 use serde::de::DeserializeOwned;
 
 use crate::catalog::Catalog;
 use crate::context::Context;
-use crate::error::{ConnectorError, ValidationResult, ValidationStatus};
+use crate::error::{PluginError, ValidationResult, ValidationStatus};
 use crate::metric::{ReadSummary, TransformSummary, WriteSummary};
 use crate::stream::StreamContext;
-use crate::wire::ConnectorInfo;
+use crate::wire::PluginInfo;
 
-/// Default validation response for connectors that do not implement validation.
+/// Default validation response for plugins that do not implement validation.
 pub fn default_validation<C>(
     _config: &C,
     _ctx: &Context,
-) -> Result<ValidationResult, ConnectorError> {
+) -> Result<ValidationResult, PluginError> {
     Ok(ValidationResult {
         status: ValidationStatus::Success,
         message: "Validation not implemented".to_string(),
@@ -21,48 +21,48 @@ pub fn default_validation<C>(
 }
 
 /// Default close implementation.
-pub async fn default_close(_ctx: &Context) -> Result<(), ConnectorError> {
+pub async fn default_close(_ctx: &Context) -> Result<(), PluginError> {
     Ok(())
 }
 
-/// Source connector lifecycle.
+/// Source plugin lifecycle.
 #[allow(async_fn_in_trait)]
 pub trait Source: Sized {
     type Config: DeserializeOwned;
 
-    async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError>;
+    async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError>;
 
     async fn validate(
         config: &Self::Config,
         ctx: &Context,
-    ) -> Result<ValidationResult, ConnectorError> {
+    ) -> Result<ValidationResult, PluginError> {
         default_validation(config, ctx)
     }
 
-    async fn discover(&mut self, ctx: &Context) -> Result<Catalog, ConnectorError>;
+    async fn discover(&mut self, ctx: &Context) -> Result<Catalog, PluginError>;
 
     async fn read(
         &mut self,
         ctx: &Context,
         stream: StreamContext,
-    ) -> Result<ReadSummary, ConnectorError>;
+    ) -> Result<ReadSummary, PluginError>;
 
-    async fn close(&mut self, ctx: &Context) -> Result<(), ConnectorError> {
+    async fn close(&mut self, ctx: &Context) -> Result<(), PluginError> {
         default_close(ctx).await
     }
 }
 
-/// Destination connector lifecycle.
+/// Destination plugin lifecycle.
 #[allow(async_fn_in_trait)]
 pub trait Destination: Sized {
     type Config: DeserializeOwned;
 
-    async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError>;
+    async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError>;
 
     async fn validate(
         config: &Self::Config,
         ctx: &Context,
-    ) -> Result<ValidationResult, ConnectorError> {
+    ) -> Result<ValidationResult, PluginError> {
         default_validation(config, ctx)
     }
 
@@ -70,24 +70,24 @@ pub trait Destination: Sized {
         &mut self,
         ctx: &Context,
         stream: StreamContext,
-    ) -> Result<WriteSummary, ConnectorError>;
+    ) -> Result<WriteSummary, PluginError>;
 
-    async fn close(&mut self, ctx: &Context) -> Result<(), ConnectorError> {
+    async fn close(&mut self, ctx: &Context) -> Result<(), PluginError> {
         default_close(ctx).await
     }
 }
 
-/// Transform connector lifecycle.
+/// Transform plugin lifecycle.
 #[allow(async_fn_in_trait)]
 pub trait Transform: Sized {
     type Config: DeserializeOwned;
 
-    async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError>;
+    async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError>;
 
     async fn validate(
         config: &Self::Config,
         ctx: &Context,
-    ) -> Result<ValidationResult, ConnectorError> {
+    ) -> Result<ValidationResult, PluginError> {
         default_validation(config, ctx)
     }
 
@@ -95,9 +95,9 @@ pub trait Transform: Sized {
         &mut self,
         ctx: &Context,
         stream: StreamContext,
-    ) -> Result<TransformSummary, ConnectorError>;
+    ) -> Result<TransformSummary, PluginError>;
 
-    async fn close(&mut self, ctx: &Context) -> Result<(), ConnectorError> {
+    async fn close(&mut self, ctx: &Context) -> Result<(), PluginError> {
         default_close(ctx).await
     }
 }
@@ -108,10 +108,10 @@ mod tests {
     use super::*;
     use crate::catalog::Catalog;
     use crate::context::Context;
-    use crate::error::{ConnectorError, ValidationResult, ValidationStatus};
+    use crate::error::{PluginError, ValidationResult, ValidationStatus};
     use crate::metric::{ReadSummary, TransformSummary, WriteSummary};
     use crate::stream::StreamContext;
-    use crate::wire::{ConnectorInfo, ProtocolVersion};
+    use crate::wire::{PluginInfo, ProtocolVersion};
     use serde::Deserialize;
 
     #[derive(Debug, Deserialize)]
@@ -126,18 +126,18 @@ mod tests {
     impl Source for TestSource {
         type Config = TestConfig;
 
-        async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {
+        async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
             Ok((
                 Self { config },
-                ConnectorInfo {
-                    protocol_version: ProtocolVersion::V4,
+                PluginInfo {
+                    protocol_version: ProtocolVersion::V5,
                     features: vec![],
                     default_max_batch_bytes: 64 * 1024 * 1024,
                 },
             ))
         }
 
-        async fn discover(&mut self, _ctx: &Context) -> Result<Catalog, ConnectorError> {
+        async fn discover(&mut self, _ctx: &Context) -> Result<Catalog, PluginError> {
             Ok(Catalog { streams: vec![] })
         }
 
@@ -145,7 +145,7 @@ mod tests {
             &mut self,
             _ctx: &Context,
             _stream: StreamContext,
-        ) -> Result<ReadSummary, ConnectorError> {
+        ) -> Result<ReadSummary, PluginError> {
             Ok(ReadSummary {
                 records_read: 0,
                 bytes_read: 0,
@@ -164,11 +164,11 @@ mod tests {
     impl Destination for TestDest {
         type Config = TestConfig;
 
-        async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {
+        async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
             Ok((
                 Self { config },
-                ConnectorInfo {
-                    protocol_version: ProtocolVersion::V4,
+                PluginInfo {
+                    protocol_version: ProtocolVersion::V5,
                     features: vec![],
                     default_max_batch_bytes: 64 * 1024 * 1024,
                 },
@@ -179,7 +179,7 @@ mod tests {
             &mut self,
             _ctx: &Context,
             _stream: StreamContext,
-        ) -> Result<WriteSummary, ConnectorError> {
+        ) -> Result<WriteSummary, PluginError> {
             Ok(WriteSummary {
                 records_written: 0,
                 bytes_written: 0,
@@ -198,11 +198,11 @@ mod tests {
     impl Transform for TestTransform {
         type Config = TestConfig;
 
-        async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {
+        async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
             Ok((
                 Self { config },
-                ConnectorInfo {
-                    protocol_version: ProtocolVersion::V4,
+                PluginInfo {
+                    protocol_version: ProtocolVersion::V5,
                     features: vec![],
                     default_max_batch_bytes: 64 * 1024 * 1024,
                 },
@@ -213,7 +213,7 @@ mod tests {
             &mut self,
             _ctx: &Context,
             _stream: StreamContext,
-        ) -> Result<TransformSummary, ConnectorError> {
+        ) -> Result<TransformSummary, PluginError> {
             Ok(TransformSummary {
                 records_in: 0,
                 records_out: 0,

@@ -1,6 +1,6 @@
-//! Connector execution context.
+//! Plugin execution context.
 //!
-//! `Context` bundles stream metadata with host-FFI operations so connector
+//! `Context` bundles stream metadata with host-FFI operations so plugin
 //! authors no longer need to pass `connector_id` / `stream_name` to every call.
 
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 
 use crate::checkpoint::{Checkpoint, StateScope};
-use crate::error::{ConnectorError, ErrorCategory};
+use crate::error::{PluginError, ErrorCategory};
 use crate::host_ffi;
 use crate::metric::Metric;
 
@@ -25,7 +25,7 @@ pub enum LogLevel {
 
 /// Execution context carrying stream metadata and host-FFI delegation.
 ///
-/// Connector authors receive a `Context` at each lifecycle entry-point.
+/// Plugin authors receive a `Context` at each lifecycle entry-point.
 /// Methods that require `connector_id` or `stream_name` (checkpoints,
 /// metrics, DLQ records) automatically supply the values stored here.
 ///
@@ -77,7 +77,7 @@ impl Context {
     }
 
     /// Emit an Arrow `RecordBatch` to the host pipeline.
-    pub fn emit_batch(&self, batch: &RecordBatch) -> Result<(), ConnectorError> {
+    pub fn emit_batch(&self, batch: &RecordBatch) -> Result<(), PluginError> {
         host_ffi::emit_batch(batch)
     }
 
@@ -88,7 +88,7 @@ impl Context {
     pub fn next_batch(
         &self,
         max_bytes: u64,
-    ) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>, ConnectorError> {
+    ) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>, PluginError> {
         host_ffi::next_batch(max_bytes)
     }
 
@@ -97,7 +97,7 @@ impl Context {
         &self,
         scope: StateScope,
         key: &str,
-    ) -> Result<Option<String>, ConnectorError> {
+    ) -> Result<Option<String>, PluginError> {
         host_ffi::state_get(scope, key)
     }
 
@@ -107,17 +107,17 @@ impl Context {
         scope: StateScope,
         key: &str,
         value: &str,
-    ) -> Result<(), ConnectorError> {
+    ) -> Result<(), PluginError> {
         host_ffi::state_put(scope, key, value)
     }
 
     /// Emit a checkpoint using the context's connector ID and stream name.
-    pub fn checkpoint(&self, cp: &Checkpoint) -> Result<(), ConnectorError> {
+    pub fn checkpoint(&self, cp: &Checkpoint) -> Result<(), PluginError> {
         host_ffi::checkpoint(&self.connector_id, &self.stream_name, cp)
     }
 
     /// Emit a metric using the context's connector ID and stream name.
-    pub fn metric(&self, m: &Metric) -> Result<(), ConnectorError> {
+    pub fn metric(&self, m: &Metric) -> Result<(), PluginError> {
         host_ffi::metric(&self.connector_id, &self.stream_name, m)
     }
 
@@ -127,7 +127,7 @@ impl Context {
         record_json: &str,
         error_message: &str,
         error_category: ErrorCategory,
-    ) -> Result<(), ConnectorError> {
+    ) -> Result<(), PluginError> {
         host_ffi::emit_dlq_record(
             &self.stream_name,
             record_json,

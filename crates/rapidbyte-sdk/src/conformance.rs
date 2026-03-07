@@ -49,8 +49,8 @@ pub trait ConformanceHarness {
         mutations: &[Mutation],
     ) -> Result<(), Box<dyn std::error::Error>>;
 
-    /// Return the connector WASM path and config JSON.
-    fn connector_config(&self) -> (PathBuf, serde_json::Value);
+    /// Return the plugin WASM path and config JSON.
+    fn plugin_config(&self) -> (PathBuf, serde_json::Value);
 
     /// Clean up test resources.
     async fn teardown(&self) -> Result<(), Box<dyn std::error::Error>>;
@@ -58,7 +58,7 @@ pub trait ConformanceHarness {
 
 /// Verify that a source honoring `PartitionedRead` correctly partitions data.
 ///
-/// Seeds `row_count` rows, runs the connector with `shard_count` shards,
+/// Seeds `row_count` rows, runs the plugin with `shard_count` shards,
 /// and asserts that all rows are covered with no duplicates.
 pub async fn run_partitioned_read<H: ConformanceHarness>(
     harness: &H,
@@ -81,7 +81,7 @@ pub async fn run_partitioned_read<H: ConformanceHarness>(
         "conformance: seeded row count mismatch: expected {row_count}, got {seeded}"
     );
 
-    // TODO: Run connector with shard_count partitions, collect emitted row IDs.
+    // TODO: Run plugin with shard_count partitions, collect emitted row IDs.
     // This requires a lightweight in-process WASM runner or shelling out to
     // the rapidbyte binary. Deferred to integration — the harness trait and
     // assertion framework are the deliverable for this task.
@@ -100,7 +100,7 @@ pub async fn run_cdc<H: ConformanceHarness>(harness: &H, table: &str) {
         .await
         .expect("conformance: seed failed");
 
-    // TODO: Run connector in CDC mode, apply mutations, verify captures.
+    // TODO: Run plugin in CDC mode, apply mutations, verify captures.
     // Same deferral as run_partitioned_read.
 
     harness

@@ -10,7 +10,7 @@ use crate::checkpoint::{Checkpoint, StateScope};
 use crate::envelope::PayloadEnvelope;
 #[cfg(target_arch = "wasm32")]
 use crate::error::{BackoffClass, CommitState, ErrorScope};
-use crate::error::{ConnectorError, ErrorCategory};
+use crate::error::{PluginError, ErrorCategory};
 use crate::metric::Metric;
 #[cfg(target_arch = "wasm32")]
 use crate::wire::ProtocolVersion;
@@ -43,50 +43,50 @@ pub trait HostImports: Send + Sync {
     fn log(&self, level: i32, message: &str);
 
     // V3 frame lifecycle
-    fn frame_new(&self, capacity: u64) -> Result<u64, ConnectorError>;
-    fn frame_write(&self, handle: u64, chunk: &[u8]) -> Result<u64, ConnectorError>;
-    fn frame_seal(&self, handle: u64) -> Result<(), ConnectorError>;
-    fn frame_len(&self, handle: u64) -> Result<u64, ConnectorError>;
-    fn frame_read(&self, handle: u64, offset: u64, len: u64) -> Result<Vec<u8>, ConnectorError>;
+    fn frame_new(&self, capacity: u64) -> Result<u64, PluginError>;
+    fn frame_write(&self, handle: u64, chunk: &[u8]) -> Result<u64, PluginError>;
+    fn frame_seal(&self, handle: u64) -> Result<(), PluginError>;
+    fn frame_len(&self, handle: u64) -> Result<u64, PluginError>;
+    fn frame_read(&self, handle: u64, offset: u64, len: u64) -> Result<Vec<u8>, PluginError>;
     fn frame_drop(&self, handle: u64);
 
     // V3 batch transport (handle-based)
-    fn emit_batch(&self, handle: u64) -> Result<(), ConnectorError>;
-    fn next_batch(&self) -> Result<Option<u64>, ConnectorError>;
+    fn emit_batch(&self, handle: u64) -> Result<(), PluginError>;
+    fn next_batch(&self) -> Result<Option<u64>, PluginError>;
 
-    fn state_get(&self, scope: StateScope, key: &str) -> Result<Option<String>, ConnectorError>;
-    fn state_put(&self, scope: StateScope, key: &str, value: &str) -> Result<(), ConnectorError>;
+    fn state_get(&self, scope: StateScope, key: &str) -> Result<Option<String>, PluginError>;
+    fn state_put(&self, scope: StateScope, key: &str, value: &str) -> Result<(), PluginError>;
     fn state_compare_and_set(
         &self,
         scope: StateScope,
         key: &str,
         expected: Option<&str>,
         new_value: &str,
-    ) -> Result<bool, ConnectorError>;
+    ) -> Result<bool, PluginError>;
 
     fn checkpoint(
         &self,
         connector_id: &str,
         stream_name: &str,
         cp: &Checkpoint,
-    ) -> Result<(), ConnectorError>;
+    ) -> Result<(), PluginError>;
     fn metric(
         &self,
         connector_id: &str,
         stream_name: &str,
         m: &Metric,
-    ) -> Result<(), ConnectorError>;
+    ) -> Result<(), PluginError>;
     fn emit_dlq_record(
         &self,
         stream_name: &str,
         record_json: &str,
         error_message: &str,
         error_category: ErrorCategory,
-    ) -> Result<(), ConnectorError>;
+    ) -> Result<(), PluginError>;
 
-    fn connect_tcp(&self, host: &str, port: u16) -> Result<u64, ConnectorError>;
-    fn socket_read(&self, handle: u64, len: u64) -> Result<SocketReadResult, ConnectorError>;
-    fn socket_write(&self, handle: u64, data: &[u8]) -> Result<SocketWriteResult, ConnectorError>;
+    fn connect_tcp(&self, host: &str, port: u16) -> Result<u64, PluginError>;
+    fn socket_read(&self, handle: u64, len: u64) -> Result<SocketReadResult, PluginError>;
+    fn socket_write(&self, handle: u64, data: &[u8]) -> Result<SocketWriteResult, PluginError>;
     fn socket_close(&self, handle: u64);
 }
 
@@ -133,11 +133,11 @@ pub fn set_host_imports(imports: Box<dyn HostImports>) -> Result<(), Box<dyn Hos
 
 #[cfg(target_arch = "wasm32")]
 fn from_component_error(
-    err: bindings::rapidbyte::connector::types::ConnectorError,
-) -> ConnectorError {
-    use bindings::rapidbyte::connector::types as ct;
+    err: bindings::rapidbyte::plugin::types::PluginError,
+) -> PluginError {
+    use bindings::rapidbyte::plugin::types as ct;
 
-    ConnectorError {
+    PluginError {
         category: match err.category {
             ct::ErrorCategory::Config => ErrorCategory::Config,
             ct::ErrorCategory::Auth => ErrorCategory::Auth,
@@ -182,50 +182,50 @@ pub struct WasmHostImports;
 #[cfg(target_arch = "wasm32")]
 impl HostImports for WasmHostImports {
     fn log(&self, level: i32, message: &str) {
-        bindings::rapidbyte::connector::host::log(level as u32, message);
+        bindings::rapidbyte::plugin::host::log(level as u32, message);
     }
 
-    fn frame_new(&self, capacity: u64) -> Result<u64, ConnectorError> {
-        bindings::rapidbyte::connector::host::frame_new(capacity).map_err(from_component_error)
+    fn frame_new(&self, capacity: u64) -> Result<u64, PluginError> {
+        bindings::rapidbyte::plugin::host::frame_new(capacity).map_err(from_component_error)
     }
 
-    fn frame_write(&self, handle: u64, chunk: &[u8]) -> Result<u64, ConnectorError> {
-        bindings::rapidbyte::connector::host::frame_write(handle, chunk)
+    fn frame_write(&self, handle: u64, chunk: &[u8]) -> Result<u64, PluginError> {
+        bindings::rapidbyte::plugin::host::frame_write(handle, chunk)
             .map_err(from_component_error)
     }
 
-    fn frame_seal(&self, handle: u64) -> Result<(), ConnectorError> {
-        bindings::rapidbyte::connector::host::frame_seal(handle).map_err(from_component_error)
+    fn frame_seal(&self, handle: u64) -> Result<(), PluginError> {
+        bindings::rapidbyte::plugin::host::frame_seal(handle).map_err(from_component_error)
     }
 
-    fn frame_len(&self, handle: u64) -> Result<u64, ConnectorError> {
-        bindings::rapidbyte::connector::host::frame_len(handle).map_err(from_component_error)
+    fn frame_len(&self, handle: u64) -> Result<u64, PluginError> {
+        bindings::rapidbyte::plugin::host::frame_len(handle).map_err(from_component_error)
     }
 
-    fn frame_read(&self, handle: u64, offset: u64, len: u64) -> Result<Vec<u8>, ConnectorError> {
-        bindings::rapidbyte::connector::host::frame_read(handle, offset, len)
+    fn frame_read(&self, handle: u64, offset: u64, len: u64) -> Result<Vec<u8>, PluginError> {
+        bindings::rapidbyte::plugin::host::frame_read(handle, offset, len)
             .map_err(from_component_error)
     }
 
     fn frame_drop(&self, handle: u64) {
-        bindings::rapidbyte::connector::host::frame_drop(handle);
+        bindings::rapidbyte::plugin::host::frame_drop(handle);
     }
 
-    fn emit_batch(&self, handle: u64) -> Result<(), ConnectorError> {
-        bindings::rapidbyte::connector::host::emit_batch(handle).map_err(from_component_error)
+    fn emit_batch(&self, handle: u64) -> Result<(), PluginError> {
+        bindings::rapidbyte::plugin::host::emit_batch(handle).map_err(from_component_error)
     }
 
-    fn next_batch(&self) -> Result<Option<u64>, ConnectorError> {
-        bindings::rapidbyte::connector::host::next_batch().map_err(from_component_error)
+    fn next_batch(&self) -> Result<Option<u64>, PluginError> {
+        bindings::rapidbyte::plugin::host::next_batch().map_err(from_component_error)
     }
 
-    fn state_get(&self, scope: StateScope, key: &str) -> Result<Option<String>, ConnectorError> {
-        bindings::rapidbyte::connector::host::state_get(state_scope_to_i32(scope) as u32, key)
+    fn state_get(&self, scope: StateScope, key: &str) -> Result<Option<String>, PluginError> {
+        bindings::rapidbyte::plugin::host::state_get(state_scope_to_i32(scope) as u32, key)
             .map_err(from_component_error)
     }
 
-    fn state_put(&self, scope: StateScope, key: &str, value: &str) -> Result<(), ConnectorError> {
-        bindings::rapidbyte::connector::host::state_put(
+    fn state_put(&self, scope: StateScope, key: &str, value: &str) -> Result<(), PluginError> {
+        bindings::rapidbyte::plugin::host::state_put(
             state_scope_to_i32(scope) as u32,
             key,
             value,
@@ -239,8 +239,8 @@ impl HostImports for WasmHostImports {
         key: &str,
         expected: Option<&str>,
         new_value: &str,
-    ) -> Result<bool, ConnectorError> {
-        bindings::rapidbyte::connector::host::state_cas(
+    ) -> Result<bool, PluginError> {
+        bindings::rapidbyte::plugin::host::state_cas(
             state_scope_to_i32(scope) as u32,
             key,
             expected,
@@ -254,7 +254,7 @@ impl HostImports for WasmHostImports {
         connector_id: &str,
         stream_name: &str,
         cp: &Checkpoint,
-    ) -> Result<(), ConnectorError> {
+    ) -> Result<(), PluginError> {
         let kind = match cp.kind {
             CheckpointKind::Source => 0,
             CheckpointKind::Dest => 1,
@@ -262,15 +262,15 @@ impl HostImports for WasmHostImports {
         };
 
         let envelope = PayloadEnvelope {
-            protocol_version: ProtocolVersion::V4,
+            protocol_version: ProtocolVersion::V5,
             connector_id: connector_id.to_string(),
             stream_name: stream_name.to_string(),
             payload: cp,
         };
         let payload_json = serde_json::to_string(&envelope)
-            .map_err(|e| ConnectorError::internal("SERIALIZE_CHECKPOINT", e.to_string()))?;
+            .map_err(|e| PluginError::internal("SERIALIZE_CHECKPOINT", e.to_string()))?;
 
-        bindings::rapidbyte::connector::host::checkpoint(kind, &payload_json)
+        bindings::rapidbyte::plugin::host::checkpoint(kind, &payload_json)
             .map_err(from_component_error)
     }
 
@@ -279,17 +279,17 @@ impl HostImports for WasmHostImports {
         connector_id: &str,
         stream_name: &str,
         m: &Metric,
-    ) -> Result<(), ConnectorError> {
+    ) -> Result<(), PluginError> {
         let envelope = PayloadEnvelope {
-            protocol_version: ProtocolVersion::V4,
+            protocol_version: ProtocolVersion::V5,
             connector_id: connector_id.to_string(),
             stream_name: stream_name.to_string(),
             payload: m,
         };
         let payload_json = serde_json::to_string(&envelope)
-            .map_err(|e| ConnectorError::internal("SERIALIZE_METRIC", e.to_string()))?;
+            .map_err(|e| PluginError::internal("SERIALIZE_METRIC", e.to_string()))?;
 
-        bindings::rapidbyte::connector::host::metric(&payload_json).map_err(from_component_error)
+        bindings::rapidbyte::plugin::host::metric(&payload_json).map_err(from_component_error)
     }
 
     fn emit_dlq_record(
@@ -298,8 +298,8 @@ impl HostImports for WasmHostImports {
         record_json: &str,
         error_message: &str,
         error_category: ErrorCategory,
-    ) -> Result<(), ConnectorError> {
-        bindings::rapidbyte::connector::host::emit_dlq_record(
+    ) -> Result<(), PluginError> {
+        bindings::rapidbyte::plugin::host::emit_dlq_record(
             stream_name,
             record_json,
             error_message,
@@ -308,39 +308,39 @@ impl HostImports for WasmHostImports {
         .map_err(from_component_error)
     }
 
-    fn connect_tcp(&self, host: &str, port: u16) -> Result<u64, ConnectorError> {
-        bindings::rapidbyte::connector::host::connect_tcp(host, port).map_err(from_component_error)
+    fn connect_tcp(&self, host: &str, port: u16) -> Result<u64, PluginError> {
+        bindings::rapidbyte::plugin::host::connect_tcp(host, port).map_err(from_component_error)
     }
 
-    fn socket_read(&self, handle: u64, len: u64) -> Result<SocketReadResult, ConnectorError> {
-        let result = bindings::rapidbyte::connector::host::socket_read(handle, len)
+    fn socket_read(&self, handle: u64, len: u64) -> Result<SocketReadResult, PluginError> {
+        let result = bindings::rapidbyte::plugin::host::socket_read(handle, len)
             .map_err(from_component_error)?;
         Ok(match result {
-            bindings::rapidbyte::connector::types::SocketReadResult::Data(data) => {
+            bindings::rapidbyte::plugin::types::SocketReadResult::Data(data) => {
                 SocketReadResult::Data(data)
             }
-            bindings::rapidbyte::connector::types::SocketReadResult::Eof => SocketReadResult::Eof,
-            bindings::rapidbyte::connector::types::SocketReadResult::WouldBlock => {
+            bindings::rapidbyte::plugin::types::SocketReadResult::Eof => SocketReadResult::Eof,
+            bindings::rapidbyte::plugin::types::SocketReadResult::WouldBlock => {
                 SocketReadResult::WouldBlock
             }
         })
     }
 
-    fn socket_write(&self, handle: u64, data: &[u8]) -> Result<SocketWriteResult, ConnectorError> {
-        let result = bindings::rapidbyte::connector::host::socket_write(handle, data)
+    fn socket_write(&self, handle: u64, data: &[u8]) -> Result<SocketWriteResult, PluginError> {
+        let result = bindings::rapidbyte::plugin::host::socket_write(handle, data)
             .map_err(from_component_error)?;
         Ok(match result {
-            bindings::rapidbyte::connector::types::SocketWriteResult::Written(n) => {
+            bindings::rapidbyte::plugin::types::SocketWriteResult::Written(n) => {
                 SocketWriteResult::Written(n)
             }
-            bindings::rapidbyte::connector::types::SocketWriteResult::WouldBlock => {
+            bindings::rapidbyte::plugin::types::SocketWriteResult::WouldBlock => {
                 SocketWriteResult::WouldBlock
             }
         })
     }
 
     fn socket_close(&self, handle: u64) {
-        bindings::rapidbyte::connector::host::socket_close(handle)
+        bindings::rapidbyte::plugin::host::socket_close(handle)
     }
 }
 
@@ -351,37 +351,37 @@ pub struct StubHostImports;
 impl HostImports for StubHostImports {
     fn log(&self, _level: i32, _message: &str) {}
 
-    fn frame_new(&self, _capacity: u64) -> Result<u64, ConnectorError> {
+    fn frame_new(&self, _capacity: u64) -> Result<u64, PluginError> {
         Ok(1)
     }
 
-    fn frame_write(&self, _handle: u64, _chunk: &[u8]) -> Result<u64, ConnectorError> {
+    fn frame_write(&self, _handle: u64, _chunk: &[u8]) -> Result<u64, PluginError> {
         Ok(0)
     }
 
-    fn frame_seal(&self, _handle: u64) -> Result<(), ConnectorError> {
+    fn frame_seal(&self, _handle: u64) -> Result<(), PluginError> {
         Ok(())
     }
 
-    fn frame_len(&self, _handle: u64) -> Result<u64, ConnectorError> {
+    fn frame_len(&self, _handle: u64) -> Result<u64, PluginError> {
         Ok(0)
     }
 
-    fn frame_read(&self, _handle: u64, _offset: u64, _len: u64) -> Result<Vec<u8>, ConnectorError> {
+    fn frame_read(&self, _handle: u64, _offset: u64, _len: u64) -> Result<Vec<u8>, PluginError> {
         Ok(vec![])
     }
 
     fn frame_drop(&self, _handle: u64) {}
 
-    fn emit_batch(&self, _handle: u64) -> Result<(), ConnectorError> {
+    fn emit_batch(&self, _handle: u64) -> Result<(), PluginError> {
         Ok(())
     }
 
-    fn next_batch(&self) -> Result<Option<u64>, ConnectorError> {
+    fn next_batch(&self) -> Result<Option<u64>, PluginError> {
         Ok(None)
     }
 
-    fn state_get(&self, _scope: StateScope, _key: &str) -> Result<Option<String>, ConnectorError> {
+    fn state_get(&self, _scope: StateScope, _key: &str) -> Result<Option<String>, PluginError> {
         Ok(None)
     }
 
@@ -390,7 +390,7 @@ impl HostImports for StubHostImports {
         _scope: StateScope,
         _key: &str,
         _value: &str,
-    ) -> Result<(), ConnectorError> {
+    ) -> Result<(), PluginError> {
         Ok(())
     }
 
@@ -400,7 +400,7 @@ impl HostImports for StubHostImports {
         _key: &str,
         _expected: Option<&str>,
         _new_value: &str,
-    ) -> Result<bool, ConnectorError> {
+    ) -> Result<bool, PluginError> {
         Ok(false)
     }
 
@@ -409,7 +409,7 @@ impl HostImports for StubHostImports {
         _connector_id: &str,
         _stream_name: &str,
         _cp: &Checkpoint,
-    ) -> Result<(), ConnectorError> {
+    ) -> Result<(), PluginError> {
         Ok(())
     }
 
@@ -418,7 +418,7 @@ impl HostImports for StubHostImports {
         _connector_id: &str,
         _stream_name: &str,
         _m: &Metric,
-    ) -> Result<(), ConnectorError> {
+    ) -> Result<(), PluginError> {
         Ok(())
     }
 
@@ -428,19 +428,19 @@ impl HostImports for StubHostImports {
         _record_json: &str,
         _error_message: &str,
         _error_category: ErrorCategory,
-    ) -> Result<(), ConnectorError> {
+    ) -> Result<(), PluginError> {
         Ok(())
     }
 
-    fn connect_tcp(&self, _host: &str, _port: u16) -> Result<u64, ConnectorError> {
-        Err(ConnectorError::internal("STUB", "No-op stub"))
+    fn connect_tcp(&self, _host: &str, _port: u16) -> Result<u64, PluginError> {
+        Err(PluginError::internal("STUB", "No-op stub"))
     }
 
-    fn socket_read(&self, _handle: u64, _len: u64) -> Result<SocketReadResult, ConnectorError> {
+    fn socket_read(&self, _handle: u64, _len: u64) -> Result<SocketReadResult, PluginError> {
         Ok(SocketReadResult::Eof)
     }
 
-    fn socket_write(&self, _handle: u64, data: &[u8]) -> Result<SocketWriteResult, ConnectorError> {
+    fn socket_write(&self, _handle: u64, data: &[u8]) -> Result<SocketWriteResult, PluginError> {
         Ok(SocketWriteResult::Written(data.len() as u64))
     }
 
@@ -459,7 +459,7 @@ pub fn log(level: i32, message: &str) {
 /// # Errors
 ///
 /// Returns `Err` if frame creation, IPC encoding, or frame sealing fails.
-pub fn emit_batch(batch: &RecordBatch) -> Result<(), ConnectorError> {
+pub fn emit_batch(batch: &RecordBatch) -> Result<(), PluginError> {
     let imports = host_imports();
 
     let capacity = batch.get_array_memory_size() as u64 + 1024;
@@ -479,9 +479,9 @@ pub fn emit_batch(batch: &RecordBatch) -> Result<(), ConnectorError> {
 fn decode_next_batch_frame(
     ipc_bytes: &[u8],
     frame_len: u64,
-) -> Result<(Arc<Schema>, Vec<RecordBatch>), ConnectorError> {
+) -> Result<(Arc<Schema>, Vec<RecordBatch>), PluginError> {
     crate::arrow::ipc::decode_ipc(ipc_bytes).map_err(|e| {
-        ConnectorError::internal(
+        PluginError::internal(
             "NEXT_BATCH_DECODE",
             format!("failed to decode next_batch frame (frame_len={frame_len}): {e}"),
         )
@@ -498,7 +498,7 @@ fn decode_next_batch_frame(
 #[allow(clippy::type_complexity)]
 pub fn next_batch(
     max_bytes: u64,
-) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>, ConnectorError> {
+) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>, PluginError> {
     let imports = host_imports();
 
     let Some(handle) = imports.next_batch()? else {
@@ -508,7 +508,7 @@ pub fn next_batch(
     let frame_len = imports.frame_len(handle)?;
     if frame_len > max_bytes {
         imports.frame_drop(handle);
-        return Err(ConnectorError::internal(
+        return Err(PluginError::internal(
             "BATCH_TOO_LARGE",
             format!("Batch {frame_len} exceeds max {max_bytes}"),
         ));
@@ -527,7 +527,7 @@ pub fn next_batch(
 /// # Errors
 ///
 /// Returns `Err` if the host state backend rejects the read.
-pub fn state_get(scope: StateScope, key: &str) -> Result<Option<String>, ConnectorError> {
+pub fn state_get(scope: StateScope, key: &str) -> Result<Option<String>, PluginError> {
     host_imports().state_get(scope, key)
 }
 
@@ -536,7 +536,7 @@ pub fn state_get(scope: StateScope, key: &str) -> Result<Option<String>, Connect
 /// # Errors
 ///
 /// Returns `Err` if the host state backend rejects the write.
-pub fn state_put(scope: StateScope, key: &str, value: &str) -> Result<(), ConnectorError> {
+pub fn state_put(scope: StateScope, key: &str, value: &str) -> Result<(), PluginError> {
     host_imports().state_put(scope, key, value)
 }
 
@@ -550,7 +550,7 @@ pub fn state_compare_and_set(
     key: &str,
     expected: Option<&str>,
     new_value: &str,
-) -> Result<bool, ConnectorError> {
+) -> Result<bool, PluginError> {
     host_imports().state_compare_and_set(scope, key, expected, new_value)
 }
 
@@ -563,7 +563,7 @@ pub fn checkpoint(
     connector_id: &str,
     stream_name: &str,
     cp: &Checkpoint,
-) -> Result<(), ConnectorError> {
+) -> Result<(), PluginError> {
     host_imports().checkpoint(connector_id, stream_name, cp)
 }
 
@@ -572,7 +572,7 @@ pub fn checkpoint(
 /// # Errors
 ///
 /// Returns `Err` if metric emission fails.
-pub fn metric(connector_id: &str, stream_name: &str, m: &Metric) -> Result<(), ConnectorError> {
+pub fn metric(connector_id: &str, stream_name: &str, m: &Metric) -> Result<(), PluginError> {
     host_imports().metric(connector_id, stream_name, m)
 }
 
@@ -586,7 +586,7 @@ pub fn emit_dlq_record(
     record_json: &str,
     error_message: &str,
     error_category: ErrorCategory,
-) -> Result<(), ConnectorError> {
+) -> Result<(), PluginError> {
     host_imports().emit_dlq_record(stream_name, record_json, error_message, error_category)
 }
 
@@ -595,7 +595,7 @@ pub fn emit_dlq_record(
 /// # Errors
 ///
 /// Returns `Err` if the host denies the connection or TCP connect fails.
-pub fn connect_tcp(host: &str, port: u16) -> Result<u64, ConnectorError> {
+pub fn connect_tcp(host: &str, port: u16) -> Result<u64, PluginError> {
     host_imports().connect_tcp(host, port)
 }
 
@@ -604,7 +604,7 @@ pub fn connect_tcp(host: &str, port: u16) -> Result<u64, ConnectorError> {
 /// # Errors
 ///
 /// Returns `Err` if the socket read operation fails.
-pub fn socket_read(handle: u64, len: u64) -> Result<SocketReadResult, ConnectorError> {
+pub fn socket_read(handle: u64, len: u64) -> Result<SocketReadResult, PluginError> {
     host_imports().socket_read(handle, len)
 }
 
@@ -613,7 +613,7 @@ pub fn socket_read(handle: u64, len: u64) -> Result<SocketReadResult, ConnectorE
 /// # Errors
 ///
 /// Returns `Err` if the socket write operation fails.
-pub fn socket_write(handle: u64, data: &[u8]) -> Result<SocketWriteResult, ConnectorError> {
+pub fn socket_write(handle: u64, data: &[u8]) -> Result<SocketWriteResult, PluginError> {
     host_imports().socket_write(handle, data)
 }
 

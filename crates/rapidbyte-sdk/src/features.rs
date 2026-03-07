@@ -1,11 +1,11 @@
 //! Feature trait contracts.
 //!
 //! When a plugin declares a [`Feature`] in its manifest, the SDK requires
-//! the corresponding trait to be implemented. The `#[connector]` proc macro
+//! the corresponding trait to be implemented. The `#[plugin]` proc macro
 //! enforces this at compile time.
 
 use crate::context::Context;
-use crate::error::ConnectorError;
+use crate::error::PluginError;
 use crate::metric::{ReadSummary, WriteSummary};
 use crate::stream::{CdcResumeToken, PartitionCoordinates, StreamContext};
 
@@ -20,7 +20,7 @@ pub trait PartitionedSource {
         ctx: &Context,
         stream: StreamContext,
         partition: PartitionCoordinates,
-    ) -> Result<ReadSummary, ConnectorError>;
+    ) -> Result<ReadSummary, PluginError>;
 }
 
 /// Required when a source declares `Feature::Cdc`.
@@ -34,7 +34,7 @@ pub trait CdcSource {
         ctx: &Context,
         stream: StreamContext,
         resume: CdcResumeToken,
-    ) -> Result<ReadSummary, ConnectorError>;
+    ) -> Result<ReadSummary, PluginError>;
 }
 
 /// Required when a destination declares `Feature::BulkLoad`.
@@ -47,13 +47,13 @@ pub trait BulkLoadDestination {
         &mut self,
         ctx: &Context,
         stream: StreamContext,
-    ) -> Result<WriteSummary, ConnectorError>;
+    ) -> Result<WriteSummary, PluginError>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connector::{Destination, Source};
+    use crate::plugin::{Destination, Source};
 
     // Verify trait shapes are compatible — if this compiles, the trait
     // signatures are consistent with Source/Destination.

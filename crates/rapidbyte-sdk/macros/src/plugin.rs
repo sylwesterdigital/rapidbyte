@@ -1,4 +1,4 @@
-//! `#[connector(source|destination|transform)]` attribute macro implementation.
+//! `#[plugin(source|destination|transform)]` attribute macro implementation.
 //!
 //! Generates all WIT bindings, component glue, manifest embedding, and config
 //! schema embedding that previously required three separate declarative macros.
@@ -16,16 +16,16 @@ struct ManifestFeatures {
     has_bulk_load: bool,
 }
 
-fn read_manifest_features(role: &ConnectorRole) -> Option<ManifestFeatures> {
+fn read_manifest_features(kind: &PluginKind) -> Option<ManifestFeatures> {
     let out_dir = std::env::var("OUT_DIR").ok()?;
     let path = PathBuf::from(out_dir).join("rapidbyte_manifest.json");
     let json = std::fs::read_to_string(&path).ok()?;
     let manifest: serde_json::Value = serde_json::from_str(&json).ok()?;
 
-    let features_key = match role {
-        ConnectorRole::Source => "source",
-        ConnectorRole::Destination => "destination",
-        ConnectorRole::Transform => {
+    let features_key = match kind {
+        PluginKind::Source => "source",
+        PluginKind::Destination => "destination",
+        PluginKind::Transform => {
             return Some(ManifestFeatures {
                 has_partitioned_read: false,
                 has_cdc: false,
@@ -51,14 +51,14 @@ fn read_manifest_features(role: &ConnectorRole) -> Option<ManifestFeatures> {
 }
 
 fn gen_feature_assertions(
-    role: &ConnectorRole,
+    kind: &PluginKind,
     struct_name: &Ident,
     features: &ManifestFeatures,
 ) -> TokenStream {
     let mut assertions = Vec::new();
 
-    match role {
-        ConnectorRole::Source => {
+    match kind {
+        PluginKind::Source => {
             if features.has_partitioned_read {
                 assertions.push(quote! {
                     const _: () = {
@@ -76,7 +76,7 @@ fn gen_feature_assertions(
                 });
             }
         }
-        ConnectorRole::Destination => {
+        PluginKind::Destination => {
             if features.has_bulk_load {
                 assertions.push(quote! {
                     const _: () = {
@@ -86,26 +86,26 @@ fn gen_feature_assertions(
                 });
             }
         }
-        ConnectorRole::Transform => {}
+        PluginKind::Transform => {}
     }
 
     quote! { #(#assertions)* }
 }
 
-/// The connector role parsed from the attribute argument.
-pub enum ConnectorRole {
+/// The plugin kind parsed from the attribute argument.
+pub enum PluginKind {
     Source,
     Destination,
     Transform,
 }
 
-impl Parse for ConnectorRole {
+impl Parse for PluginKind {
     fn parse(input: ParseStream) -> Result<Self> {
         let ident: Ident = input.parse()?;
         match ident.to_string().as_str() {
-            "source" => Ok(ConnectorRole::Source),
-            "destination" => Ok(ConnectorRole::Destination),
-            "transform" => Ok(ConnectorRole::Transform),
+            "source" => Ok(PluginKind::Source),
+            "destination" => Ok(PluginKind::Destination),
+            "transform" => Ok(PluginKind::Transform),
             other => Err(syn::Error::new(
                 ident.span(),
                 format!(
@@ -118,33 +118,33 @@ impl Parse for ConnectorRole {
 }
 
 /// Main expansion entry point.
-pub fn expand(role: ConnectorRole, input: ItemStruct) -> Result<TokenStream> {
+pub fn expand(kind: PluginKind, input: ItemStruct) -> Result<TokenStream> {
     let struct_name = &input.ident;
 
     let bindings_mod = quote! { __rb_bindings };
-    let (world_name, trait_path) = match role {
-        ConnectorRole::Source => (
+    let (world_name, trait_path) = match kind {
+        PluginKind::Source => (
             "rapidbyte-source",
-            quote! { ::rapidbyte_sdk::connector::Source },
+            quote! { ::rapidbyte_sdk::plugin::Source },
         ),
-        ConnectorRole::Destination => (
+        PluginKind::Destination => (
             "rapidbyte-destination",
-            quote! { ::rapidbyte_sdk::connector::Destination },
+            quote! { ::rapidbyte_sdk::plugin::Destination },
         ),
-        ConnectorRole::Transform => (
+        PluginKind::Transform => (
             "rapidbyte-transform",
-            quote! { ::rapidbyte_sdk::connector::Transform },
+            quote! { ::rapidbyte_sdk::plugin::Transform },
         ),
     };
 
-    let features = read_manifest_features(&role);
+    let features = read_manifest_features(&kind);
     let wit_bindings = gen_wit_bindings(world_name);
     let common = gen_common(struct_name);
-    let guest_impl = gen_guest_impl(&role, struct_name, &trait_path, features.as_ref());
+    let guest_impl = gen_guest_impl(&kind, struct_name, &trait_path, features.as_ref());
     let embeds = gen_embeds(struct_name, &trait_path);
     let feature_assertions = features
         .as_ref()
-        .map(|f| gen_feature_assertions(&role, struct_name, f))
+        .map(|f| gen_feature_assertions(&kind, struct_name, f))
         .unwrap_or_default();
 
     Ok(quote! {
@@ -202,25 +202,25 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
         struct SyncRefCell(RefCell<Option<#struct_name>>);
         unsafe impl Sync for SyncRefCell {}
 
-        static CONNECTOR: OnceLock<SyncRefCell> = OnceLock::new();
+        static PLUGIN: OnceLock<SyncRefCell> = OnceLock::new();
 
         fn get_state() -> &'static RefCell<Option<#struct_name>> {
-            &CONNECTOR.get_or_init(|| SyncRefCell(RefCell::new(None))).0
+            &PLUGIN.get_or_init(|| SyncRefCell(RefCell::new(None))).0
         }
 
         fn to_component_error(
-            error: ::rapidbyte_sdk::error::ConnectorError,
-        ) -> __rb_bindings::rapidbyte::connector::types::ConnectorError {
-            use __rb_bindings::rapidbyte::connector::types::{
+            error: ::rapidbyte_sdk::error::PluginError,
+        ) -> __rb_bindings::rapidbyte::plugin::types::PluginError {
+            use __rb_bindings::rapidbyte::plugin::types::{
                 BackoffClass as CBackoffClass, CommitState as CCommitState,
-                ConnectorError as CConnectorError, ErrorCategory as CErrorCategory,
+                PluginError as CPluginError, ErrorCategory as CErrorCategory,
                 ErrorScope as CErrorScope,
             };
             use ::rapidbyte_sdk::error::{
                 BackoffClass, CommitState, ErrorCategory, ErrorScope,
             };
 
-            CConnectorError {
+            CPluginError {
                 category: match error.category {
                     ErrorCategory::Config => CErrorCategory::Config,
                     ErrorCategory::Auth => CErrorCategory::Auth,
@@ -261,10 +261,10 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
             ctx_json: String,
         ) -> Result<
             ::rapidbyte_sdk::stream::StreamContext,
-            __rb_bindings::rapidbyte::connector::types::ConnectorError,
+            __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
             serde_json::from_str(&ctx_json).map_err(|e| {
-                to_component_error(::rapidbyte_sdk::error::ConnectorError::config(
+                to_component_error(::rapidbyte_sdk::error::PluginError::config(
                     "INVALID_STREAM_CTX",
                     format!("Invalid StreamContext JSON: {}", e),
                 ))
@@ -273,9 +273,9 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
 
         fn parse_config<T: serde::de::DeserializeOwned>(
             config_json: &str,
-        ) -> Result<T, __rb_bindings::rapidbyte::connector::types::ConnectorError> {
+        ) -> Result<T, __rb_bindings::rapidbyte::plugin::types::PluginError> {
             serde_json::from_str(config_json).map_err(|e| {
-                to_component_error(::rapidbyte_sdk::error::ConnectorError::config(
+                to_component_error(::rapidbyte_sdk::error::PluginError::config(
                     "INVALID_CONFIG",
                     format!("Config parse error: {}", e),
                 ))
@@ -283,15 +283,15 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
         }
 
         fn parse_saved_config<T: serde::de::DeserializeOwned>(
-        ) -> Result<T, __rb_bindings::rapidbyte::connector::types::ConnectorError> {
+        ) -> Result<T, __rb_bindings::rapidbyte::plugin::types::PluginError> {
             let json = CONFIG_JSON.get().expect("open must be called before validate");
             parse_config(json)
         }
 
         fn to_component_validation(
             result: ::rapidbyte_sdk::error::ValidationResult,
-        ) -> __rb_bindings::rapidbyte::connector::types::ValidationReport {
-            use __rb_bindings::rapidbyte::connector::types::{
+        ) -> __rb_bindings::rapidbyte::plugin::types::ValidationReport {
+            use __rb_bindings::rapidbyte::plugin::types::{
                 ValidationReport as CValidationReport, ValidationStatus as CValidationStatus,
             };
             use ::rapidbyte_sdk::error::ValidationStatus;
@@ -311,24 +311,24 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
 
 /// Generate the Guest impl with lifecycle + role-specific methods.
 fn gen_guest_impl(
-    role: &ConnectorRole,
+    kind: &PluginKind,
     struct_name: &Ident,
     trait_path: &TokenStream,
     features: Option<&ManifestFeatures>,
 ) -> TokenStream {
     let lifecycle = gen_lifecycle_methods(struct_name, trait_path);
 
-    let (guest_trait_path, role_methods) = match role {
-        ConnectorRole::Source => (
-            quote! { __rb_bindings::exports::rapidbyte::connector::source::Guest },
+    let (guest_trait_path, role_methods) = match kind {
+        PluginKind::Source => (
+            quote! { __rb_bindings::exports::rapidbyte::plugin::source::Guest },
             gen_source_methods(struct_name, trait_path, features),
         ),
-        ConnectorRole::Destination => (
-            quote! { __rb_bindings::exports::rapidbyte::connector::destination::Guest },
+        PluginKind::Destination => (
+            quote! { __rb_bindings::exports::rapidbyte::plugin::destination::Guest },
             gen_dest_methods(struct_name, trait_path, features),
         ),
-        ConnectorRole::Transform => (
-            quote! { __rb_bindings::exports::rapidbyte::connector::transform::Guest },
+        PluginKind::Transform => (
+            quote! { __rb_bindings::exports::rapidbyte::plugin::transform::Guest },
             gen_transform_methods(struct_name, trait_path),
         ),
     };
@@ -348,14 +348,14 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
     quote! {
         fn open(
             config_json: String,
-        ) -> Result<u64, __rb_bindings::rapidbyte::connector::types::ConnectorError> {
+        ) -> Result<u64, __rb_bindings::rapidbyte::plugin::types::PluginError> {
             let _ = CONFIG_JSON.set(config_json.clone());
 
             let config: <#struct_name as #trait_path>::Config =
                 parse_config(&config_json)?;
 
             let rt = get_runtime();
-            let (instance, _connector_info) = rt
+            let (instance, _plugin_info) = rt
                 .block_on(<#struct_name as #trait_path>::init(config))
                 .map_err(to_component_error)?;
 
@@ -368,8 +368,8 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
         }
 
         fn validate(_session: u64) -> Result<
-            __rb_bindings::rapidbyte::connector::types::ValidationReport,
-            __rb_bindings::rapidbyte::connector::types::ConnectorError,
+            __rb_bindings::rapidbyte::plugin::types::ValidationReport,
+            __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
             let config: <#struct_name as #trait_path>::Config = parse_saved_config()?;
             let ctx = CONTEXT.get().expect("open must be called before validate");
@@ -380,7 +380,7 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
                 .map_err(to_component_error)
         }
 
-        fn close(_session: u64) -> Result<(), __rb_bindings::rapidbyte::connector::types::ConnectorError> {
+        fn close(_session: u64) -> Result<(), __rb_bindings::rapidbyte::plugin::types::PluginError> {
             let rt = get_runtime();
             let ctx = CONTEXT.get().expect("open must be called before close");
             let state_cell = get_state();
@@ -469,19 +469,19 @@ fn gen_source_methods(
     quote! {
         fn discover(
             _session: u64,
-        ) -> Result<String, __rb_bindings::rapidbyte::connector::types::ConnectorError> {
-            let ctx = CONTEXT.get().expect("Connector not opened");
+        ) -> Result<String, __rb_bindings::rapidbyte::plugin::types::PluginError> {
+            let ctx = CONTEXT.get().expect("Plugin not opened");
             let rt = get_runtime();
             let state_cell = get_state();
             let mut state_ref = state_cell.borrow_mut();
-            let conn = state_ref.as_mut().expect("Connector not opened");
+            let conn = state_ref.as_mut().expect("Plugin not opened");
 
             let catalog = rt
                 .block_on(<#struct_name as #trait_path>::discover(conn, ctx))
                 .map_err(to_component_error)?;
 
             serde_json::to_string(&catalog).map_err(|e| {
-                to_component_error(::rapidbyte_sdk::error::ConnectorError::internal(
+                to_component_error(::rapidbyte_sdk::error::PluginError::internal(
                     "SERIALIZE_CATALOG",
                     e.to_string(),
                 ))
@@ -490,24 +490,24 @@ fn gen_source_methods(
 
         fn run(
             _session: u64,
-            request: __rb_bindings::rapidbyte::connector::types::RunRequest,
+            request: __rb_bindings::rapidbyte::plugin::types::RunRequest,
         ) -> Result<
-            __rb_bindings::rapidbyte::connector::types::RunSummary,
-            __rb_bindings::rapidbyte::connector::types::ConnectorError,
+            __rb_bindings::rapidbyte::plugin::types::RunSummary,
+            __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
             let stream = parse_stream_context(request.stream_context_json)?;
-            let base_ctx = CONTEXT.get().expect("Connector not opened");
+            let base_ctx = CONTEXT.get().expect("Plugin not opened");
             let ctx = base_ctx.with_stream(&stream.stream_name);
             let rt = get_runtime();
             let state_cell = get_state();
             let mut state_ref = state_cell.borrow_mut();
-            let conn = state_ref.as_mut().expect("Connector not opened");
+            let conn = state_ref.as_mut().expect("Plugin not opened");
 
             let summary = #read_dispatch;
 
-            Ok(__rb_bindings::rapidbyte::connector::types::RunSummary {
-                role: __rb_bindings::rapidbyte::connector::types::ConnectorRole::Source,
-                read: Some(__rb_bindings::rapidbyte::connector::types::ReadSummary {
+            Ok(__rb_bindings::rapidbyte::plugin::types::RunSummary {
+                kind: __rb_bindings::rapidbyte::plugin::types::PluginKind::Source,
+                read: Some(__rb_bindings::rapidbyte::plugin::types::ReadSummary {
                     records_read: summary.records_read,
                     bytes_read: summary.bytes_read,
                     batches_emitted: summary.batches_emitted,
@@ -546,25 +546,25 @@ fn gen_dest_methods(
     quote! {
         fn run(
             _session: u64,
-            request: __rb_bindings::rapidbyte::connector::types::RunRequest,
+            request: __rb_bindings::rapidbyte::plugin::types::RunRequest,
         ) -> Result<
-            __rb_bindings::rapidbyte::connector::types::RunSummary,
-            __rb_bindings::rapidbyte::connector::types::ConnectorError,
+            __rb_bindings::rapidbyte::plugin::types::RunSummary,
+            __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
             let stream = parse_stream_context(request.stream_context_json)?;
-            let base_ctx = CONTEXT.get().expect("Connector not opened");
+            let base_ctx = CONTEXT.get().expect("Plugin not opened");
             let ctx = base_ctx.with_stream(&stream.stream_name);
             let rt = get_runtime();
             let state_cell = get_state();
             let mut state_ref = state_cell.borrow_mut();
-            let conn = state_ref.as_mut().expect("Connector not opened");
+            let conn = state_ref.as_mut().expect("Plugin not opened");
 
             let summary = #write_dispatch;
 
-            Ok(__rb_bindings::rapidbyte::connector::types::RunSummary {
-                role: __rb_bindings::rapidbyte::connector::types::ConnectorRole::Destination,
+            Ok(__rb_bindings::rapidbyte::plugin::types::RunSummary {
+                kind: __rb_bindings::rapidbyte::plugin::types::PluginKind::Destination,
                 read: None,
-                write: Some(__rb_bindings::rapidbyte::connector::types::WriteSummary {
+                write: Some(__rb_bindings::rapidbyte::plugin::types::WriteSummary {
                     records_written: summary.records_written,
                     bytes_written: summary.bytes_written,
                     batches_written: summary.batches_written,
@@ -582,28 +582,28 @@ fn gen_transform_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
     quote! {
         fn run(
             _session: u64,
-            request: __rb_bindings::rapidbyte::connector::types::RunRequest,
+            request: __rb_bindings::rapidbyte::plugin::types::RunRequest,
         ) -> Result<
-            __rb_bindings::rapidbyte::connector::types::RunSummary,
-            __rb_bindings::rapidbyte::connector::types::ConnectorError,
+            __rb_bindings::rapidbyte::plugin::types::RunSummary,
+            __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
             let stream = parse_stream_context(request.stream_context_json)?;
-            let base_ctx = CONTEXT.get().expect("Connector not opened");
+            let base_ctx = CONTEXT.get().expect("Plugin not opened");
             let ctx = base_ctx.with_stream(&stream.stream_name);
             let rt = get_runtime();
             let state_cell = get_state();
             let mut state_ref = state_cell.borrow_mut();
-            let conn = state_ref.as_mut().expect("Connector not opened");
+            let conn = state_ref.as_mut().expect("Plugin not opened");
 
             let summary = rt
                 .block_on(<#struct_name as #trait_path>::transform(conn, &ctx, stream))
                 .map_err(to_component_error)?;
 
-            Ok(__rb_bindings::rapidbyte::connector::types::RunSummary {
-                role: __rb_bindings::rapidbyte::connector::types::ConnectorRole::Transform,
+            Ok(__rb_bindings::rapidbyte::plugin::types::RunSummary {
+                kind: __rb_bindings::rapidbyte::plugin::types::PluginKind::Transform,
                 read: None,
                 write: None,
-                transform: Some(__rb_bindings::rapidbyte::connector::types::TransformSummary {
+                transform: Some(__rb_bindings::rapidbyte::plugin::types::TransformSummary {
                     records_in: summary.records_in,
                     records_out: summary.records_out,
                     bytes_in: summary.bytes_in,
