@@ -2,6 +2,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use indicatif::{ProgressBar, ProgressStyle};
 use tokio::sync::mpsc;
@@ -9,6 +10,9 @@ use tokio::sync::mpsc;
 use rapidbyte_engine::progress::{Phase, ProgressEvent};
 
 use super::format;
+
+/// Minimum interval between spinner message updates.
+const UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Shared counters updated by progress events, read by spinner tick.
 struct Counters {
@@ -57,6 +61,8 @@ pub fn spawn_progress_spinner(
         spinner.enable_steady_tick(std::time::Duration::from_millis(80));
         spinner.set_message("Resolving connectors...");
 
+        let mut last_update = Instant::now();
+
         while let Some(event) = rx.recv().await {
             match event {
                 ProgressEvent::PhaseChange { phase } => match phase {
@@ -64,6 +70,7 @@ pub fn spawn_progress_spinner(
                     Phase::Loading => spinner.set_message("Loading connectors..."),
                     Phase::Running => {
                         update_running_message(&spinner, &counters);
+                        last_update = Instant::now();
                     }
                     Phase::Finished => break,
                 },
@@ -72,11 +79,15 @@ pub fn spawn_progress_spinner(
                         .total_batches
                         .fetch_add(1, Ordering::Relaxed);
                     counters.total_bytes.fetch_add(bytes, Ordering::Relaxed);
-                    update_running_message(&spinner, &counters);
+                    if last_update.elapsed() >= UPDATE_INTERVAL {
+                        update_running_message(&spinner, &counters);
+                        last_update = Instant::now();
+                    }
                 }
                 ProgressEvent::StreamCompleted { .. } => {
                     counters.streams_done.fetch_add(1, Ordering::Relaxed);
                     update_running_message(&spinner, &counters);
+                    last_update = Instant::now();
                 }
                 ProgressEvent::Retry {
                     attempt,

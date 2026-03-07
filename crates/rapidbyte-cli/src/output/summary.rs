@@ -5,7 +5,7 @@
 use console::style;
 use rapidbyte_engine::result::PipelineResult;
 
-use super::format::{format_bytes, format_count, format_duration, format_rate};
+use super::format::{format_byte_rate, format_bytes, format_count, format_duration, format_rate};
 use crate::Verbosity;
 
 /// Print a successful pipeline result to stderr.
@@ -53,9 +53,9 @@ fn print_compact(result: &PipelineResult, pipeline_name: &str) {
     );
 
     let rows_rate = format_rate(c.records_read, result.duration_secs);
-    let bytes_rate = format_rate(c.bytes_read, result.duration_secs);
+    let bytes_rate = format_byte_rate(c.bytes_read, result.duration_secs);
     eprintln!(
-        "  {:<12}{} rows/s | {}/s",
+        "  {:<12}{} rows/s | {}",
         "Throughput", rows_rate, bytes_rate,
     );
 
@@ -74,22 +74,23 @@ fn print_verbose(result: &PipelineResult) {
         eprintln!();
         eprintln!("  Streams");
         eprintln!(
-            "  {:<24} {:>10} {:>12} {:>10} {:>8}",
-            "stream_name", "Read", "Written", "Data", "Time",
+            "  {:<24} {:>10} {:>12} {:>10} {:>10} {:>8}",
+            "stream_name", "Read", "Written", "In", "Out", "Time",
         );
         eprintln!(
             "  {}",
-            "\u{2500}".repeat(68),
+            "\u{2500}".repeat(78),
         );
 
         // Aggregate shards per stream
         for agg in aggregate_streams(&result.stream_metrics) {
             eprintln!(
-                "  {:<24} {:>10} {:>12} {:>10} {:>8}",
+                "  {:<24} {:>10} {:>12} {:>10} {:>10} {:>8}",
                 agg.name,
                 format_count(agg.records_read),
                 format_count(agg.records_written),
                 format_bytes(agg.bytes_read),
+                format_bytes(agg.bytes_written),
                 format_duration(agg.duration_secs),
             );
         }
@@ -178,12 +179,12 @@ fn print_diagnostic(result: &PipelineResult) {
         eprintln!();
         eprintln!("  Shard skew");
         eprintln!(
-            "  {:<24} {:>5} {:>10} {:>12} {:>10} {:>8}",
-            "stream_name", "shard", "Read", "Written", "Data", "Time",
+            "  {:<24} {:>5} {:>10} {:>12} {:>10} {:>10} {:>8}",
+            "stream_name", "shard", "Read", "Written", "In", "Out", "Time",
         );
         eprintln!(
             "  {}",
-            "\u{2500}".repeat(74),
+            "\u{2500}".repeat(84),
         );
 
         for m in partitioned {
@@ -192,12 +193,13 @@ fn print_diagnostic(result: &PipelineResult) {
                 .map_or_else(|| "-".to_string(), |i| i.to_string());
             let total_secs = m.source_duration_secs + m.dest_duration_secs;
             eprintln!(
-                "  {:<24} {:>5} {:>10} {:>12} {:>10} {:>8}",
+                "  {:<24} {:>5} {:>10} {:>12} {:>10} {:>10} {:>8}",
                 m.stream_name,
                 shard_label,
                 format_count(m.records_read),
                 format_count(m.records_written),
                 format_bytes(m.bytes_read),
+                format_bytes(m.bytes_written),
                 format_duration(total_secs),
             );
         }
@@ -220,6 +222,7 @@ struct StreamAggregate {
     records_read: u64,
     records_written: u64,
     bytes_read: u64,
+    bytes_written: u64,
     duration_secs: f64,
 }
 
@@ -237,12 +240,14 @@ fn aggregate_streams(
                 records_read: 0,
                 records_written: 0,
                 bytes_read: 0,
+                bytes_written: 0,
                 duration_secs: 0.0,
             }
         });
         entry.records_read += m.records_read;
         entry.records_written += m.records_written;
         entry.bytes_read += m.bytes_read;
+        entry.bytes_written += m.bytes_written;
         // Use max duration across shards (they run in parallel)
         let shard_dur = m.source_duration_secs + m.dest_duration_secs;
         if shard_dur > entry.duration_secs {

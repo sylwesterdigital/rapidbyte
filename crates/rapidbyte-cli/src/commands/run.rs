@@ -11,7 +11,10 @@ use anyhow::Result;
 use rapidbyte_engine::execution::{ExecutionOptions, PipelineOutcome};
 use rapidbyte_engine::orchestrator;
 
-use crate::output::{format::format_bytes, progress, summary};
+use crate::output::{
+    format::{format_bytes, format_count, format_duration},
+    progress, summary,
+};
 use crate::Verbosity;
 
 #[derive(Debug, Clone)]
@@ -62,7 +65,7 @@ pub async fn execute(
     // Run the pipeline
     let cpu_start = process_cpu_seconds();
     let outcome = orchestrator::run_pipeline(&config, &options, progress_tx).await;
-    let cpu_end = process_cpu_seconds();
+    let (cpu_end, peak_rss_mb) = post_pipeline_metrics();
 
     // Wait for spinner to finish before printing results
     if let Some(handle) = spinner_handle {
@@ -77,7 +80,6 @@ pub async fn execute(
     match outcome {
         PipelineOutcome::Run(result) => {
             let cpu_metrics = process_cpu_metrics(cpu_start, cpu_end, result.duration_secs);
-            let peak_rss_mb = process_peak_rss_mb();
 
             // Human-readable summary to stderr
             summary::print_success(&result, &config.pipeline, verbosity);
@@ -145,7 +147,7 @@ pub async fn execute(
 
                 eprintln!(
                     "{} rows ({}, {} batch{})",
-                    stream.total_rows,
+                    format_count(stream.total_rows),
                     format_bytes(stream.total_bytes),
                     stream.batches.len(),
                     if stream.batches.len() == 1 { "" } else { "es" },
@@ -153,11 +155,12 @@ pub async fn execute(
                 eprintln!();
             }
 
-            eprintln!("Duration: {:.2}s", result.duration_secs);
+            eprintln!("Duration: {}", format_duration(result.duration_secs));
             if result.transform_count > 0 {
                 eprintln!(
-                    "Transforms: {} applied ({:.2}s)",
-                    result.transform_count, result.transform_duration_secs,
+                    "Transforms: {} applied ({})",
+                    result.transform_count,
+                    format_duration(result.transform_duration_secs),
                 );
             }
         }
@@ -226,24 +229,26 @@ fn process_cpu_seconds() -> Option<f64> {
     }
 }
 
-fn process_peak_rss_mb() -> Option<f64> {
+/// Get CPU seconds and peak RSS from a single post-pipeline `getrusage` call.
+fn post_pipeline_metrics() -> (Option<f64>, Option<f64>) {
     #[cfg(unix)]
     {
-        getrusage_self().map(|u| {
-            #[cfg(target_os = "macos")]
-            {
-                u.ru_maxrss as f64 / (1024.0 * 1024.0)
+        match getrusage_self() {
+            Some(u) => {
+                let cpu = cpu_seconds_from_rusage(&u);
+                #[cfg(target_os = "macos")]
+                let rss = u.ru_maxrss as f64 / (1024.0 * 1024.0);
+                #[cfg(not(target_os = "macos"))]
+                let rss = u.ru_maxrss as f64 / 1024.0;
+                (Some(cpu), Some(rss))
             }
-            #[cfg(not(target_os = "macos"))]
-            {
-                u.ru_maxrss as f64 / 1024.0
-            }
-        })
+            None => (None, None),
+        }
     }
 
     #[cfg(not(unix))]
     {
-        None
+        (None, None)
     }
 }
 

@@ -43,6 +43,14 @@ pub fn format_rate(count: u64, duration_secs: f64) -> String {
     }
 }
 
+pub fn format_byte_rate(bytes: u64, duration_secs: f64) -> String {
+    if duration_secs <= 0.0 {
+        return "N/A".to_string();
+    }
+    let bps = bytes as f64 / duration_secs;
+    format!("{}/s", format_bytes(bps.round() as u64))
+}
+
 pub fn format_duration(secs: f64) -> String {
     if secs >= 60.0 {
         let mins = (secs / 60.0).floor() as u64;
@@ -78,6 +86,13 @@ mod tests {
         assert_eq!(format_rate(1_000_000, 1.0), "1.0M");
         assert_eq!(format_rate(375_000, 1.0), "375K");
         assert_eq!(format_rate(50, 1.0), "50");
+    }
+
+    #[test]
+    fn test_format_byte_rate() {
+        assert_eq!(format_byte_rate(1_048_576, 1.0), "1.0 MB/s");
+        assert_eq!(format_byte_rate(500, 0.0), "N/A");
+        assert_eq!(format_byte_rate(1_073_741_824, 2.0), "512.0 MB/s");
     }
 
     #[test]
