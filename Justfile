@@ -72,6 +72,10 @@ docker-up:
 docker-down:
     docker compose down -v
 
+# Seed local Postgres for manual testing (default 100 rows, or specify count)
+seed rows="100":
+    ./scripts/seed-dev.sh {{rows}}
+
 clean:
     cargo clean
 
