@@ -6,7 +6,8 @@ Data pipeline engine using WASI component connectors (Wasmtime runtime).
 
 ```
 crates/
-  rapidbyte-cli/     # CLI binary (`rapidbyte run`, `rapidbyte check`)
+  rapidbyte-cli/     # CLI binary (`rapidbyte run`, `rapidbyte check`, `rapidbyte dev`)
+  rapidbyte-dev/     # Interactive dev shell (REPL with reedline, DataFusion, Arrow workspace)
   rapidbyte-engine/  # Pipeline orchestrator, config parsing, Arrow utils
   rapidbyte-runtime/ # Wasmtime component runtime, host imports, sandbox
   rapidbyte-sdk/     # Connector SDK (protocol types, component host bindings)
@@ -27,7 +28,7 @@ tests/
     analyze.py       # Historical results viewer
 ```
 
-- Workspace has 7 crates (cli, engine, runtime, sdk, sdk/macros, state, types). Connectors are excluded from workspace and build separately.
+- Workspace has 8 crates (cli, dev, engine, runtime, sdk, sdk/macros, state, types). Connectors are excluded from workspace and build separately.
 - Connectors target `wasm32-wasip2` via their `.cargo/config.toml`.
 
 ## Crate Dependency Graph
@@ -38,7 +39,8 @@ types (leaf — no internal deps)
   ├── runtime  → types, state
   ├── sdk      → types
   └── engine   → types, runtime, state
-      └── cli  → engine, runtime, types
+      ├── dev  → engine, runtime, types, state
+      └── cli  → engine, runtime, types, dev
 ```
 
 Pure data types and enums belong in `types`. Host-only config types (YAML parsing) stay in `engine/config/`.
@@ -46,6 +48,7 @@ Pure data types and enums belong in `types`. Host-only config types (YAML parsin
 ## Commands
 
 ```bash
+just dev                # Launch interactive dev shell (builds first)
 just build              # Build host binary (debug)
 just build-connectors   # Build both connectors (wasm32-wasip2, debug)
 just release            # Build host binary (release, optimized)
@@ -61,6 +64,12 @@ just bench-compare main feature                    # Compare benchmarks between 
 cargo bench             # Criterion micro-benchmarks (Arrow codec, state backend)
 just fmt                # cargo fmt
 just lint               # cargo clippy
+```
+
+## CLI Commands
+
+```bash
+rapidbyte dev                         # Interactive dev shell (REPL)
 ```
 
 ## CLI Output Flags

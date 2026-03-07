@@ -21,6 +21,11 @@ dev-up rows="1000000":
 dev-down:
     docker compose down -v
 
+# Launch interactive dev shell (REPL)
+dev *args="": build-all
+    RAPIDBYTE_CONNECTOR_DIR=target/connectors \
+    ./target/{{MODE}}/rapidbyte dev {{args}}
+
 # Build + run a pipeline (pass flags like -v, -vv, --dry-run)
 run pipeline *args="": build-all
     RAPIDBYTE_CONNECTOR_DIR=target/connectors \

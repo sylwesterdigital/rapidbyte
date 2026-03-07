@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/rapidbyte-cli",
+    "crates/rapidbyte-dev",
     "crates/rapidbyte-engine",
     "crates/rapidbyte-runtime",
     "crates/rapidbyte-sdk",
@@ -41,3 +42,5 @@ criterion = { version = "0.5", features = ["html_reports"] }
 postgres = "0.19"
 indicatif = "0.17"
 console = "0.15"
+datafusion = "43"
+reedline = "0.38"

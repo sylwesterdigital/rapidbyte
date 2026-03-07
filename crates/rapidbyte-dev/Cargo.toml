@@ -1,24 +1,20 @@
 [package]
-name = "rapidbyte-cli"
+name = "rapidbyte-dev"
 version.workspace = true
 edition.workspace = true
 
-[[bin]]
-name = "rapidbyte"
-path = "src/main.rs"
-
 [dependencies]
-rapidbyte-dev = { path = "../rapidbyte-dev" }
 rapidbyte-engine = { path = "../rapidbyte-engine" }
 rapidbyte-runtime = { path = "../rapidbyte-runtime" }
 rapidbyte-types = { path = "../rapidbyte-types" }
+rapidbyte-state = { path = "../rapidbyte-state" }
 tokio = { workspace = true }
-clap = { workspace = true }
+arrow = { workspace = true, features = ["prettyprint"] }
+datafusion = { workspace = true }
+reedline = { workspace = true }
+nu-ansi-term = "0.50"
 anyhow = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-arrow = { version = "53", features = ["prettyprint"] }
-libc = "0.2"
-indicatif = { workspace = true }
 console = { workspace = true }
+indicatif = { workspace = true }

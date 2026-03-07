@@ -89,6 +89,8 @@ enum Commands {
         #[arg(short, long)]
         output: Option<String>,
     },
+    /// Launch interactive dev shell
+    Dev,
 }
 
 #[tokio::main]
@@ -111,6 +113,7 @@ async fn main() -> ExitCode {
         Commands::Scaffold { name, output } => {
             commands::scaffold::run(&name, output.as_deref()).map_err(Into::into)
         }
+        Commands::Dev => commands::dev::execute().await,
     };
 
     match result {

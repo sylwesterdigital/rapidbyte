@@ -9,6 +9,7 @@ use rapidbyte_engine::config::types::PipelineConfig;
 
 pub mod check;
 pub mod connectors;
+pub mod dev;
 pub mod discover;
 pub mod run;
 pub mod scaffold;
