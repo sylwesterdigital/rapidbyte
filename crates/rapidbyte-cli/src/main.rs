@@ -94,9 +94,9 @@ enum Commands {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    logging::init(&cli.log_level);
-
     let verbosity = Verbosity::from_flags(cli.quiet, cli.verbose);
+
+    logging::init(&cli.log_level, verbosity);
 
     match cli.command {
         Commands::Run {
