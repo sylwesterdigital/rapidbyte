@@ -85,7 +85,7 @@ async fn create_table(
     }
 
     let ddl = format!(
-        "CREATE TABLE IF NOT EXISTS {} ({})",
+        "CREATE UNLOGGED TABLE IF NOT EXISTS {} ({})",
         qualified_table,
         ddl_parts.join(", ")
     );

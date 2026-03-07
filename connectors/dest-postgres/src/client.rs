@@ -32,6 +32,11 @@ pub(crate) async fn connect(config: &crate::config::Config) -> Result<Client, St
         }
     });
 
+    client
+        .execute("SET synchronous_commit = OFF", &[])
+        .await
+        .map_err(|e| format!("Failed to set synchronous_commit: {e}"))?;
+
     Ok(client)
 }
 
