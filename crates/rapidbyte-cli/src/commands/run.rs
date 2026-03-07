@@ -94,9 +94,11 @@ pub async fn execute(
                 }
             }
 
-            // Machine-readable JSON for benchmarking tools (stdout)
-            let json = bench_json_from_result(&result, cpu_metrics.as_ref(), peak_rss_mb);
-            println!("@@BENCH_JSON@@{json}");
+            // Machine-readable JSON for benchmarking tools (stdout, opt-in)
+            if std::env::var_os("RAPIDBYTE_BENCH").is_some() {
+                let json = bench_json_from_result(&result, cpu_metrics.as_ref(), peak_rss_mb);
+                println!("@@BENCH_JSON@@{json}");
+            }
         }
         PipelineOutcome::DryRun(result) => {
             use arrow::util::pretty::pretty_format_batches;

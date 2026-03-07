@@ -480,6 +480,7 @@ fn run_pipeline_once(
         .arg("warn")
         .env("RAPIDBYTE_CONNECTOR_DIR", &context.connector_dir)
         .env("RAPIDBYTE_WASMTIME_AOT", if aot { "1" } else { "0" })
+        .env("RAPIDBYTE_BENCH", "1")
         .output()
         .with_context(|| format!("failed to run pipeline using {}", binary.display()))?;
 

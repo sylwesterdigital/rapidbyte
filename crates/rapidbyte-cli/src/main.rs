@@ -97,7 +97,7 @@ async fn main() -> ExitCode {
 
     let verbosity = Verbosity::from_flags(cli.quiet, cli.verbose);
 
-    logging::init(&cli.log_level, verbosity);
+    logging::init(&cli.log_level);
 
     let result = match cli.command {
         Commands::Run {
