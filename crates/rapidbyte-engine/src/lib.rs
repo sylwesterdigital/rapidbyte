@@ -14,6 +14,7 @@
 //! | `error`        | Pipeline error types and retry policy |
 //! | `execution`    | Runtime execution mode types (dry-run, limits) |
 //! | `orchestrator` | Pipeline execution, retry, stream dispatch |
+//! | `progress`     | Progress event types for live CLI updates |
 //! | `resolve`      | Connector resolution, manifest validation, state backend (internal) |
 //! | `result`       | Pipeline execution result types and timing breakdowns |
 //! | `runner`       | Individual connector runners (source, dest, transform) |
@@ -28,6 +29,7 @@ pub(crate) mod dlq;
 pub mod error;
 pub mod execution;
 pub mod orchestrator;
+pub mod progress;
 pub(crate) mod resolve;
 pub mod result;
 pub mod runner;
@@ -39,4 +41,5 @@ pub use config::validator::validate_pipeline;
 pub use error::PipelineError;
 pub use execution::{DryRunResult, DryRunStreamResult, ExecutionOptions, PipelineOutcome};
 pub use orchestrator::{check_pipeline, discover_connector, run_pipeline};
+pub use progress::{Phase, ProgressEvent};
 pub use result::{CheckResult, PipelineResult};
