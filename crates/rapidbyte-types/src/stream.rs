@@ -212,6 +212,9 @@ pub struct StreamContext {
     /// Column projection (`None` = all columns).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_columns: Option<Vec<String>>,
+    /// Explicit source column used for full-refresh partitioning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_key: Option<String>,
     /// Total number of source partitions for this stream execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition_count: Option<u32>,
@@ -254,6 +257,7 @@ impl StreamContext {
             policies: StreamPolicies::default(),
             write_mode: None,
             selected_columns: None,
+            partition_key: None,
             partition_count: None,
             partition_index: None,
             effective_parallelism: None,
@@ -349,6 +353,7 @@ mod tests {
             }]),
             sync_mode: SyncMode::Incremental,
             write_mode: Some(WriteMode::Append),
+            partition_key: Some("tenant_id".into()),
             partition_count: Some(4),
             partition_index: Some(2),
             effective_parallelism: Some(4),

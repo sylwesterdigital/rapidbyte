@@ -75,9 +75,7 @@ pub fn spawn_progress_spinner(
                     Phase::Finished => break,
                 },
                 ProgressEvent::BatchEmitted { bytes } => {
-                    counters
-                        .total_batches
-                        .fetch_add(1, Ordering::Relaxed);
+                    counters.total_batches.fetch_add(1, Ordering::Relaxed);
                     counters.total_bytes.fetch_add(bytes, Ordering::Relaxed);
                     if last_update.elapsed() >= UPDATE_INTERVAL {
                         update_running_message(&spinner, &counters);

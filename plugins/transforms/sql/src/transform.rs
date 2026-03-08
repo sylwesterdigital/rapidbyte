@@ -2,12 +2,15 @@
 //!
 //! For each incoming Arrow batch:
 //! 1. Register it as a DataFusion MemTable named `input`
-//! 2. Execute the user's SQL query
+//! 2. Re-plan the cached SQL statement against the current `input` table
 //! 3. Forward result batches downstream via `ctx.emit_batch()`
 
 use std::sync::Arc;
 
+use datafusion::dataframe::DataFrame;
 use datafusion::prelude::*;
+use datafusion::sql::parser::Statement;
+use futures::StreamExt;
 use rapidbyte_sdk::prelude::*;
 
 use crate::config::Config;
@@ -20,7 +23,8 @@ use crate::config::Config;
 pub async fn run(
     ctx: &Context,
     stream: &StreamContext,
-    config: &Config,
+    _config: &Config,
+    statement: &Statement,
 ) -> Result<TransformSummary, PluginError> {
     let session = SessionContext::new();
 
@@ -60,23 +64,27 @@ pub async fn run(
                 )
             })?;
 
-        // Plan and execute.
-        let df = session.sql(&config.query).await.map_err(|e| {
-            PluginError::internal("SQL_PLAN", format!("Query planning failed: {e}"))
-        })?;
-
-        let result_batches = df.collect().await.map_err(|e| {
+        // Re-plan against the current input table and stream results instead of buffering them.
+        let logical_plan = session
+            .state()
+            .statement_to_plan(statement.clone())
+            .await
+            .map_err(|e| PluginError::internal("SQL_PLAN", format!("Query planning failed: {e}")))?;
+        let df = DataFrame::new(session.state(), logical_plan);
+        let mut result_stream = df.execute_stream().await.map_err(|e| {
             PluginError::internal("SQL_EXEC", format!("Query execution failed: {e}"))
         })?;
 
-        // Forward each non-empty result batch downstream.
-        for batch in &result_batches {
+        while let Some(batch) = result_stream.next().await {
+            let batch = batch.map_err(|e| {
+                PluginError::internal("SQL_EXEC", format!("Query execution failed: {e}"))
+            })?;
             if batch.num_rows() == 0 {
                 continue;
             }
             records_out += batch.num_rows() as u64;
             bytes_out += batch.get_array_memory_size() as u64;
-            ctx.emit_batch(batch)?;
+            ctx.emit_batch(&batch)?;
         }
 
         batches_processed += 1;

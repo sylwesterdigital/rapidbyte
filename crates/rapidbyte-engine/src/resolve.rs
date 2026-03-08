@@ -21,15 +21,15 @@ pub(crate) struct ResolvedPlugins {
     pub(crate) dest_permissions: Option<Permissions>,
 }
 
-pub(crate) fn resolve_plugins(
-    config: &PipelineConfig,
-) -> Result<ResolvedPlugins, PipelineError> {
+pub(crate) fn resolve_plugins(config: &PipelineConfig) -> Result<ResolvedPlugins, PipelineError> {
     let source_wasm =
         rapidbyte_runtime::resolve_plugin_path(&config.source.use_ref, PluginKind::Source)
             .map_err(PipelineError::Infrastructure)?;
-    let dest_wasm =
-        rapidbyte_runtime::resolve_plugin_path(&config.destination.use_ref, PluginKind::Destination)
-            .map_err(PipelineError::Infrastructure)?;
+    let dest_wasm = rapidbyte_runtime::resolve_plugin_path(
+        &config.destination.use_ref,
+        PluginKind::Destination,
+    )
+    .map_err(PipelineError::Infrastructure)?;
 
     let source_manifest =
         load_and_validate_manifest(&source_wasm, &config.source.use_ref, PluginKind::Source)
@@ -73,19 +73,14 @@ pub(crate) fn load_and_validate_manifest(
         }
 
         if m.protocol_version != ProtocolVersion::V5 {
-            tracing::warn!(
-                plugin = plugin_ref,
-                manifest_protocol = ?m.protocol_version,
-                host_protocol = ?ProtocolVersion::V5,
-                "Protocol version mismatch"
+            anyhow::bail!(
+                "Plugin '{plugin_ref}' protocol version mismatch: manifest={:?}, host={:?}",
+                m.protocol_version,
+                ProtocolVersion::V5
             );
         }
 
-        tracing::info!(
-            plugin = m.id,
-            version = m.version,
-            "Loaded plugin manifest"
-        );
+        tracing::info!(plugin = m.id, version = m.version, "Loaded plugin manifest");
     } else {
         tracing::debug!(
             plugin = plugin_ref,
@@ -105,9 +100,8 @@ pub(crate) fn validate_config_against_schema(
         return Ok(());
     };
 
-    let validator = jsonschema::validator_for(schema_value).with_context(|| {
-        format!("Invalid JSON Schema in manifest for plugin '{plugin_ref}'")
-    })?;
+    let validator = jsonschema::validator_for(schema_value)
+        .with_context(|| format!("Invalid JSON Schema in manifest for plugin '{plugin_ref}'"))?;
 
     let errors: Vec<String> = validator
         .iter_errors(config)

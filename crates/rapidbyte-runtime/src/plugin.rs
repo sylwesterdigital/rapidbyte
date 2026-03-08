@@ -52,10 +52,7 @@ pub fn extract_manifest_from_wasm(wasm_bytes: &[u8]) -> Option<PluginManifest> {
 /// - "postgres"                  -> ("postgres", "unknown")
 #[must_use]
 pub fn parse_plugin_ref(plugin_ref: &str) -> (String, String) {
-    let after_slash = plugin_ref
-        .split('/')
-        .next_back()
-        .unwrap_or(plugin_ref);
+    let after_slash = plugin_ref.split('/').next_back().unwrap_or(plugin_ref);
 
     let (name, version) = match after_slash.split_once('@') {
         Some((n, v)) => (n.to_string(), v.strip_prefix('v').unwrap_or(v).to_string()),

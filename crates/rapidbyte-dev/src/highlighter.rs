@@ -7,10 +7,10 @@ use reedline::{Highlighter, StyledText};
 pub(crate) struct DevHighlighter;
 
 const SQL_KEYWORDS: &[&str] = &[
-    "SELECT", "FROM", "WHERE", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "ON", "AND", "OR",
-    "NOT", "IN", "IS", "NULL", "AS", "GROUP", "BY", "ORDER", "HAVING", "LIMIT", "OFFSET",
-    "UNION", "ALL", "DISTINCT", "COUNT", "SUM", "AVG", "MIN", "MAX", "CASE", "WHEN", "THEN",
-    "ELSE", "END", "LIKE", "BETWEEN", "EXISTS", "TRUE", "FALSE", "ASC", "DESC",
+    "SELECT", "FROM", "WHERE", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "ON", "AND", "OR", "NOT",
+    "IN", "IS", "NULL", "AS", "GROUP", "BY", "ORDER", "HAVING", "LIMIT", "OFFSET", "UNION", "ALL",
+    "DISTINCT", "COUNT", "SUM", "AVG", "MIN", "MAX", "CASE", "WHEN", "THEN", "ELSE", "END", "LIKE",
+    "BETWEEN", "EXISTS", "TRUE", "FALSE", "ASC", "DESC",
 ];
 
 impl Highlighter for DevHighlighter {

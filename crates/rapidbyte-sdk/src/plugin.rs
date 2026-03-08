@@ -10,10 +10,7 @@ use crate::stream::StreamContext;
 use crate::wire::PluginInfo;
 
 /// Default validation response for plugins that do not implement validation.
-pub fn default_validation<C>(
-    _config: &C,
-    _ctx: &Context,
-) -> Result<ValidationResult, PluginError> {
+pub fn default_validation<C>(_config: &C, _ctx: &Context) -> Result<ValidationResult, PluginError> {
     Ok(ValidationResult {
         status: ValidationStatus::Success,
         message: "Validation not implemented".to_string(),

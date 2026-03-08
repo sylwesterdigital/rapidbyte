@@ -63,7 +63,6 @@ fn emit_write_perf_metrics(ctx: &Context, perf: &WritePerf) {
         ("dest_connect_secs", perf.connect_secs),
         ("dest_flush_secs", perf.flush_secs),
         ("dest_commit_secs", perf.commit_secs),
-        ("dest_arrow_decode_secs", perf.arrow_decode_secs),
     ];
 
     for (name, value) in gauges {
@@ -102,6 +101,17 @@ fn loop_error_commit_state(checkpoint_count: u64) -> CommitState {
         CommitState::AfterCommitConfirmed
     } else {
         CommitState::BeforeCommit
+    }
+}
+
+fn loop_error_commit_state_with_commits(
+    checkpoint_count: u64,
+    commits_completed: u64,
+) -> CommitState {
+    if commits_completed > checkpoint_count {
+        CommitState::AfterCommitUnknown
+    } else {
+        loop_error_commit_state(checkpoint_count)
     }
 }
 
@@ -149,12 +159,21 @@ pub async fn write_stream(
         .map_err(|e| PluginError::transient_db("SESSION_BEGIN_FAILED", e))?;
 
     let mut loop_error: Option<String> = None;
+    let mut arrow_decode_secs = 0.0;
 
     loop {
-        match ctx.next_batch(stream.limits.max_batch_bytes) {
+        match rapidbyte_sdk::host_ffi::next_batch_with_decode_timing(stream.limits.max_batch_bytes)
+        {
             Ok(None) => break,
-            Ok(Some((schema, batches))) => {
-                if let Err(e) = session.process_batch(&schema, &batches).await {
+            Ok(Some(decoded)) => {
+                arrow_decode_secs += decoded.decode_secs;
+                let _ = ctx.metric(&Metric {
+                    name: "dest_arrow_decode_secs".to_string(),
+                    value: MetricValue::Gauge(decoded.decode_secs),
+                    labels: vec![],
+                });
+
+                if let Err(e) = session.process_batch(&decoded.schema, &decoded.batches).await {
                     loop_error = Some(e);
                     break;
                 }
@@ -167,7 +186,10 @@ pub async fn write_stream(
     }
 
     if let Some(err) = loop_error {
-        let commit_state = loop_error_commit_state(session.stats.checkpoint_count);
+        let commit_state = loop_error_commit_state_with_commits(
+            session.stats.checkpoint_count,
+            session.stats.commits_completed,
+        );
         session.rollback().await;
         return Err(PluginError::transient_db("WRITE_FAILED", err).with_commit_state(commit_state));
     }
@@ -181,7 +203,7 @@ pub async fn write_stream(
         connect_secs,
         flush_secs: result.flush_secs,
         commit_secs: result.commit_secs,
-        arrow_decode_secs: 0.0,
+        arrow_decode_secs,
     };
     emit_write_perf_metrics(ctx, &perf);
 
@@ -313,14 +335,20 @@ async fn async_prepare_stream_once(
             Ok(w) => {
                 if w > 0 {
                     ctx.log(
-                        LogLevel::Info,
+                        LogLevel::Warn,
                         &format!(
-                            "dest-postgres: resuming from watermark — {w} records already committed for stream '{}'",
+                            "dest-postgres: ignoring stale watermark for stream '{}' ({w} committed records); row-count resume is disabled until checkpoint-safe recovery lands",
                             contract.stream_name
                         ),
                     );
+                    let _ = crate::watermark::clear(
+                        client,
+                        &contract.target_schema,
+                        &contract.stream_name,
+                    )
+                    .await;
                 }
-                w
+                0
             }
             Err(e) => {
                 ctx.log(
@@ -358,6 +386,7 @@ struct WriteStats {
     total_bytes: u64,
     batches_written: u64,
     checkpoint_count: u64,
+    commits_completed: u64,
     bytes_since_commit: u64,
     rows_since_commit: u64,
 }
@@ -384,10 +413,6 @@ pub struct WriteSession<'a> {
 
     // Replace mode
     is_replace: bool,
-
-    // Watermark resume
-    watermark_records: u64,
-    cumulative_records: u64,
 
     // Timing + stats
     flush_start: Instant,
@@ -434,8 +459,6 @@ impl<'a> WriteSession<'a> {
             checkpoint_config: config.checkpoint,
             copy_flush_bytes: config.copy_flush_bytes,
             is_replace: config.is_replace,
-            watermark_records: config.watermark_records,
-            cumulative_records: 0,
             flush_start: now,
             last_checkpoint_time: now,
             stats: WriteStats {
@@ -443,6 +466,7 @@ impl<'a> WriteSession<'a> {
                 total_bytes: 0,
                 batches_written: 0,
                 checkpoint_count: 0,
+                commits_completed: 0,
                 bytes_since_commit: 0,
                 rows_since_commit: 0,
             },
@@ -458,28 +482,6 @@ impl<'a> WriteSession<'a> {
     ) -> Result<(), String> {
         let n: usize = batches.iter().map(RecordBatch::get_array_memory_size).sum();
         let batch_rows: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
-
-        // Watermark resume: skip already-committed batches
-        if self.watermark_records > 0 && self.cumulative_records < self.watermark_records {
-            self.cumulative_records += batch_rows;
-            if self.cumulative_records <= self.watermark_records {
-                self.ctx.log(
-                    LogLevel::Debug,
-                    &format!(
-                        "dest-postgres: skipping batch ({}/{} records already committed)",
-                        self.cumulative_records, self.watermark_records
-                    ),
-                );
-                return Ok(());
-            }
-            self.ctx.log(
-                LogLevel::Info,
-                &format!(
-                    "dest-postgres: resuming writes at cumulative record {}",
-                    self.cumulative_records
-                ),
-            );
-        }
 
         if self.needs_schema_ensure {
             self.schema_state
@@ -623,8 +625,11 @@ impl<'a> WriteSession<'a> {
             .execute("COMMIT", &[])
             .await
             .map_err(|e| format!("Checkpoint COMMIT failed: {e}"))?;
+        self.stats.commits_completed += 1;
 
-        let _ = self.ctx.checkpoint(&self.build_checkpoint());
+        self.ctx
+            .checkpoint(&self.build_checkpoint())
+            .map_err(|e| format!("Destination checkpoint failed: {}", e.message))?;
         self.stats.checkpoint_count += 1;
         self.stats.bytes_since_commit = 0;
         self.stats.rows_since_commit = 0;
@@ -667,16 +672,19 @@ impl<'a> WriteSession<'a> {
             .execute("COMMIT", &[])
             .await
             .map_err(|e| format!("COMMIT failed: {e}"))?;
+        self.stats.commits_completed += 1;
         let commit_secs = commit_start.elapsed().as_secs_f64();
-
-        let _ = self.ctx.checkpoint(&self.build_checkpoint());
-        self.stats.checkpoint_count += 1;
 
         if self.is_replace {
             swap_staging_table(self.ctx, self.client, self.target_schema, &self.stream_name)
                 .await
                 .map_err(|e| format!("{e:#}"))?;
         }
+
+        self.ctx
+            .checkpoint(&self.build_checkpoint())
+            .map_err(|e| format!("Destination checkpoint failed: {}", e.message))?;
+        self.stats.checkpoint_count += 1;
 
         if self.use_watermarks {
             let _ =
@@ -882,6 +890,14 @@ mod tests {
         assert_eq!(
             loop_error_commit_state(1),
             CommitState::AfterCommitConfirmed,
+        );
+    }
+
+    #[test]
+    fn loop_error_after_uncheckpointed_commit_is_after_commit_unknown() {
+        assert_eq!(
+            loop_error_commit_state_with_commits(0, 1),
+            CommitState::AfterCommitUnknown,
         );
     }
 }

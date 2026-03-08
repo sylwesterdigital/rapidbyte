@@ -104,11 +104,7 @@ pub fn run(name: &str, output: Option<&str>) -> Result<()> {
                 &gen_source_main(&struct_name),
                 &mut created_files,
             )?;
-            write_file(
-                &src_dir.join("config.rs"),
-                gen_config(),
-                &mut created_files,
-            )?;
+            write_file(&src_dir.join("config.rs"), gen_config(), &mut created_files)?;
             write_file(
                 &src_dir.join("client.rs"),
                 gen_client_rs(),
@@ -131,11 +127,7 @@ pub fn run(name: &str, output: Option<&str>) -> Result<()> {
                 &gen_dest_main(&struct_name),
                 &mut created_files,
             )?;
-            write_file(
-                &src_dir.join("config.rs"),
-                gen_config(),
-                &mut created_files,
-            )?;
+            write_file(&src_dir.join("config.rs"), gen_config(), &mut created_files)?;
             write_file(
                 &src_dir.join("client.rs"),
                 gen_client_rs(),

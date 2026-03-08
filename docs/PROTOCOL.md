@@ -155,9 +155,21 @@ write semantics, checkpoint semantics, or cursor semantics.
 
 ## 7. Checkpoint Coordination
 
-Host stores source and destination checkpoint envelopes and advances persisted cursors only after correlating source+destination confirmation for a stream.
+Host stores source and destination checkpoint envelopes and advances persisted
+cursors only after correlating source+destination confirmation for the same
+stream frontier.
 
-This preserves exactly-once semantics for incremental workflows where destination commit acknowledgment is required before cursor advancement.
+Current behavior:
+
+- Host assigns checkpoint `id` from the batch frontier observed on the host
+  data path. Plugin-supplied checkpoint IDs are treated as placeholders.
+- Source checkpoints are correlated only with destination checkpoints that
+  confirm the same frontier for the same stream.
+- Malformed checkpoint payloads fail the host call; they are not silently
+  dropped.
+
+This preserves exactly-once semantics for incremental workflows where
+destination commit acknowledgment is required before cursor advancement.
 
 ## 8. Security and Permissions
 
@@ -180,7 +192,8 @@ Host validates plugin manifest role compatibility before run/check/discover:
 - Destination pipelines require `roles.destination`
 - Transform pipelines require `roles.transform`
 
-Host expects `manifest.protocol_version == "4"`; mismatches emit warnings.
+Host expects `manifest.protocol_version == "5"`; mismatches fail plugin
+resolution before run/check/discover.
 
 ## 10. Building Plugins
 
@@ -234,8 +247,17 @@ type casting (CAST), string functions (UPPER, LOWER, TRIM, CONCAT), math
 expressions, CASE/WHEN, and all standard SQL scalar functions supported by
 DataFusion.
 
+Execution notes:
+
+- The transform keeps a long-lived DataFusion `SessionContext` per stream.
+- SQL is parsed once during init, then re-planned against the current `input`
+  table each batch.
+- Result batches are emitted through DataFusion's streaming execution path;
+  they are not fully materialized with `collect()`.
+
 **Limitations:** Batch-by-batch execution — cross-batch aggregations (GROUP BY,
-DISTINCT, window functions) operate per-batch, not across the full stream.
+DISTINCT, window functions) still operate per-batch, not across the full
+stream.
 
 **Table name:** Always `input`. The query must reference `FROM input`.
 

@@ -94,6 +94,10 @@ pub struct StreamConfig {
     pub name: String,
     pub sync_mode: SyncMode,
     pub cursor_field: Option<String>,
+    #[serde(default)]
+    pub tie_breaker_field: Option<String>,
+    #[serde(default)]
+    pub partition_key: Option<String>,
     pub columns: Option<Vec<String>>,
 }
 

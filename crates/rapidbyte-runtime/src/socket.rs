@@ -9,20 +9,37 @@ use std::os::unix::io::AsRawFd;
 /// Override with `RAPIDBYTE_SOCKET_POLL_MS` env var for performance tuning.
 pub const SOCKET_READY_POLL_MS: i32 = 1;
 
-/// Number of consecutive `WouldBlock` events before activating poll(1ms).
-/// At ~2M iterations/sec CPU speed, 1024 iterations is roughly 0.5ms of spinning.
-/// This avoids adding 1ms poll overhead to transient `WouldBlock` results during active streaming.
-pub const SOCKET_POLL_ACTIVATION_THRESHOLD: u32 = 1024;
+/// Initial optimistic `WouldBlock` events that return immediately.
+pub const SOCKET_SPIN_THRESHOLD: u32 = 8;
 
-/// Track consecutive `WouldBlock` events and decide when to activate host readiness polling.
+/// Subsequent `WouldBlock` events that yield the current thread before polling.
+pub const SOCKET_YIELD_THRESHOLD: u32 = 32;
+
+/// Maximum adaptive readiness poll timeout multiplier.
+pub const SOCKET_MAX_POLL_MULTIPLIER: i32 = 8;
+
+/// Adaptive backpressure action for repeated socket `WouldBlock` results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocketBackpressureAction {
+    ReturnWouldBlock,
+    Yield,
+    Poll(i32),
+}
+
+/// Track consecutive `WouldBlock` events and choose the next host-side backpressure action.
 ///
-/// Returns `true` when the caller should perform an actual socket readiness wait.
-///
-/// The streak remains at-or-above threshold until caller-side progress resets it.
 #[must_use]
-pub fn should_activate_socket_poll(streak: &mut u32) -> bool {
+pub fn next_socket_backpressure_action(streak: &mut u32) -> SocketBackpressureAction {
     *streak = streak.saturating_add(1);
-    *streak >= SOCKET_POLL_ACTIVATION_THRESHOLD
+    if *streak <= SOCKET_SPIN_THRESHOLD {
+        return SocketBackpressureAction::ReturnWouldBlock;
+    }
+
+    if *streak <= SOCKET_YIELD_THRESHOLD {
+        return SocketBackpressureAction::Yield;
+    }
+
+    SocketBackpressureAction::Poll(adaptive_socket_poll_timeout_ms(*streak))
 }
 
 /// Interest direction for socket readiness polling.
@@ -92,6 +109,22 @@ pub fn socket_poll_timeout_ms() -> i32 {
     })
 }
 
+/// Compute an adaptive readiness poll timeout for sustained backpressure.
+#[must_use]
+pub fn adaptive_socket_poll_timeout_ms(streak: u32) -> i32 {
+    let base = socket_poll_timeout_ms().max(1);
+    let multiplier = if streak <= SOCKET_YIELD_THRESHOLD + 32 {
+        1
+    } else if streak <= SOCKET_YIELD_THRESHOLD + 128 {
+        2
+    } else if streak <= SOCKET_YIELD_THRESHOLD + 512 {
+        4
+    } else {
+        SOCKET_MAX_POLL_MULTIPLIER
+    };
+    base.saturating_mul(multiplier)
+}
+
 /// Per-socket state tracking the TCP stream and consecutive `WouldBlock` streaks.
 pub struct SocketEntry {
     pub stream: TcpStream,
@@ -133,17 +166,45 @@ pub enum SocketWriteResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{should_activate_socket_poll, SOCKET_POLL_ACTIVATION_THRESHOLD};
+    use super::{
+        adaptive_socket_poll_timeout_ms, next_socket_backpressure_action, socket_poll_timeout_ms,
+        SocketBackpressureAction, SOCKET_SPIN_THRESHOLD, SOCKET_YIELD_THRESHOLD,
+    };
 
     #[test]
-    fn socket_poll_activation_threshold_and_saturation_are_stable() {
+    fn socket_backpressure_action_stages_are_stable() {
         let mut streak = 0_u32;
-        for _ in 0..(SOCKET_POLL_ACTIVATION_THRESHOLD - 1) {
-            assert!(!should_activate_socket_poll(&mut streak));
+        for _ in 0..SOCKET_SPIN_THRESHOLD {
+            assert_eq!(
+                next_socket_backpressure_action(&mut streak),
+                SocketBackpressureAction::ReturnWouldBlock
+            );
         }
-        assert!(should_activate_socket_poll(&mut streak));
-        assert!(should_activate_socket_poll(&mut streak));
-        assert!(streak >= SOCKET_POLL_ACTIVATION_THRESHOLD);
+        for _ in (SOCKET_SPIN_THRESHOLD + 1)..=SOCKET_YIELD_THRESHOLD {
+            assert_eq!(
+                next_socket_backpressure_action(&mut streak),
+                SocketBackpressureAction::Yield
+            );
+        }
+        assert!(matches!(
+            next_socket_backpressure_action(&mut streak),
+            SocketBackpressureAction::Poll(_)
+        ));
+    }
+
+    #[test]
+    fn adaptive_socket_poll_timeout_ms_ramps_and_caps() {
+        let initial = adaptive_socket_poll_timeout_ms(SOCKET_YIELD_THRESHOLD + 1);
+        let medium = adaptive_socket_poll_timeout_ms(SOCKET_YIELD_THRESHOLD + 200);
+        let capped = adaptive_socket_poll_timeout_ms(SOCKET_YIELD_THRESHOLD + 10_000);
+
+        assert!(initial >= 1);
+        assert!(medium >= initial);
+        assert!(capped >= medium);
+        assert_eq!(
+            capped,
+            socket_poll_timeout_ms() * super::SOCKET_MAX_POLL_MULTIPLIER
+        );
     }
 
     #[cfg(unix)]

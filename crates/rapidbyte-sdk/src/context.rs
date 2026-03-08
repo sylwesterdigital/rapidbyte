@@ -9,7 +9,7 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 
 use crate::checkpoint::{Checkpoint, StateScope};
-use crate::error::{PluginError, ErrorCategory};
+use crate::error::{ErrorCategory, PluginError};
 use crate::host_ffi;
 use crate::metric::Metric;
 
@@ -93,21 +93,12 @@ impl Context {
     }
 
     /// Read a value from the host state store.
-    pub fn state_get(
-        &self,
-        scope: StateScope,
-        key: &str,
-    ) -> Result<Option<String>, PluginError> {
+    pub fn state_get(&self, scope: StateScope, key: &str) -> Result<Option<String>, PluginError> {
         host_ffi::state_get(scope, key)
     }
 
     /// Write a value to the host state store.
-    pub fn state_put(
-        &self,
-        scope: StateScope,
-        key: &str,
-        value: &str,
-    ) -> Result<(), PluginError> {
+    pub fn state_put(&self, scope: StateScope, key: &str, value: &str) -> Result<(), PluginError> {
         host_ffi::state_put(scope, key, value)
     }
 

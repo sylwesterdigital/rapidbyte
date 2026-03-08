@@ -94,6 +94,59 @@ pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
                 stream.name
             ));
         }
+        if stream
+            .tie_breaker_field
+            .as_deref()
+            .is_some_and(str::is_empty)
+        {
+            errors.push(format!(
+                "Stream '{}' has an empty tie_breaker_field",
+                stream.name
+            ));
+        }
+        if stream.tie_breaker_field.is_some() && stream.sync_mode != SyncMode::Incremental {
+            errors.push(format!(
+                "Stream '{}' sets tie_breaker_field but is not incremental",
+                stream.name
+            ));
+        }
+        if stream.partition_key.as_deref().is_some_and(str::is_empty) {
+            errors.push(format!(
+                "Stream '{}' has an empty partition_key",
+                stream.name
+            ));
+        }
+        if stream.partition_key.is_some() && stream.sync_mode != SyncMode::FullRefresh {
+            errors.push(format!(
+                "Stream '{}' sets partition_key but is not full_refresh",
+                stream.name
+            ));
+        }
+        if let (Some(cursor_field), Some(tie_breaker_field)) = (
+            stream.cursor_field.as_deref(),
+            stream.tie_breaker_field.as_deref(),
+        ) {
+            if cursor_field == tie_breaker_field {
+                errors.push(format!(
+                    "Stream '{}' tie_breaker_field must differ from cursor_field",
+                    stream.name
+                ));
+            }
+            if let Some(columns) = stream.columns.as_ref() {
+                if !columns.iter().any(|c| c == cursor_field) {
+                    errors.push(format!(
+                        "Stream '{}' columns must include cursor_field '{}'",
+                        stream.name, cursor_field
+                    ));
+                }
+                if !columns.iter().any(|c| c == tie_breaker_field) {
+                    errors.push(format!(
+                        "Stream '{}' columns must include tie_breaker_field '{}'",
+                        stream.name, tie_breaker_field
+                    ));
+                }
+            }
+        }
     }
 
     if config.destination.use_ref.trim().is_empty() {
@@ -365,6 +418,106 @@ destination:
 "#;
         let config = parse_pipeline_str(yaml).unwrap();
         assert!(validate_pipeline(&config).is_ok());
+    }
+
+    #[test]
+    fn test_tie_breaker_requires_incremental_sync() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test_tie_breaker_full_refresh
+source:
+  use: postgres
+  config:
+    host: localhost
+  streams:
+    - name: users
+      sync_mode: full_refresh
+      tie_breaker_field: id
+destination:
+  use: postgres
+  config:
+    host: localhost
+  write_mode: append
+"#;
+        let config = parse_pipeline_str(yaml).unwrap();
+        let err = validate_pipeline(&config).unwrap_err().to_string();
+        assert!(err.contains("sets tie_breaker_field but is not incremental"));
+    }
+
+    #[test]
+    fn test_tie_breaker_must_differ_from_cursor_field() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test_tie_breaker_same_field
+source:
+  use: postgres
+  config:
+    host: localhost
+  streams:
+    - name: users
+      sync_mode: incremental
+      cursor_field: updated_at
+      tie_breaker_field: updated_at
+destination:
+  use: postgres
+  config:
+    host: localhost
+  write_mode: append
+"#;
+        let config = parse_pipeline_str(yaml).unwrap();
+        let err = validate_pipeline(&config).unwrap_err().to_string();
+        assert!(err.contains("tie_breaker_field must differ from cursor_field"));
+    }
+
+    #[test]
+    fn test_columns_must_include_tie_breaker_field() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test_tie_breaker_projection
+source:
+  use: postgres
+  config:
+    host: localhost
+  streams:
+    - name: users
+      sync_mode: incremental
+      cursor_field: updated_at
+      tie_breaker_field: id
+      columns: [updated_at, email]
+destination:
+  use: postgres
+  config:
+    host: localhost
+  write_mode: append
+"#;
+        let config = parse_pipeline_str(yaml).unwrap();
+        let err = validate_pipeline(&config).unwrap_err().to_string();
+        assert!(err.contains("columns must include tie_breaker_field 'id'"));
+    }
+
+    #[test]
+    fn test_partition_key_requires_full_refresh() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test_partition_key_incremental
+source:
+  use: postgres
+  config:
+    host: localhost
+  streams:
+    - name: users
+      sync_mode: incremental
+      cursor_field: updated_at
+      partition_key: tenant_id
+destination:
+  use: postgres
+  config:
+    host: localhost
+  write_mode: append
+"#;
+        let config = parse_pipeline_str(yaml).unwrap();
+        let err = validate_pipeline(&config).unwrap_err().to_string();
+        assert!(err.contains("sets partition_key but is not full_refresh"));
     }
 
     #[test]

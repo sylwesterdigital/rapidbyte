@@ -60,6 +60,9 @@ pub enum CursorValue {
 pub struct CursorInfo {
     /// Column used for cursor-based tracking.
     pub cursor_field: String,
+    /// Optional deterministic tie-breaker field used when cursor values are not unique.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tie_breaker_field: Option<String>,
     /// Data type of the cursor column.
     pub cursor_type: CursorType,
     /// Last persisted cursor position (`None` on first run).
@@ -89,6 +92,7 @@ mod tests {
     fn cursor_info_roundtrip() {
         let info = CursorInfo {
             cursor_field: "updated_at".into(),
+            tie_breaker_field: Some("id".into()),
             cursor_type: CursorType::TimestampMicros,
             last_value: Some(CursorValue::TimestampMicros {
                 value: 1_700_000_000_000_000,
@@ -103,10 +107,12 @@ mod tests {
     fn cursor_info_none_skips_last_value() {
         let info = CursorInfo {
             cursor_field: "id".into(),
+            tie_breaker_field: None,
             cursor_type: CursorType::Int64,
             last_value: None,
         };
         let json = serde_json::to_value(&info).unwrap();
         assert!(json.get("last_value").is_none());
+        assert!(json.get("tie_breaker_field").is_none());
     }
 }

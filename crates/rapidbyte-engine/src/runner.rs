@@ -293,19 +293,14 @@ pub(crate) fn run_destination_stream(
     let timeout = overrides.and_then(|o| o.timeout_seconds);
     let mut store = module.new_store(host_state, timeout);
     let linker = create_component_linker(&module.engine, "destination", |linker| {
-        dest_bindings::RapidbyteDestination::add_to_linker::<_, HasSelf<_>>(linker, |state| {
-            state
-        })
-        .context("Failed to add rapidbyte destination host imports")?;
+        dest_bindings::RapidbyteDestination::add_to_linker::<_, HasSelf<_>>(linker, |state| state)
+            .context("Failed to add rapidbyte destination host imports")?;
         Ok(())
     })
     .map_err(PipelineError::Infrastructure)?;
-    let bindings = dest_bindings::RapidbyteDestination::instantiate(
-        &mut store,
-        &module.component,
-        &linker,
-    )
-    .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
+    let bindings =
+        dest_bindings::RapidbyteDestination::instantiate(&mut store, &module.component, &linker)
+            .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
 
     let iface = bindings.rapidbyte_plugin_destination();
     let vm_setup_secs = vm_setup_start.elapsed().as_secs_f64();
@@ -399,9 +394,7 @@ pub(crate) fn run_destination_stream(
     let checkpoints = dest_checkpoints
         .lock()
         .map_err(|_| {
-            PipelineError::Infrastructure(anyhow::anyhow!(
-                "destination checkpoint mutex poisoned"
-            ))
+            PipelineError::Infrastructure(anyhow::anyhow!("destination checkpoint mutex poisoned"))
         })?
         .drain(..)
         .collect::<Vec<_>>();
