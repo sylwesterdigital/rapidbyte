@@ -21,6 +21,8 @@ pub mod host_tcp;
 pub mod features;
 #[cfg(feature = "runtime")]
 pub mod prelude;
+#[cfg(feature = "conformance")]
+pub mod conformance;
 
 // Type re-exports — always available (no feature gate)
 pub use rapidbyte_types::arrow as arrow_types;

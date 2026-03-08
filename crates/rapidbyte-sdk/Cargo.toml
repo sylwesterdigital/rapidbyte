@@ -7,6 +7,7 @@ edition.workspace = true
 default = ["runtime", "build"]
 runtime = ["dep:tokio", "dep:wit-bindgen", "dep:arrow", "dep:rapidbyte-sdk-macros"]
 build = []
+conformance = []
 
 [dependencies]
 rapidbyte-types = { path = "../rapidbyte-types" }
