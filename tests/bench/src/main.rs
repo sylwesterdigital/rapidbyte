@@ -495,6 +495,7 @@ fn run_pipeline_once(
         .arg("--log-level")
         .arg("warn")
         .env("RAPIDBYTE_PLUGIN_DIR", &context.plugin_dir)
+        .env("RAPIDBYTE_CONNECTOR_DIR", &context.plugin_dir)
         .env("RAPIDBYTE_WASMTIME_AOT", if aot { "1" } else { "0" })
         .env("RAPIDBYTE_BENCH", "1")
         .output()
@@ -758,6 +759,8 @@ fn run_cpu_profile(root: &Path, rows: u32) -> Result<()> {
             .arg(root.join("tests/bench/fixtures/pipelines/bench_pg.yaml"))
             .arg("--log-level")
             .arg("warn")
+            .env("RAPIDBYTE_PLUGIN_DIR", root.join("target/plugins"))
+            .env("RAPIDBYTE_CONNECTOR_DIR", root.join("target/plugins"))
             .status()
             .context("failed to run samply record")?,
         "profiling run failed",
