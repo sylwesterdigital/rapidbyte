@@ -5,7 +5,7 @@
 //! limits, and error handling policies.
 
 use crate::catalog::SchemaHint;
-use crate::cursor::CursorInfo;
+use crate::cursor::{CursorInfo, CursorType, CursorValue};
 use crate::wire::{SyncMode, WriteMode};
 use serde::{Deserialize, Serialize};
 
@@ -67,6 +67,23 @@ pub enum NullabilityPolicy {
 pub enum PartitionStrategy {
     Mod,
     Range,
+}
+
+/// Typed partition coordinates passed to sources that declare `PartitionedRead`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartitionCoordinates {
+    pub count: u32,
+    pub index: u32,
+    pub strategy: PartitionStrategy,
+}
+
+/// Typed CDC resume token passed to sources that declare `Cdc`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CdcResumeToken {
+    /// The opaque resume value (LSN, offset, etc.). `None` on first run.
+    pub value: Option<String>,
+    /// The cursor type hint for the source.
+    pub cursor_type: CursorType,
 }
 
 /// Schema evolution behavior when source schema changes between runs.
@@ -261,6 +278,40 @@ impl StreamContext {
             _ => None,
         }
     }
+
+    /// Extract typed partition coordinates if present and valid.
+    #[must_use]
+    pub fn partition_coordinates_typed(&self) -> Option<PartitionCoordinates> {
+        let (count, index) = self.partition_coordinates()?;
+        Some(PartitionCoordinates {
+            count,
+            index,
+            strategy: self.partition_strategy.unwrap_or(PartitionStrategy::Mod),
+        })
+    }
+
+    /// Extract a typed CDC resume token from cursor info.
+    #[must_use]
+    pub fn cdc_resume_token(&self) -> Option<CdcResumeToken> {
+        if self.sync_mode != SyncMode::Cdc {
+            return None;
+        }
+        let cursor = self.cursor_info.as_ref()?;
+        Some(CdcResumeToken {
+            value: cursor.last_value.as_ref().map(|v| match v {
+                CursorValue::Utf8 { value }
+                | CursorValue::Lsn { value }
+                | CursorValue::Decimal { value, .. } => value.clone(),
+                CursorValue::Int64 { value }
+                | CursorValue::TimestampMillis { value }
+                | CursorValue::TimestampMicros { value } => value.to_string(),
+                CursorValue::Json { value } => value.to_string(),
+                // Null and any future variants map to empty string.
+                _ => String::new(),
+            }),
+            cursor_type: cursor.cursor_type,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -372,5 +423,36 @@ mod tests {
             ..zero_count
         };
         assert_eq!(out_of_bounds.partition_coordinates(), None);
+    }
+
+    #[test]
+    fn partition_coordinates_typed_returns_struct() {
+        let ctx = StreamContext {
+            partition_count: Some(4),
+            partition_index: Some(2),
+            partition_strategy: Some(PartitionStrategy::Range),
+            ..StreamContext::test_default("users")
+        };
+        let coords = ctx.partition_coordinates_typed().unwrap();
+        assert_eq!(coords.count, 4);
+        assert_eq!(coords.index, 2);
+        assert_eq!(coords.strategy, PartitionStrategy::Range);
+    }
+
+    #[test]
+    fn partition_coordinates_typed_defaults_to_mod() {
+        let ctx = StreamContext {
+            partition_count: Some(4),
+            partition_index: Some(0),
+            ..StreamContext::test_default("users")
+        };
+        let coords = ctx.partition_coordinates_typed().unwrap();
+        assert_eq!(coords.strategy, PartitionStrategy::Mod);
+    }
+
+    #[test]
+    fn cdc_resume_token_returns_none_for_non_cdc() {
+        let ctx = StreamContext::test_default("users");
+        assert!(ctx.cdc_resume_token().is_none());
     }
 }
