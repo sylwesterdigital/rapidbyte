@@ -61,3 +61,13 @@ impl Destination for DestPostgres {
         Ok(())
     }
 }
+
+impl BulkLoadDestination for DestPostgres {
+    async fn write_bulk(
+        &mut self,
+        ctx: &Context,
+        stream: StreamContext,
+    ) -> Result<WriteSummary, ConnectorError> {
+        writer::write_stream(&self.config, ctx, &stream).await
+    }
+}
