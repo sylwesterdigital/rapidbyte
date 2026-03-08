@@ -1,91 +1,95 @@
 //! Cursor extraction and max-value tracking for incremental reads.
 //!
-//! `CursorTracker` encapsulates the logic for determining which column to
-//! track, what extraction strategy to use, and building the final checkpoint.
+//! `CursorTracker` encapsulates deterministic resume tracking for incremental
+//! reads. When configured with a tie-breaker field it tracks the maximum
+//! `(cursor, tie_breaker)` pair observed during the read.
 
+use std::cmp::Ordering;
+
+use chrono::NaiveDateTime;
 use rapidbyte_sdk::cursor::CursorType;
 use rapidbyte_sdk::prelude::*;
+use tokio_postgres::Row;
 
 use crate::types::Column;
 
-/// Tracks the maximum cursor value observed during a read.
-pub struct CursorTracker {
-    col_idx: usize,
-    cursor_field: String,
-    strategy: Strategy,
-    max_int: Option<i64>,
-    max_text: Option<String>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ObservedValue {
+    Int(i64),
+    Text(String),
 }
 
-/// Whether to track cursor as integer or text.
+impl ObservedValue {
+    fn into_cursor_value(self) -> CursorValue {
+        match self {
+            Self::Int(value) => CursorValue::Int64 { value },
+            Self::Text(value) => CursorValue::Utf8 { value },
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CursorComponent {
+    field: String,
+    idx: usize,
+    strategy: Strategy,
+}
+
+/// Whether to track cursor values as integer or text.
+#[derive(Debug, Clone, Copy)]
 enum Strategy {
     Int,
     Text,
 }
 
+/// Tracks the maximum cursor value or `(cursor, tie_breaker)` pair observed during a read.
+pub struct CursorTracker {
+    cursor: CursorComponent,
+    tie_breaker: Option<CursorComponent>,
+    max_pair: Option<(ObservedValue, Option<ObservedValue>)>,
+}
+
 impl CursorTracker {
     /// Create a tracker for the given cursor info and column list.
     ///
-    /// Returns `Err` if the cursor field is not found in `columns`.
+    /// Returns `Err` if any configured cursor field is not found in `columns`.
     pub fn new(info: &CursorInfo, columns: &[Column]) -> Result<Self, String> {
-        let col_idx = columns
-            .iter()
-            .position(|c| c.name == info.cursor_field)
-            .ok_or_else(|| {
-                format!(
-                    "cursor field '{}' not found in columns: [{}]",
-                    info.cursor_field,
-                    columns
-                        .iter()
-                        .map(|c| c.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            })?;
-
-        // Determine strategy: use Int if cursor type is Int64 or column is integer
-        let strategy = if matches!(info.cursor_type, CursorType::Int64)
-            || matches!(
-                columns[col_idx].arrow_type,
-                ArrowDataType::Int16 | ArrowDataType::Int32 | ArrowDataType::Int64
-            ) {
-            Strategy::Int
-        } else {
-            Strategy::Text
-        };
+        let cursor = build_component(&info.cursor_field, Some(info.cursor_type), columns)?;
+        let tie_breaker = info
+            .tie_breaker_field
+            .as_deref()
+            .map(|field| build_component(field, None, columns))
+            .transpose()?;
 
         Ok(Self {
-            col_idx,
-            cursor_field: info.cursor_field.clone(),
-            strategy,
-            max_int: None,
-            max_text: None,
+            cursor,
+            tie_breaker,
+            max_pair: None,
         })
     }
 
-    /// Column index to extract cursor values from.
-    pub fn col_idx(&self) -> usize {
-        self.col_idx
-    }
+    /// Record cursor observations from a row, updating the tracked maximum if needed.
+    pub fn observe_row(&mut self, row: &Row) {
+        let Some(cursor_value) = extract_observed_value(row, &self.cursor) else {
+            return;
+        };
+        let tie_breaker_value = self
+            .tie_breaker
+            .as_ref()
+            .and_then(|component| extract_observed_value(row, component));
 
-    /// Whether this tracker uses integer extraction.
-    pub fn is_int_strategy(&self) -> bool {
-        matches!(self.strategy, Strategy::Int)
-    }
-
-    /// Record an integer cursor observation. Updates max if larger.
-    pub fn observe_int(&mut self, value: i64) {
-        match &self.max_int {
-            Some(current) if value <= *current => {}
-            _ => self.max_int = Some(value),
+        if self.tie_breaker.is_some() && tie_breaker_value.is_none() {
+            return;
         }
-    }
 
-    /// Record a text cursor observation. Updates max if larger (lexicographic).
-    pub fn observe_text(&mut self, value: &str) {
-        match &self.max_text {
-            Some(current) if value <= current.as_str() => {}
-            _ => self.max_text = Some(value.to_string()),
+        let candidate = (cursor_value, tie_breaker_value);
+        match &self.max_pair {
+            Some(current)
+                if compare_pairs(current, &candidate) != Ordering::Less =>
+            {
+                {}
+            }
+            _ => self.max_pair = Some(candidate),
         }
     }
 
@@ -96,22 +100,145 @@ impl CursorTracker {
         records_processed: u64,
         bytes_processed: u64,
     ) -> Option<Checkpoint> {
-        let cursor_value = match self.strategy {
-            Strategy::Int => self.max_int.map(|v| CursorValue::Utf8 {
-                value: v.to_string(),
-            }),
-            Strategy::Text => self.max_text.map(|v| CursorValue::Utf8 { value: v }),
+        let (cursor_value, tie_breaker_value) = self.max_pair?;
+        let cursor_value = if self.tie_breaker.is_some() {
+            let cursor_json = serde_json::to_value(cursor_value.into_cursor_value()).ok()?;
+            let tie_breaker_json =
+                serde_json::to_value(tie_breaker_value?.into_cursor_value()).ok()?;
+            CursorValue::Json {
+                value: serde_json::json!({
+                    "cursor": cursor_json,
+                    "tie_breaker": tie_breaker_json,
+                }),
+            }
+        } else {
+            cursor_value.into_cursor_value()
         };
 
-        cursor_value.map(|cv| Checkpoint {
+        Some(Checkpoint {
             id: 0,
             kind: CheckpointKind::Source,
             stream: stream_name.to_string(),
-            cursor_field: Some(self.cursor_field),
-            cursor_value: Some(cv),
+            cursor_field: Some(self.cursor.field),
+            cursor_value: Some(cursor_value),
             records_processed,
             bytes_processed,
         })
+    }
+}
+
+fn build_component(
+    field: &str,
+    declared_type: Option<CursorType>,
+    columns: &[Column],
+) -> Result<CursorComponent, String> {
+    let idx = columns
+        .iter()
+        .position(|c| c.name == field)
+        .ok_or_else(|| {
+            format!(
+                "cursor field '{}' not found in columns: [{}]",
+                field,
+                columns
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+
+    let strategy = if matches!(declared_type, Some(CursorType::Int64))
+        || matches!(
+            columns[idx].arrow_type,
+            ArrowDataType::Int16 | ArrowDataType::Int32 | ArrowDataType::Int64
+        )
+    {
+        Strategy::Int
+    } else {
+        Strategy::Text
+    };
+
+    Ok(CursorComponent {
+        field: field.to_string(),
+        idx,
+        strategy,
+    })
+}
+
+fn extract_observed_value(row: &Row, component: &CursorComponent) -> Option<ObservedValue> {
+    match component.strategy {
+        Strategy::Int => row
+            .try_get::<_, i64>(component.idx)
+            .ok()
+            .map(ObservedValue::Int)
+            .or_else(|| {
+                row.try_get::<_, i32>(component.idx)
+                    .ok()
+                    .map(i64::from)
+                    .map(ObservedValue::Int)
+            })
+            .or_else(|| {
+                row.try_get::<_, i16>(component.idx)
+                    .ok()
+                    .map(i64::from)
+                    .map(ObservedValue::Int)
+            }),
+        Strategy::Text => row
+            .try_get::<_, String>(component.idx)
+            .ok()
+            .map(ObservedValue::Text)
+            .or_else(|| {
+                row.try_get::<_, i64>(component.idx)
+                    .ok()
+                    .map(|n| ObservedValue::Text(n.to_string()))
+            })
+            .or_else(|| {
+                row.try_get::<_, i32>(component.idx)
+                    .ok()
+                    .map(|n| ObservedValue::Text(n.to_string()))
+            })
+            .or_else(|| {
+                row.try_get::<_, NaiveDateTime>(component.idx)
+                    .ok()
+                    .map(|dt| ObservedValue::Text(dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string()))
+            })
+            .or_else(|| {
+                row.try_get::<_, chrono::DateTime<chrono::Utc>>(component.idx)
+                    .ok()
+                    .map(|dt| ObservedValue::Text(dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string()))
+            })
+            .or_else(|| {
+                row.try_get::<_, chrono::NaiveDate>(component.idx)
+                    .ok()
+                    .map(|d| ObservedValue::Text(d.to_string()))
+            })
+            .or_else(|| {
+                row.try_get::<_, serde_json::Value>(component.idx)
+                    .ok()
+                    .map(|v| ObservedValue::Text(v.to_string()))
+            }),
+    }
+}
+
+fn compare_pairs(
+    current: &(ObservedValue, Option<ObservedValue>),
+    candidate: &(ObservedValue, Option<ObservedValue>),
+) -> Ordering {
+    match compare_observed_values(&current.0, &candidate.0) {
+        Ordering::Equal => match (&current.1, &candidate.1) {
+            (Some(left), Some(right)) => compare_observed_values(left, right),
+            _ => Ordering::Equal,
+        },
+        ordering => ordering,
+    }
+}
+
+fn compare_observed_values(left: &ObservedValue, right: &ObservedValue) -> Ordering {
+    match (left, right) {
+        (ObservedValue::Int(left), ObservedValue::Int(right)) => left.cmp(right),
+        (ObservedValue::Text(left), ObservedValue::Text(right)) => left.cmp(right),
+        (ObservedValue::Int(left), ObservedValue::Text(right)) => left.to_string().cmp(right),
+        (ObservedValue::Text(left), ObservedValue::Int(right)) => left.cmp(&right.to_string()),
     }
 }
 
@@ -121,83 +248,64 @@ mod tests {
 
     fn make_cursor_info(
         field: &str,
+        tie_breaker_field: Option<&str>,
         cursor_type: CursorType,
         last: Option<CursorValue>,
     ) -> CursorInfo {
         CursorInfo {
             cursor_field: field.to_string(),
+            tie_breaker_field: tie_breaker_field.map(str::to_string),
             cursor_type,
             last_value: last,
         }
     }
 
     #[test]
-    fn int_strategy_for_int64_cursor() {
-        let info = make_cursor_info("id", CursorType::Int64, None);
-        let cols = vec![Column::new("id", "bigint", false)];
-        let tracker = CursorTracker::new(&info, &cols).unwrap();
-        assert_eq!(tracker.col_idx(), 0);
-    }
-
-    #[test]
-    fn int_strategy_for_int_column_with_utf8_cursor() {
-        let info = make_cursor_info("id", CursorType::Utf8, None);
-        let cols = vec![Column::new("id", "integer", false)];
-        let tracker = CursorTracker::new(&info, &cols).unwrap();
-        assert_eq!(tracker.col_idx(), 0);
-        assert!(tracker.is_int_strategy());
-    }
-
-    #[test]
     fn missing_cursor_column_returns_error() {
-        let info = make_cursor_info("missing", CursorType::Int64, None);
+        let info = make_cursor_info("missing", None, CursorType::Int64, None);
         let cols = vec![Column::new("id", "integer", false)];
         assert!(CursorTracker::new(&info, &cols).is_err());
     }
 
     #[test]
-    fn track_max_int() {
-        let info = make_cursor_info("id", CursorType::Int64, None);
+    fn missing_tie_breaker_column_returns_error() {
+        let info = make_cursor_info("id", Some("pk"), CursorType::Int64, None);
         let cols = vec![Column::new("id", "bigint", false)];
-        let mut tracker = CursorTracker::new(&info, &cols).unwrap();
-        tracker.observe_int(5);
-        tracker.observe_int(3);
-        tracker.observe_int(10);
-        tracker.observe_int(7);
-        let cp = tracker.into_checkpoint("stream", 100, 2048);
-        assert!(cp.is_some());
-        let cp = cp.unwrap();
-        assert_eq!(
-            cp.cursor_value,
-            Some(CursorValue::Utf8 {
-                value: "10".to_string()
-            })
-        );
+        assert!(CursorTracker::new(&info, &cols).is_err());
     }
 
     #[test]
-    fn track_max_text() {
-        let info = make_cursor_info("ts", CursorType::Utf8, None);
-        let cols = vec![Column::new("ts", "text", false)];
+    fn track_max_pair_emits_json_cursor() {
+        let info = make_cursor_info("updated_at", Some("id"), CursorType::Utf8, None);
+        let cols = vec![
+            Column::new("updated_at", "timestamp", false),
+            Column::new("id", "bigint", false),
+        ];
         let mut tracker = CursorTracker::new(&info, &cols).unwrap();
-        tracker.observe_text("2024-01-01");
-        tracker.observe_text("2024-06-15");
-        tracker.observe_text("2024-03-01");
-        let cp = tracker.into_checkpoint("stream", 50, 1024);
-        let cp = cp.unwrap();
-        assert_eq!(
-            cp.cursor_value,
-            Some(CursorValue::Utf8 {
-                value: "2024-06-15".to_string()
-            })
-        );
+
+        tracker.max_pair = Some((
+            ObservedValue::Text("2024-01-01 00:00:00.000000".to_string()),
+            Some(ObservedValue::Int(99)),
+        ));
+
+        let cp = tracker.into_checkpoint("stream", 100, 2048).unwrap();
+        match cp.cursor_value.unwrap() {
+            CursorValue::Json { value } => {
+                assert_eq!(value["cursor"]["type"], "utf8");
+                assert_eq!(value["tie_breaker"]["type"], "int64");
+            }
+            other => panic!("expected composite json cursor, got {other:?}"),
+        }
     }
 
     #[test]
-    fn no_observations_returns_none() {
-        let info = make_cursor_info("id", CursorType::Int64, None);
+    fn track_max_single_value_emits_scalar_cursor() {
+        let info = make_cursor_info("id", None, CursorType::Int64, None);
         let cols = vec![Column::new("id", "bigint", false)];
-        let tracker = CursorTracker::new(&info, &cols).unwrap();
-        assert!(tracker.into_checkpoint("stream", 0, 0).is_none());
+        let mut tracker = CursorTracker::new(&info, &cols).unwrap();
+        tracker.max_pair = Some((ObservedValue::Int(10), None));
+
+        let cp = tracker.into_checkpoint("stream", 100, 2048).unwrap();
+        assert_eq!(cp.cursor_value, Some(CursorValue::Int64 { value: 10 }));
     }
 }

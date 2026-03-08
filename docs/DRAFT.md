@@ -110,7 +110,7 @@ JSON manifest alongside each `.wasm` binary declaring identity, capabilities, an
   "id": "rapidbyte/source-postgres",
   "name": "PostgreSQL Source",
   "version": "0.1.0",
-  "protocol_version": "4",
+  "protocol_version": "5",
   "artifact": { "entry_point": "source_postgres.wasm" },
   "permissions": {
     "network": { "tls": "optional", "allow_runtime_config_domains": true },
@@ -244,7 +244,12 @@ source:
     - name: users
       sync_mode: incremental
       cursor_field: updated_at
+      tie_breaker_field: id                       # optional deterministic resume key
       columns: [id, name, email, updated_at]    # projection pushdown
+
+    - name: orders
+      sync_mode: full_refresh
+      partition_key: order_id                    # optional numeric shard key
 
 transforms:                                       # optional, zero or more
   - use: transform-mask
@@ -257,11 +262,11 @@ transforms:                                       # optional, zero or more
         - assert_regex: { field: email, pattern: "^.+@.+\\..+$" }
       on_fail: dlq                                # send bad rows to DLQ
 
-  - use: rapidbyte/transform-sql                  # in-flight SQL via DataFusion (planned)
+  - use: rapidbyte/transform-sql                  # in-flight SQL via DataFusion
     config:
       query: |
         SELECT user_id, count(order_id) as total_orders, sum(amount) as ltv
-        FROM batch
+        FROM input
         GROUP BY user_id
 
 destination:
@@ -303,7 +308,7 @@ resources:
 | Mode | Description |
 |------|-------------|
 | `full_refresh` | Read entire table, no cursor tracking |
-| `incremental` | Cursor-based delta reads; resumes from last checkpoint value |
+| `incremental` | Cursor-based delta reads; resumes from the last confirmed cursor frontier; optional `tie_breaker_field` keeps ordering deterministic |
 | `cdc` | PostgreSQL logical replication via `pgoutput` protocol |
 
 ## Write Modes
@@ -421,12 +426,13 @@ transforms:
     config:
       query: |
         SELECT user_id, count(order_id) as total_orders, sum(amount) as ltv
-        FROM batch
+        FROM input
         GROUP BY user_id
 ```
 
-Arrow IPC batches are registered as DataFusion table providers. The SQL executes
-in-memory, producing new Arrow batches that continue downstream. This eliminates
+Arrow IPC batches are registered as a DataFusion table provider named `input`.
+The SQL is parsed once during plugin init, re-planned against the current
+`input` snapshot each batch, and streamed downstream as new Arrow batches. This eliminates
 the dual cost of ELT pipelines — move data with Fivetran, then transform in Snowflake
 with dbt. Rapidbyte aggregates, filters, and reshapes data before it reaches the
 warehouse, saving significant compute costs.

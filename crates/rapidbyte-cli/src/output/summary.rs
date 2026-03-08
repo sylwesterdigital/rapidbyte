@@ -77,10 +77,7 @@ fn print_verbose(result: &PipelineResult) {
             "  {:<24} {:>10} {:>12} {:>10} {:>10} {:>8}",
             "stream_name", "Read", "Written", "In", "Out", "Time",
         );
-        eprintln!(
-            "  {}",
-            "\u{2500}".repeat(78),
-        );
+        eprintln!("  {}", "\u{2500}".repeat(78),);
 
         // Aggregate shards per stream
         for agg in aggregate_streams(&result.stream_metrics) {
@@ -163,9 +160,7 @@ fn print_diagnostic(result: &PipelineResult) {
     );
     eprintln!(
         "    {:<17}source {}ms | dest {}ms",
-        "Module load",
-        src.module_load_ms,
-        dst.module_load_ms,
+        "Module load", src.module_load_ms, dst.module_load_ms,
     );
 
     // Shard skew table (only if partitioned streams exist)
@@ -182,10 +177,7 @@ fn print_diagnostic(result: &PipelineResult) {
             "  {:<24} {:>5} {:>10} {:>12} {:>10} {:>10} {:>8}",
             "stream_name", "shard", "Read", "Written", "In", "Out", "Time",
         );
-        eprintln!(
-            "  {}",
-            "\u{2500}".repeat(84),
-        );
+        eprintln!("  {}", "\u{2500}".repeat(84),);
 
         for m in partitioned {
             let shard_label = m
@@ -208,9 +200,7 @@ fn print_diagnostic(result: &PipelineResult) {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-fn unique_stream_count(
-    metrics: &[rapidbyte_engine::result::StreamShardMetric],
-) -> usize {
+fn unique_stream_count(metrics: &[rapidbyte_engine::result::StreamShardMetric]) -> usize {
     let mut names: Vec<&str> = metrics.iter().map(|m| m.stream_name.as_str()).collect();
     names.sort_unstable();
     names.dedup();
@@ -234,16 +224,16 @@ fn aggregate_streams(
     let mut map: BTreeMap<&str, StreamAggregate> = BTreeMap::new();
 
     for m in metrics {
-        let entry = map.entry(m.stream_name.as_str()).or_insert_with(|| {
-            StreamAggregate {
+        let entry = map
+            .entry(m.stream_name.as_str())
+            .or_insert_with(|| StreamAggregate {
                 name: m.stream_name.clone(),
                 records_read: 0,
                 records_written: 0,
                 bytes_read: 0,
                 bytes_written: 0,
                 duration_secs: 0.0,
-            }
-        });
+            });
         entry.records_read += m.records_read;
         entry.records_written += m.records_written;
         entry.bytes_read += m.bytes_read;

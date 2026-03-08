@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::time::Instant;
 
 #[cfg(target_arch = "wasm32")]
 use crate::checkpoint::CheckpointKind;
@@ -10,7 +11,7 @@ use crate::checkpoint::{Checkpoint, StateScope};
 use crate::envelope::PayloadEnvelope;
 #[cfg(target_arch = "wasm32")]
 use crate::error::{BackoffClass, CommitState, ErrorScope};
-use crate::error::{PluginError, ErrorCategory};
+use crate::error::{ErrorCategory, PluginError};
 use crate::metric::Metric;
 #[cfg(target_arch = "wasm32")]
 use crate::wire::ProtocolVersion;
@@ -70,12 +71,7 @@ pub trait HostImports: Send + Sync {
         stream_name: &str,
         cp: &Checkpoint,
     ) -> Result<(), PluginError>;
-    fn metric(
-        &self,
-        plugin_id: &str,
-        stream_name: &str,
-        m: &Metric,
-    ) -> Result<(), PluginError>;
+    fn metric(&self, plugin_id: &str, stream_name: &str, m: &Metric) -> Result<(), PluginError>;
     fn emit_dlq_record(
         &self,
         stream_name: &str,
@@ -132,9 +128,7 @@ pub fn set_host_imports(imports: Box<dyn HostImports>) -> Result<(), Box<dyn Hos
 }
 
 #[cfg(target_arch = "wasm32")]
-fn from_component_error(
-    err: bindings::rapidbyte::plugin::types::PluginError,
-) -> PluginError {
+fn from_component_error(err: bindings::rapidbyte::plugin::types::PluginError) -> PluginError {
     use bindings::rapidbyte::plugin::types as ct;
 
     PluginError {
@@ -190,8 +184,7 @@ impl HostImports for WasmHostImports {
     }
 
     fn frame_write(&self, handle: u64, chunk: &[u8]) -> Result<u64, PluginError> {
-        bindings::rapidbyte::plugin::host::frame_write(handle, chunk)
-            .map_err(from_component_error)
+        bindings::rapidbyte::plugin::host::frame_write(handle, chunk).map_err(from_component_error)
     }
 
     fn frame_seal(&self, handle: u64) -> Result<(), PluginError> {
@@ -225,12 +218,8 @@ impl HostImports for WasmHostImports {
     }
 
     fn state_put(&self, scope: StateScope, key: &str, value: &str) -> Result<(), PluginError> {
-        bindings::rapidbyte::plugin::host::state_put(
-            state_scope_to_i32(scope) as u32,
-            key,
-            value,
-        )
-        .map_err(from_component_error)
+        bindings::rapidbyte::plugin::host::state_put(state_scope_to_i32(scope) as u32, key, value)
+            .map_err(from_component_error)
     }
 
     fn state_compare_and_set(
@@ -274,12 +263,7 @@ impl HostImports for WasmHostImports {
             .map_err(from_component_error)
     }
 
-    fn metric(
-        &self,
-        plugin_id: &str,
-        stream_name: &str,
-        m: &Metric,
-    ) -> Result<(), PluginError> {
+    fn metric(&self, plugin_id: &str, stream_name: &str, m: &Metric) -> Result<(), PluginError> {
         let envelope = PayloadEnvelope {
             protocol_version: ProtocolVersion::V5,
             plugin_id: plugin_id.to_string(),
@@ -385,12 +369,7 @@ impl HostImports for StubHostImports {
         Ok(None)
     }
 
-    fn state_put(
-        &self,
-        _scope: StateScope,
-        _key: &str,
-        _value: &str,
-    ) -> Result<(), PluginError> {
+    fn state_put(&self, _scope: StateScope, _key: &str, _value: &str) -> Result<(), PluginError> {
         Ok(())
     }
 
@@ -413,12 +392,7 @@ impl HostImports for StubHostImports {
         Ok(())
     }
 
-    fn metric(
-        &self,
-        _plugin_id: &str,
-        _stream_name: &str,
-        _m: &Metric,
-    ) -> Result<(), PluginError> {
+    fn metric(&self, _plugin_id: &str, _stream_name: &str, _m: &Metric) -> Result<(), PluginError> {
         Ok(())
     }
 
@@ -488,6 +462,14 @@ fn decode_next_batch_frame(
     })
 }
 
+/// Decoded result of a single `next_batch` host frame.
+#[derive(Debug)]
+pub struct DecodedBatch {
+    pub schema: Arc<Schema>,
+    pub batches: Vec<RecordBatch>,
+    pub decode_secs: f64,
+}
+
 /// Receive the next Arrow RecordBatch from the host pipeline.
 ///
 /// Returns `None` when there are no more batches.
@@ -496,9 +478,20 @@ fn decode_next_batch_frame(
 ///
 /// Returns `Err` if frame reading or IPC decoding fails.
 #[allow(clippy::type_complexity)]
-pub fn next_batch(
-    max_bytes: u64,
-) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>, PluginError> {
+pub fn next_batch(max_bytes: u64) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>, PluginError> {
+    next_batch_with_decode_timing(max_bytes)
+        .map(|result| result.map(|decoded| (decoded.schema, decoded.batches)))
+}
+
+/// Receive the next Arrow RecordBatch from the host pipeline and report guest-side IPC decode time.
+///
+/// Returns `None` when there are no more batches.
+///
+/// # Errors
+///
+/// Returns `Err` if frame reading or IPC decoding fails.
+#[allow(clippy::type_complexity)]
+pub fn next_batch_with_decode_timing(max_bytes: u64) -> Result<Option<DecodedBatch>, PluginError> {
     let imports = host_imports();
 
     let Some(handle) = imports.next_batch()? else {
@@ -518,8 +511,13 @@ pub fn next_batch(
     let ipc_bytes = imports.frame_read(handle, 0, frame_len)?;
     imports.frame_drop(handle);
 
+    let decode_start = Instant::now();
     let (schema, batches) = decode_next_batch_frame(&ipc_bytes, frame_len)?;
-    Ok(Some((schema, batches)))
+    Ok(Some(DecodedBatch {
+        schema,
+        batches,
+        decode_secs: decode_start.elapsed().as_secs_f64(),
+    }))
 }
 
 /// Retrieve a value from the host state backend.
@@ -559,11 +557,7 @@ pub fn state_compare_and_set(
 /// # Errors
 ///
 /// Returns `Err` if the host rejects the checkpoint.
-pub fn checkpoint(
-    plugin_id: &str,
-    stream_name: &str,
-    cp: &Checkpoint,
-) -> Result<(), PluginError> {
+pub fn checkpoint(plugin_id: &str, stream_name: &str, cp: &Checkpoint) -> Result<(), PluginError> {
     host_imports().checkpoint(plugin_id, stream_name, cp)
 }
 

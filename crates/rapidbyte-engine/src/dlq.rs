@@ -2,6 +2,7 @@
 
 use rapidbyte_types::envelope::DlqRecord;
 
+use rapidbyte_state::error;
 use rapidbyte_state::StateBackend;
 use rapidbyte_types::state::PipelineId;
 
@@ -11,9 +12,9 @@ pub(crate) fn persist_dlq_records(
     pipeline: &PipelineId,
     run_id: i64,
     records: &[DlqRecord],
-) {
+) -> error::Result<u64> {
     if records.is_empty() {
-        return;
+        return Ok(0);
     }
 
     let dlq_count = records.len();
@@ -25,6 +26,7 @@ pub(crate) fn persist_dlq_records(
                 dlq_records = inserted,
                 "Persisted DLQ records to state backend"
             );
+            Ok(inserted)
         }
         Err(e) => {
             tracing::error!(
@@ -33,6 +35,7 @@ pub(crate) fn persist_dlq_records(
                 error = %e,
                 "Failed to persist DLQ records"
             );
+            Err(e)
         }
     }
 }

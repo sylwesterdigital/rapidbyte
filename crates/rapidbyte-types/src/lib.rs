@@ -53,7 +53,5 @@ pub mod prelude {
     pub use crate::metric::{Metric, MetricValue, ReadSummary, TransformSummary, WriteSummary};
     pub use crate::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
     pub use crate::stream::{StreamContext, StreamLimits, StreamPolicies};
-    pub use crate::wire::{
-        Feature, PluginInfo, PluginKind, ProtocolVersion, SyncMode, WriteMode,
-    };
+    pub use crate::wire::{Feature, PluginInfo, PluginKind, ProtocolVersion, SyncMode, WriteMode};
 }

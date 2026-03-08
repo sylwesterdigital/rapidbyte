@@ -3,6 +3,7 @@
 mod config;
 mod transform;
 
+use datafusion::sql::parser::{DFParser, Statement as DfStatement};
 use datafusion::sql::sqlparser::ast::{Query, SetExpr, Statement, TableFactor, TableWithJoins};
 use datafusion::sql::sqlparser::dialect::GenericDialect;
 use datafusion::sql::sqlparser::parser::Parser;
@@ -73,9 +74,22 @@ fn validate_query_contract(config: &config::Config) -> Result<String, String> {
     Ok(query)
 }
 
+fn parse_plannable_statement(query: &str) -> Result<DfStatement, String> {
+    let mut statements =
+        DFParser::parse_sql(query).map_err(|e| format!("failed to parse SQL query: {e}"))?;
+    let statement = statements
+        .pop_front()
+        .ok_or_else(|| "SQL query must contain exactly one statement".to_string())?;
+    if !statements.is_empty() {
+        return Err("SQL query must contain exactly one statement".to_string());
+    }
+    Ok(statement)
+}
+
 #[rapidbyte_sdk::plugin(transform)]
 pub struct TransformSql {
     config: config::Config,
+    statement: DfStatement,
 }
 
 impl Transform for TransformSql {
@@ -84,9 +98,12 @@ impl Transform for TransformSql {
     async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
         let query = validate_query_contract(&config)
             .map_err(|message| PluginError::config("SQL_CONFIG", message))?;
+        let statement = parse_plannable_statement(&query)
+            .map_err(|message| PluginError::config("SQL_CONFIG", message))?;
         Ok((
             Self {
                 config: config::Config { query },
+                statement,
             },
             PluginInfo {
                 protocol_version: ProtocolVersion::V5,
@@ -118,7 +135,7 @@ impl Transform for TransformSql {
         ctx: &Context,
         stream: StreamContext,
     ) -> Result<TransformSummary, PluginError> {
-        transform::run(ctx, &stream, &self.config).await
+        transform::run(ctx, &stream, &self.config, &self.statement).await
     }
 }
 
@@ -200,6 +217,22 @@ mod tests {
             Err(err) => {
                 assert_eq!(err.code, "SQL_CONFIG");
                 assert!(err.message.contains("failed to parse SQL query"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn init_rejects_multiple_statements() {
+        let result = TransformSql::init(config::Config {
+            query: "SELECT * FROM input; SELECT * FROM input".to_string(),
+        })
+        .await;
+
+        match result {
+            Ok(_) => panic!("multiple statements should fail init"),
+            Err(err) => {
+                assert_eq!(err.code, "SQL_CONFIG");
+                assert!(err.message.contains("exactly one statement"));
             }
         }
     }

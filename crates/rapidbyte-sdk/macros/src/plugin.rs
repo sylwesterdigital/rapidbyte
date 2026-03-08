@@ -435,17 +435,19 @@ fn gen_read_dispatch(
         }
     });
 
-    let cdc_branch = has_cdc.then(|| quote! {
-        if stream.sync_mode == ::rapidbyte_sdk::wire::SyncMode::Cdc {
-            let resume = stream.cdc_resume_token().unwrap_or(
-                ::rapidbyte_sdk::stream::CdcResumeToken {
-                    value: None,
-                    cursor_type: ::rapidbyte_sdk::cursor::CursorType::Utf8,
-                }
-            );
-            return <#struct_name as ::rapidbyte_sdk::features::CdcSource>::read_changes(
-                conn, &ctx, stream, resume
-            ).await;
+    let cdc_branch = has_cdc.then(|| {
+        quote! {
+            if stream.sync_mode == ::rapidbyte_sdk::wire::SyncMode::Cdc {
+                let resume = stream.cdc_resume_token().unwrap_or(
+                    ::rapidbyte_sdk::stream::CdcResumeToken {
+                        value: None,
+                        cursor_type: ::rapidbyte_sdk::cursor::CursorType::Utf8,
+                    }
+                );
+                return <#struct_name as ::rapidbyte_sdk::features::CdcSource>::read_changes(
+                    conn, &ctx, stream, resume
+                ).await;
+            }
         }
     });
 

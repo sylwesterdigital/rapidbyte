@@ -6,7 +6,6 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use chrono::NaiveDateTime;
 use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 
@@ -42,17 +41,149 @@ fn effective_partition_strategy(stream: &StreamContext) -> PartitionStrategy {
         .unwrap_or_else(partition_strategy_from_env)
 }
 
-fn build_range_bounds_sql(source_table_name: &str) -> String {
+fn build_range_bounds_sql(source_table_name: &str, partition_key: &str) -> String {
     format!(
-        "SELECT MIN({id_col})::bigint, MAX({id_col})::bigint FROM {table_name}",
-        id_col = quote_identifier("id"),
+        "SELECT MIN({partition_col})::bigint, MAX({partition_col})::bigint FROM {table_name}",
+        partition_col = quote_identifier(partition_key),
         table_name = query::quote_table_name(source_table_name),
     )
+}
+
+fn split_schema_and_table_name(source_table_name: &str) -> (&str, &str) {
+    let mut parts = source_table_name.rsplitn(2, '.');
+    let table_name = parts.next().unwrap_or(source_table_name);
+    let schema_name = parts.next().unwrap_or("public");
+    (schema_name, table_name)
+}
+
+async fn query_primary_key_columns(
+    client: &Client,
+    source_table_name: &str,
+) -> Result<Vec<String>, String> {
+    let (schema_name, table_name) = split_schema_and_table_name(source_table_name);
+    let sql = r"
+        SELECT kcu.column_name
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name
+         AND tc.table_schema = kcu.table_schema
+         AND tc.table_name = kcu.table_name
+        WHERE tc.constraint_type = 'PRIMARY KEY'
+          AND tc.table_schema = $1
+          AND tc.table_name = $2
+        ORDER BY kcu.ordinal_position
+    ";
+
+    client
+        .query(sql, &[&schema_name, &table_name])
+        .await
+        .map(|rows| rows.into_iter().map(|row| row.get::<_, String>(0)).collect())
+        .map_err(|e| format!("primary key discovery failed for {source_table_name}: {e}"))
+}
+
+async fn resolve_partition_key(
+    client: &Client,
+    ctx: &Context,
+    stream: &StreamContext,
+    columns: &[Column],
+) -> Result<Option<query::PartitionKey>, String> {
+    let Some((partition_count, partition_index)) = stream.partition_coordinates() else {
+        return Ok(None);
+    };
+
+    let source_table_name = stream.source_stream_or_stream_name();
+    let (partition_key_name, is_explicit) = if let Some(partition_key) = stream.partition_key.as_ref()
+    {
+        (partition_key.clone(), true)
+    } else {
+        let primary_key_columns = query_primary_key_columns(client, source_table_name).await?;
+        match primary_key_columns.as_slice() {
+            [column] => (column.clone(), false),
+            [] => {
+                ctx.log(
+                    LogLevel::Warn,
+                    &format!(
+                        "Partitioning disabled for stream '{}' shard {}/{}: no partition_key configured and no primary key discovered",
+                        stream.stream_name, partition_index, partition_count
+                    ),
+                );
+                return Ok(None);
+            }
+            columns => {
+                ctx.log(
+                    LogLevel::Warn,
+                    &format!(
+                        "Partitioning disabled for stream '{}' shard {}/{}: primary key is composite ({}) and no partition_key was configured",
+                        stream.stream_name,
+                        partition_index,
+                        partition_count,
+                        columns.join(", ")
+                    ),
+                );
+                return Ok(None);
+            }
+        }
+    };
+
+    let Some(partition_column) = columns.iter().find(|column| column.name == partition_key_name) else {
+        if is_explicit {
+            return Err(format!(
+                "Configured partition_key '{}' was not found in stream '{}' columns",
+                partition_key_name, stream.stream_name
+            ));
+        }
+
+        ctx.log(
+            LogLevel::Warn,
+            &format!(
+                "Partitioning disabled for stream '{}' shard {}/{}: discovered primary key '{}' was not found in table metadata",
+                stream.stream_name, partition_index, partition_count, partition_key_name
+            ),
+        );
+        return Ok(None);
+    };
+
+    if !matches!(
+        partition_column.arrow_type,
+        ArrowDataType::Int8
+            | ArrowDataType::Int16
+            | ArrowDataType::Int32
+            | ArrowDataType::Int64
+            | ArrowDataType::UInt8
+            | ArrowDataType::UInt16
+            | ArrowDataType::UInt32
+            | ArrowDataType::UInt64
+    ) {
+        if is_explicit {
+            return Err(format!(
+                "Configured partition_key '{}' for stream '{}' must be integer-compatible, found {:?}",
+                partition_key_name, stream.stream_name, partition_column.arrow_type
+            ));
+        }
+
+        ctx.log(
+            LogLevel::Warn,
+            &format!(
+                "Partitioning disabled for stream '{}' shard {}/{}: discovered primary key '{}' is non-numeric ({:?})",
+                stream.stream_name,
+                partition_index,
+                partition_count,
+                partition_key_name,
+                partition_column.arrow_type
+            ),
+        );
+        return Ok(None);
+    }
+
+    Ok(Some(query::PartitionKey {
+        name: partition_key_name,
+    }))
 }
 
 async fn compute_range_bounds(
     client: &Client,
     source_table_name: &str,
+    partition_key: &query::PartitionKey,
     partition_count: u32,
     partition_index: u32,
 ) -> Result<Option<(i64, i64)>, String> {
@@ -60,7 +191,7 @@ async fn compute_range_bounds(
         return Ok(None);
     }
 
-    let sql = build_range_bounds_sql(source_table_name);
+    let sql = build_range_bounds_sql(source_table_name, &partition_key.name);
     let row = client
         .query_one(&sql, &[])
         .await
@@ -86,26 +217,9 @@ async fn compute_range_bounds(
     Ok(Some((start_i64, end_i64)))
 }
 
-/// Estimate byte size of a single row for `max_record_bytes` checking.
-pub(crate) fn estimate_row_bytes(columns: &[Column]) -> usize {
-    let mut total = 0usize;
-    for col in columns {
-        total += match col.arrow_type {
-            ArrowDataType::Int16 => 2,
-            ArrowDataType::Int32 | ArrowDataType::Float32 | ArrowDataType::Date32 => 4,
-            ArrowDataType::Int64 | ArrowDataType::Float64 | ArrowDataType::TimestampMicros => 8,
-            ArrowDataType::Boolean => 1,
-            _ => 64,
-        };
-        // 1-byte null bitmap overhead per column.
-        total += 1;
-    }
-    total
-}
-
-/// Encode and emit all currently accumulated rows as one Arrow IPC batch.
-fn emit_accumulated_rows(
-    rows: &mut Vec<tokio_postgres::Row>,
+/// Encode and emit the current Arrow batch builders.
+fn emit_accumulated_batch(
+    batch_builder: &mut encode::RecordBatchBuilder,
     columns: &[Column],
     schema: &Arc<Schema>,
     ctx: &Context,
@@ -113,22 +227,27 @@ fn emit_accumulated_rows(
     estimated_bytes: &mut usize,
 ) -> Result<(), String> {
     let encode_start = Instant::now();
-    let batch = encode::rows_to_record_batch(rows, columns, schema)?;
+    let batch = std::mem::replace(
+        batch_builder,
+        encode::RecordBatchBuilder::new(columns, BATCH_SIZE.min(FETCH_CHUNK)),
+    )
+    .finish(schema)?;
     // Safety: encode timing in nanos will not exceed u64::MAX for any realistic duration.
     #[allow(clippy::cast_possible_truncation)]
     {
         state.arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
     }
 
-    state.total_records += rows.len() as u64;
-    state.total_bytes += batch.get_array_memory_size() as u64;
-    state.batches_emitted += 1;
+    if let Some(batch) = batch {
+        state.total_records += batch.num_rows() as u64;
+        state.total_bytes += batch.get_array_memory_size() as u64;
+        state.batches_emitted += 1;
 
-    ctx.emit_batch(&batch)
-        .map_err(|e| format!("emit_batch failed: {}", e.message))?;
-    emit_read_metrics(ctx, state.total_records, state.total_bytes);
+        ctx.emit_batch(&batch)
+            .map_err(|e| format!("emit_batch failed: {}", e.message))?;
+        emit_read_metrics(ctx, state.total_records, state.total_bytes);
+    }
 
-    rows.clear();
     *estimated_bytes = BATCH_OVERHEAD_BYTES;
     Ok(())
 }
@@ -151,6 +270,7 @@ pub async fn read_stream(
 
     // ── 1. Schema resolution ──────────────────────────────────────────
     let all_columns = crate::discovery::query_table_columns(client, source_table_name).await?;
+    let partition_key = resolve_partition_key(client, ctx, stream, &all_columns).await?;
 
     // ── 2. Projection pushdown ────────────────────────────────────────
     let columns: Vec<Column> = match &stream.selected_columns {
@@ -185,6 +305,15 @@ pub async fn read_stream(
                         stream.stream_name
                     ));
                 }
+                if let Some(tie_breaker_field) = ci.tie_breaker_field.as_deref() {
+                    if !filtered.iter().any(|c| c.name == tie_breaker_field) {
+                        return Err(format!(
+                            "Tie-breaker field '{}' must be included in selected columns for incremental stream '{}'",
+                            tie_breaker_field,
+                            stream.stream_name
+                        ));
+                    }
+                }
             }
             filtered
         }
@@ -200,12 +329,13 @@ pub async fn read_stream(
         .await
         .map_err(|e| format!("BEGIN failed: {e}"))?;
 
-    let partition_range_bounds = if effective_partition_strategy(stream)
-        == PartitionStrategy::Range
+    let partition_range_bounds = if effective_partition_strategy(stream) == PartitionStrategy::Range
     {
-        match (stream.partition_count, stream.partition_index) {
-            (Some(count), Some(index)) => {
-                match compute_range_bounds(client, source_table_name, count, index).await {
+        match (stream.partition_count, stream.partition_index, partition_key.as_ref()) {
+            (Some(count), Some(index), Some(partition_key)) => {
+                match compute_range_bounds(client, source_table_name, partition_key, count, index)
+                    .await
+                {
                     Ok(bounds) => bounds,
                     Err(e) => {
                         ctx.log(
@@ -225,26 +355,33 @@ pub async fn read_stream(
         None
     };
 
-    let cursor_query = query::build_base_query(ctx, stream, &columns, partition_range_bounds)?;
+    let cursor_query = query::build_base_query(
+        ctx,
+        stream,
+        &columns,
+        partition_range_bounds,
+        partition_key.as_ref(),
+    )?;
 
     let declare = format!(
         "DECLARE {} NO SCROLL CURSOR FOR {}",
         CURSOR_NAME, cursor_query.sql
     );
-    match cursor_query.bind.as_ref() {
-        Some(bind) => {
-            let params: [&(dyn tokio_postgres::types::ToSql + Sync); 1] = [bind.as_tosql()];
-            client
-                .execute(&declare, &params)
-                .await
-                .map_err(|e| format!("DECLARE CURSOR failed: {e}"))?;
-        }
-        None => {
-            client
-                .execute(&declare, &[])
-                .await
-                .map_err(|e| format!("DECLARE CURSOR failed: {e}"))?;
-        }
+    if cursor_query.binds.is_empty() {
+        client
+            .execute(&declare, &[])
+            .await
+            .map_err(|e| format!("DECLARE CURSOR failed: {e}"))?;
+    } else {
+        let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = cursor_query
+            .binds
+            .iter()
+            .map(crate::query::CursorBindParam::as_tosql)
+            .collect();
+        client
+            .execute(&declare, &params)
+            .await
+            .map_err(|e| format!("DECLARE CURSOR failed: {e}"))?;
     }
 
     let query_secs = query_start.elapsed().as_secs_f64();
@@ -265,7 +402,6 @@ pub async fn read_stream(
     } else {
         StreamLimits::DEFAULT_MAX_RECORD_BYTES as usize
     };
-    let estimated_row_bytes = estimate_row_bytes(&columns);
     let mut records_skipped: u64 = 0;
 
     let mut tracker: Option<CursorTracker> = match stream.cursor_info.as_ref() {
@@ -274,7 +410,7 @@ pub async fn read_stream(
     };
 
     let fetch_query = format!("FETCH {FETCH_CHUNK} FROM {CURSOR_NAME}");
-    let mut accumulated_rows: Vec<tokio_postgres::Row> = Vec::new();
+    let mut batch_builder = encode::RecordBatchBuilder::new(&columns, BATCH_SIZE.min(FETCH_CHUNK));
     let mut estimated_bytes: usize = BATCH_OVERHEAD_BYTES;
     let mut state = EmitState {
         total_records: 0,
@@ -299,112 +435,131 @@ pub async fn read_stream(
         let exhausted = rows.is_empty();
 
         if !exhausted {
-            if estimated_row_bytes > max_record_bytes {
-                if stream.policies.on_data_error == DataErrorPolicy::Fail {
-                    loop_error = Some(format!(
-                        "Record exceeds max_record_bytes ({estimated_row_bytes} > {max_record_bytes})",
-                    ));
-                    break;
-                }
-                records_skipped += rows.len() as u64;
-                ctx.log(
-                    LogLevel::Warn,
-                    &format!(
-                        "Skipping {} oversized records: {estimated_row_bytes} bytes > max_record_bytes {max_record_bytes}",
-                        rows.len(),
-                    ),
-                );
-            } else {
-                for row in rows {
-                    if !accumulated_rows.is_empty()
-                        && estimated_bytes + estimated_row_bytes >= max_batch_bytes
-                    {
-                        if let Err(e) = emit_accumulated_rows(
-                            &mut accumulated_rows,
-                            &columns,
-                            &arrow_schema,
-                            ctx,
-                            &mut state,
-                            &mut estimated_bytes,
-                        ) {
-                            loop_error = Some(e);
+            for row in rows {
+                let decoded_row = match encode::decode_row(&row, &columns, batch_builder.row_count()) {
+                    Ok(decoded_row) => decoded_row,
+                    Err(invalid) => {
+                        if let Some(ref mut t) = tracker {
+                            t.observe_row(&row);
+                        }
+
+                        records_skipped += 1;
+                        match stream.policies.on_data_error {
+                            DataErrorPolicy::Fail => {
+                                loop_error = Some(invalid.message);
+                                break;
+                            }
+                            DataErrorPolicy::Skip => {
+                                ctx.log(
+                                    LogLevel::Warn,
+                                    &format!(
+                                        "Skipping row with source decode error in stream '{}': {}",
+                                        stream.stream_name, invalid.message
+                                    ),
+                                );
+                                continue;
+                            }
+                            DataErrorPolicy::Dlq => {
+                                ctx.log(
+                                    LogLevel::Warn,
+                                    &format!(
+                                        "Routing row with source decode error to DLQ in stream '{}': {}",
+                                        stream.stream_name, invalid.message
+                                    ),
+                                );
+                                ctx.emit_dlq_record(
+                                    &invalid.record_json,
+                                    &invalid.message,
+                                    rapidbyte_sdk::error::ErrorCategory::Data,
+                                )
+                                .map_err(|e| format!("emit_dlq_record failed: {}", e.message))?;
+                                continue;
+                            }
+                        }
+                    }
+                };
+                let actual_row_bytes = decoded_row.estimated_bytes;
+
+                if actual_row_bytes > max_record_bytes {
+                    if let Some(ref mut t) = tracker {
+                        t.observe_row(&row);
+                    }
+
+                    match stream.policies.on_data_error {
+                        DataErrorPolicy::Fail => {
+                            loop_error = Some(format!(
+                                "Record exceeds max_record_bytes ({} > {})",
+                                actual_row_bytes, max_record_bytes
+                            ));
                             break;
                         }
-                    }
-
-                    if loop_error.is_some() {
-                        break;
-                    }
-
-                    estimated_bytes += estimated_row_bytes;
-
-                    // ── Cursor extraction ─────────────────────────────────
-                    // IMPORTANT: PostgreSQL SERIAL is INT4 (i32), not INT8 (i64).
-                    // tokio-postgres `try_get()` requires exact type matches, so we
-                    // must chain i64 -> i32 fallbacks. The host orchestrator currently
-                    // hardcodes CursorType::Utf8 for incremental state, so the catch-all
-                    // arm is common. Do not remove the i32/i16 fallbacks or incremental
-                    // tracking can silently stop advancing on SERIAL/SMALLSERIAL columns.
-                    if let Some(ref mut t) = tracker {
-                        let col_idx = t.col_idx();
-                        if t.is_int_strategy() {
-                            let val = row
-                                .try_get::<_, i64>(col_idx)
-                                .ok()
-                                .or_else(|| row.try_get::<_, i32>(col_idx).ok().map(i64::from))
-                                .or_else(|| row.try_get::<_, i16>(col_idx).ok().map(i64::from));
-                            if let Some(val) = val {
-                                t.observe_int(val);
-                            }
-                        } else {
-                            let val = row
-                                .try_get::<_, String>(col_idx)
-                                .ok()
-                                .or_else(|| {
-                                    row.try_get::<_, i64>(col_idx).ok().map(|n| n.to_string())
-                                })
-                                .or_else(|| {
-                                    row.try_get::<_, i32>(col_idx).ok().map(|n| n.to_string())
-                                })
-                                .or_else(|| {
-                                    row.try_get::<_, NaiveDateTime>(col_idx)
-                                        .ok()
-                                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
-                                })
-                                .or_else(|| {
-                                    row.try_get::<_, chrono::DateTime<chrono::Utc>>(col_idx)
-                                        .ok()
-                                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
-                                })
-                                .or_else(|| {
-                                    row.try_get::<_, chrono::NaiveDate>(col_idx)
-                                        .ok()
-                                        .map(|d| d.to_string())
-                                })
-                                .or_else(|| {
-                                    row.try_get::<_, serde_json::Value>(col_idx)
-                                        .ok()
-                                        .map(|v| v.to_string())
-                                });
-                            if let Some(val) = val {
-                                t.observe_text(&val);
-                            }
+                        DataErrorPolicy::Skip => {
+                            records_skipped += 1;
+                            ctx.log(
+                                LogLevel::Warn,
+                                &format!(
+                                    "Skipping oversized row in stream '{}': {} bytes > max_record_bytes {}",
+                                    stream.stream_name, actual_row_bytes, max_record_bytes
+                                ),
+                            );
+                            continue;
+                        }
+                        DataErrorPolicy::Dlq => {
+                            records_skipped += 1;
+                            ctx.emit_dlq_record(
+                                &encode::row_to_json(&row, &columns),
+                                &format!(
+                                    "row exceeds max_record_bytes: {} bytes > {}",
+                                    actual_row_bytes, max_record_bytes
+                                ),
+                                rapidbyte_sdk::error::ErrorCategory::Data,
+                            )
+                            .map_err(|e| format!("emit_dlq_record failed: {}", e.message))?;
+                            continue;
                         }
                     }
+                }
 
-                    accumulated_rows.push(row);
+                if !batch_builder.is_empty() && estimated_bytes + actual_row_bytes >= max_batch_bytes
+                {
+                    if let Err(e) = emit_accumulated_batch(
+                        &mut batch_builder,
+                        &columns,
+                        &arrow_schema,
+                        ctx,
+                        &mut state,
+                        &mut estimated_bytes,
+                    ) {
+                        loop_error = Some(e);
+                        break;
+                    }
+                }
+
+                if loop_error.is_some() {
+                    break;
+                }
+
+                estimated_bytes += actual_row_bytes;
+
+                if let Some(ref mut t) = tracker {
+                    t.observe_row(&row);
+                }
+
+                if let Err(error) = batch_builder.append_decoded_row(decoded_row) {
+                    loop_error = Some(error);
+                    break;
                 }
             }
         }
 
-        let should_emit = !accumulated_rows.is_empty()
+        let should_emit = !batch_builder.is_empty()
             && (estimated_bytes >= max_batch_bytes
-                || accumulated_rows.len() >= BATCH_SIZE
+                || batch_builder.row_count() >= BATCH_SIZE
                 || exhausted);
 
         if should_emit {
-            if let Err(e) = emit_accumulated_rows(
-                &mut accumulated_rows,
+            if let Err(e) = emit_accumulated_batch(
+                &mut batch_builder,
                 &columns,
                 &arrow_schema,
                 ctx,
@@ -475,7 +630,8 @@ pub async fn read_stream(
                     _ => format!("{v:?}"),
                 })
                 .unwrap_or_default();
-            let _ = ctx.checkpoint(&cp);
+            ctx.checkpoint(&cp)
+                .map_err(|e| format!("Source checkpoint failed: {}", e.message))?;
             ctx.log(
                 LogLevel::Info,
                 &format!(
@@ -525,19 +681,8 @@ pub async fn read_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapidbyte_sdk::catalog::SchemaHint;
     use rapidbyte_sdk::stream::StreamPolicies;
-
-    #[test]
-    fn estimate_row_bytes_matches_expected_mix() {
-        let columns = vec![
-            Column::new("id", "bigint", false),
-            Column::new("name", "text", true),
-            Column::new("active", "boolean", false),
-        ];
-        // Int64(8)+Utf8(64)+Boolean(1) plus 1-byte null bitmap overhead per column.
-        assert_eq!(estimate_row_bytes(&columns), 8 + 64 + 1 + 3);
-    }
+    use rapidbyte_sdk::catalog::SchemaHint;
 
     #[test]
     fn stream_partition_strategy_override_wins_over_env() {
@@ -554,6 +699,7 @@ mod tests {
             policies: StreamPolicies::default(),
             write_mode: None,
             selected_columns: None,
+            partition_key: None,
             partition_count: None,
             partition_index: None,
             effective_parallelism: None,
@@ -585,6 +731,7 @@ mod tests {
             policies: StreamPolicies::default(),
             write_mode: None,
             selected_columns: None,
+            partition_key: None,
             partition_count: None,
             partition_index: None,
             effective_parallelism: None,
@@ -603,10 +750,23 @@ mod tests {
 
     #[test]
     fn build_range_bounds_sql_supports_schema_qualified_table_name() {
-        let sql = build_range_bounds_sql("public.users");
+        let sql = build_range_bounds_sql("public.users", "tenant_id");
         assert_eq!(
             sql,
-            "SELECT MIN(id)::bigint, MAX(id)::bigint FROM public.users"
+            "SELECT MIN(tenant_id)::bigint, MAX(tenant_id)::bigint FROM public.users"
+        );
+    }
+
+    #[test]
+    fn split_schema_and_table_name_defaults_to_public() {
+        assert_eq!(split_schema_and_table_name("users"), ("public", "users"));
+    }
+
+    #[test]
+    fn split_schema_and_table_name_supports_schema_qualified_names() {
+        assert_eq!(
+            split_schema_and_table_name("analytics.users"),
+            ("analytics", "users")
         );
     }
 }

@@ -120,10 +120,7 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             if verbosity != Verbosity::Quiet {
-                eprintln!(
-                    "{} {e:#}",
-                    console::style("\u{2718}").red().bold(),
-                );
+                eprintln!("{} {e:#}", console::style("\u{2718}").red().bold(),);
             }
             ExitCode::FAILURE
         }

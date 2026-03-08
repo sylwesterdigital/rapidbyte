@@ -25,13 +25,13 @@ pub(crate) fn correlate_and_persist_cursors(
 
         let dest_confirmed = dest_checkpoints
             .iter()
-            .any(|dcp| dcp.stream == src_cp.stream && dcp.id >= src_cp.id);
+            .any(|dcp| dcp.stream == src_cp.stream && dcp.id == src_cp.id);
         if !dest_confirmed {
             tracing::warn!(
                 pipeline = pipeline.as_str(),
                 stream = src_cp.stream,
                 source_checkpoint_id = src_cp.id,
-                "Skipping cursor advancement: no destination checkpoint confirms stream data at or beyond source checkpoint"
+                "Skipping cursor advancement: no destination checkpoint confirms the same stream frontier"
             );
             continue;
         }

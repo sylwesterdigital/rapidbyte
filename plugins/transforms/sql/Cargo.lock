@@ -2104,6 +2104,7 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "datafusion",
+ "futures",
  "rapidbyte-sdk",
  "serde",
  "serde_json",

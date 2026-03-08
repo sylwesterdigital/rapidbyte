@@ -22,9 +22,8 @@ pub fn encode_ipc_into<W: std::io::Write>(
     batch: &RecordBatch,
     writer: &mut W,
 ) -> Result<(), PluginError> {
-    let mut ipc_writer = StreamWriter::try_new(writer, batch.schema().as_ref()).map_err(|e| {
-        PluginError::internal("ARROW_IPC_ENCODE", format!("IPC writer init: {e}"))
-    })?;
+    let mut ipc_writer = StreamWriter::try_new(writer, batch.schema().as_ref())
+        .map_err(|e| PluginError::internal("ARROW_IPC_ENCODE", format!("IPC writer init: {e}")))?;
     ipc_writer
         .write(batch)
         .map_err(|e| PluginError::internal("ARROW_IPC_ENCODE", format!("IPC write: {e}")))?;
@@ -53,9 +52,8 @@ pub fn encode_ipc(batch: &RecordBatch) -> Result<Vec<u8>, PluginError> {
 /// Returns `Err` if Arrow IPC stream reader initialization or batch deserialization fails.
 pub fn decode_ipc(ipc_bytes: &[u8]) -> Result<(Arc<Schema>, Vec<RecordBatch>), PluginError> {
     let cursor = Cursor::new(ipc_bytes);
-    let reader = StreamReader::try_new(cursor, None).map_err(|e| {
-        PluginError::internal("ARROW_IPC_DECODE", format!("IPC reader init: {e}"))
-    })?;
+    let reader = StreamReader::try_new(cursor, None)
+        .map_err(|e| PluginError::internal("ARROW_IPC_DECODE", format!("IPC reader init: {e}")))?;
     let schema = reader.schema();
     let batches: Vec<_> = reader
         .collect::<Result<Vec<_>, _>>()

@@ -108,8 +108,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_error_plugin_not_retryable() {
-        let err =
-            PipelineError::Plugin(PluginError::config("MISSING_HOST", "host is required"));
+        let err = PipelineError::Plugin(PluginError::config("MISSING_HOST", "host is required"));
         assert!(!err.is_retryable());
         let ce = err.as_plugin_error().unwrap();
         assert_eq!(ce.category, ErrorCategory::Config);
@@ -132,11 +131,8 @@ mod tests {
 
     #[test]
     fn test_pipeline_error_display_plugin() {
-        let err = PipelineError::Plugin(PluginError::rate_limit(
-            "TOO_MANY",
-            "slow down",
-            Some(5000),
-        ));
+        let err =
+            PipelineError::Plugin(PluginError::rate_limit("TOO_MANY", "slow down", Some(5000)));
         let msg = format!("{err}");
         assert!(msg.contains("rate_limit"));
         assert!(msg.contains("TOO_MANY"));

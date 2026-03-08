@@ -10,18 +10,18 @@
 )]
 
 use std::io::IsTerminal;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 
 use anyhow::{Context, Result};
 use arrow::record_batch::RecordBatch;
 use console::style;
 use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
 
+use rapidbyte_runtime::wasmtime_reexport::HasSelf;
 use rapidbyte_runtime::{
     create_component_linker, load_plugin_manifest, resolve_plugin_path, source_bindings,
     source_error_to_sdk, ComponentHostState, Frame, LoadedComponent, WasmRuntime,
 };
-use rapidbyte_runtime::wasmtime_reexport::HasSelf;
 use rapidbyte_state::SqliteStateBackend;
 use rapidbyte_types::catalog::{Catalog, SchemaHint};
 use rapidbyte_types::manifest::Permissions;
@@ -89,7 +89,7 @@ pub(crate) async fn run() -> Result<()> {
                 }
             }
             Ok(Signal::CtrlD) => break,
-            Ok(Signal::CtrlC) => {},
+            Ok(Signal::CtrlC) => {}
             Err(e) => {
                 display::print_error(&format!("REPL error: {e}"));
                 break;
@@ -185,63 +185,68 @@ async fn connect_source(
     let config = config.clone();
     let plugin_ref = plugin_ref.to_string();
 
-    let (catalog, module) = tokio::task::spawn_blocking(move || -> Result<(Catalog, LoadedComponent)> {
-        let runtime = WasmRuntime::new()?;
-        let module = runtime.load_module(&wasm_path)?;
+    let (catalog, module) =
+        tokio::task::spawn_blocking(move || -> Result<(Catalog, LoadedComponent)> {
+            let runtime = WasmRuntime::new()?;
+            let module = runtime.load_module(&wasm_path)?;
 
-        let state_backend = Arc::new(
-            SqliteStateBackend::in_memory().context("Failed to create in-memory state backend")?,
-        );
+            let state_backend = Arc::new(
+                SqliteStateBackend::in_memory()
+                    .context("Failed to create in-memory state backend")?,
+            );
 
-        // Build host state for discover (no batch frames needed).
-        let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::channel::<Frame>(1);
-        let mut builder = ComponentHostState::builder()
-            .pipeline("dev")
-            .plugin_id(&plugin_ref)
-            .stream("discover")
-            .state_backend(state_backend as Arc<dyn rapidbyte_state::StateBackend>)
-            .sender(dummy_tx)
-            .config(&config)
-            .compression(None);
-        if let Some(ref p) = permissions_clone {
-            builder = builder.permissions(p);
-        }
-        let host_state = builder.build()?;
+            // Build host state for discover (no batch frames needed).
+            let (dummy_tx, _dummy_rx) = mpsc::sync_channel::<Frame>(1);
+            let mut builder = ComponentHostState::builder()
+                .pipeline("dev")
+                .plugin_id(&plugin_ref)
+                .stream("discover")
+                .state_backend(state_backend as Arc<dyn rapidbyte_state::StateBackend>)
+                .sender(dummy_tx)
+                .config(&config)
+                .compression(None);
+            if let Some(ref p) = permissions_clone {
+                builder = builder.permissions(p);
+            }
+            let host_state = builder.build()?;
 
-        let mut store = module.new_store(host_state, None);
-        let linker = create_component_linker(&module.engine, "source", |linker| {
-            source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(linker, |s| s)?;
-            Ok(())
-        })?;
-        let bindings = source_bindings::RapidbyteSource::instantiate(
-            &mut store,
-            &module.component,
-            &linker,
-        )?;
-        let iface = bindings.rapidbyte_plugin_source();
+            let mut store = module.new_store(host_state, None);
+            let linker = create_component_linker(&module.engine, "source", |linker| {
+                source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(linker, |s| s)?;
+                Ok(())
+            })?;
+            let bindings = source_bindings::RapidbyteSource::instantiate(
+                &mut store,
+                &module.component,
+                &linker,
+            )?;
+            let iface = bindings.rapidbyte_plugin_source();
 
-        let config_json = serde_json::to_string(&config)?;
-        let session = iface
-            .call_open(&mut store, &config_json)?
-            .map_err(source_error_to_sdk)
-            .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
+            let config_json = serde_json::to_string(&config)?;
+            let session = iface
+                .call_open(&mut store, &config_json)?
+                .map_err(source_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
 
-        let discover_json = iface
-            .call_discover(&mut store, session)?
-            .map_err(source_error_to_sdk)
-            .map_err(|e| anyhow::anyhow!("Discover failed: {e}"))?;
+            let discover_json = iface
+                .call_discover(&mut store, session)?
+                .map_err(source_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Discover failed: {e}"))?;
 
-        let catalog = serde_json::from_str::<Catalog>(&discover_json)
-            .context("Failed to parse discover catalog JSON")?;
+            let catalog = serde_json::from_str::<Catalog>(&discover_json)
+                .context("Failed to parse discover catalog JSON")?;
 
-        if let Err(err) = iface.call_close(&mut store, session)? {
-            tracing::warn!("Source close failed after discover: {}", source_error_to_sdk(err));
-        }
+            if let Err(err) = iface.call_close(&mut store, session)? {
+                tracing::warn!(
+                    "Source close failed after discover: {}",
+                    source_error_to_sdk(err)
+                );
+            }
 
-        Ok((catalog, module))
-    })
-    .await
-    .context("Plugin task panicked")??;
+            Ok((catalog, module))
+        })
+        .await
+        .context("Plugin task panicked")??;
 
     Ok((catalog, module, permissions))
 }
@@ -271,7 +276,12 @@ fn handle_tables(state: &ReplState) -> Result<()> {
             .map(sync_mode_label)
             .collect::<Vec<_>>()
             .join(", ");
-        eprintln!("{:<40} {:<15} {}", stream.name, sync_label, stream.schema.len());
+        eprintln!(
+            "{:<40} {:<15} {}",
+            stream.name,
+            sync_label,
+            stream.schema.len()
+        );
     }
 
     Ok(())
@@ -283,10 +293,7 @@ fn handle_schema(state: &ReplState, table: &str) -> Result<()> {
     let source = require_source(state)?;
     let stream = find_stream(&source.catalog, table)?;
 
-    eprintln!(
-        "{}",
-        style(format!("-- {} --", stream.name)).bold()
-    );
+    eprintln!("{}", style(format!("-- {} --", stream.name)).bold());
     eprintln!(
         "{:<30} {:<20} {}",
         style("Column").bold().underlined(),
@@ -296,7 +303,11 @@ fn handle_schema(state: &ReplState, table: &str) -> Result<()> {
 
     for col in &stream.schema {
         let nullable_str = if col.nullable { "YES" } else { "NO" };
-        eprintln!("{:<30} {:<20} {nullable_str}", col.name, format!("{:?}", col.data_type));
+        eprintln!(
+            "{:<30} {:<20} {nullable_str}",
+            col.name,
+            format!("{:?}", col.data_type)
+        );
     }
 
     Ok(())
@@ -332,6 +343,7 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
         policies: StreamPolicies::default(),
         write_mode: None,
         selected_columns: None,
+        partition_key: None,
         partition_count: None,
         partition_index: None,
         effective_parallelism: None,
@@ -342,7 +354,7 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
     let spinner = make_spinner("Streaming...");
 
     let stream_result = tokio::task::spawn_blocking(move || -> Result<Vec<RecordBatch>> {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Frame>(64);
+        let (tx, rx) = mpsc::sync_channel::<Frame>(64);
 
         let state_backend = Arc::new(
             SqliteStateBackend::in_memory().context("Failed to create in-memory state backend")?,
@@ -405,7 +417,7 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
         let mut all_batches: Vec<RecordBatch> = Vec::new();
         while let Ok(frame) = rx.try_recv() {
             match frame {
-                Frame::Data(bytes) => {
+                Frame::Data { payload: bytes, .. } => {
                     let decoded = rapidbyte_engine::arrow::ipc_to_record_batches(&bytes)?;
                     all_batches.extend(decoded);
                 }
@@ -426,11 +438,7 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
     }
 
     // Derive short name: strip schema prefix (e.g., "public.users" -> "users").
-    let short_name = stream
-        .name
-        .rsplit('.')
-        .next()
-        .unwrap_or(&stream.name);
+    let short_name = stream.name.rsplit('.').next().unwrap_or(&stream.name);
 
     let schema = batches[0].schema();
     let total_rows: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
@@ -520,14 +528,20 @@ async fn handle_sql(state: &ReplState, sql: &str) -> Result<()> {
 
 fn print_help() {
     let commands: &[(&str, &str)] = &[
-        (".source <plugin> [--key value ...]", "Connect to a source plugin"),
-        (".tables",                               "List discovered streams"),
-        (".schema <table>",                       "Show columns for a stream"),
-        (".stream <table> [--limit N]",           "Read a stream into the workspace"),
-        (".workspace / .ws",                      "Show workspace tables"),
-        (".clear [table]",                        "Clear one or all workspace tables"),
-        (".help / .h",                            "Show this help"),
-        (".quit / .exit / .q",                    "Exit the shell"),
+        (
+            ".source <plugin> [--key value ...]",
+            "Connect to a source plugin",
+        ),
+        (".tables", "List discovered streams"),
+        (".schema <table>", "Show columns for a stream"),
+        (
+            ".stream <table> [--limit N]",
+            "Read a stream into the workspace",
+        ),
+        (".workspace / .ws", "Show workspace tables"),
+        (".clear [table]", "Clear one or all workspace tables"),
+        (".help / .h", "Show this help"),
+        (".quit / .exit / .q", "Exit the shell"),
     ];
 
     eprintln!();
@@ -567,7 +581,10 @@ fn require_source(state: &ReplState) -> Result<&ConnectedSource> {
         .ok_or_else(|| anyhow::anyhow!("No source connected. Use .source to connect first."))
 }
 
-fn find_stream<'a>(catalog: &'a Catalog, table: &str) -> Result<&'a rapidbyte_types::catalog::Stream> {
+fn find_stream<'a>(
+    catalog: &'a Catalog,
+    table: &str,
+) -> Result<&'a rapidbyte_types::catalog::Stream> {
     // Try exact match first.
     if let Some(stream) = catalog.streams.iter().find(|s| s.name == table) {
         return Ok(stream);
@@ -608,8 +625,8 @@ fn make_spinner(msg: &str) -> indicatif::ProgressBar {
         indicatif::ProgressStyle::with_template("{spinner:.cyan} {msg}")
             .unwrap()
             .tick_strings(&[
-                "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}",
-                "\u{2826}", "\u{2827}", "\u{2807}", "\u{280f}",
+                "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}",
+                "\u{2827}", "\u{2807}", "\u{280f}",
             ]),
     );
     spinner.enable_steady_tick(std::time::Duration::from_millis(80));

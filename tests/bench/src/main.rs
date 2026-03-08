@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
@@ -117,6 +118,7 @@ struct BenchContext {
     root: PathBuf,
     plugin_dir: PathBuf,
     results_file: PathBuf,
+    bench_session_id: String,
     host: String,
     port: u16,
     user: String,
@@ -145,12 +147,12 @@ impl Drop for BranchGuard {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        BenchCommand::Run(args) => run_command(args).await,
+        BenchCommand::Run(args) => run_command_with_session(args, None).await,
         BenchCommand::Compare(args) => compare_command(args).await,
     }
 }
 
-async fn run_command(args: RunArgs) -> Result<()> {
+async fn run_command_with_session(args: RunArgs, session_id: Option<String>) -> Result<()> {
     let root = repo_root()?;
     configure_build_env();
 
@@ -172,7 +174,7 @@ async fn run_command(args: RunArgs) -> Result<()> {
     let plugin_dir = stage_plugins(&root, build_mode)?;
     report_wasm_sizes(&plugin_dir)?;
 
-    let context = init_context(root.clone(), plugin_dir).await?;
+    let context = init_context(root.clone(), plugin_dir, session_id.unwrap_or_else(make_bench_session_id)).await?;
     let rows = args.rows.unwrap_or(args.profile.default_rows());
     let iters = args.iters.unwrap_or(3);
 
@@ -234,17 +236,23 @@ async fn compare_command(args: CompareArgs) -> Result<()> {
         cpu_profile: false,
     };
 
-    checkout_ref(&root, &args.ref1)?;
-    run_command(run_args.clone()).await?;
+    checkout_ref(&root, &sha1)?;
+    let compare_session_id = make_bench_session_id();
 
-    checkout_ref(&root, &args.ref2)?;
-    run_command(run_args).await?;
+    run_command_with_session(run_args.clone(), Some(compare_session_id.clone())).await?;
+
+    checkout_ref(&root, &sha2)?;
+    run_command_with_session(run_args, Some(compare_session_id.clone())).await?;
 
     let status = Command::new("python3")
-        .arg(root.join("tests/tests/bench/analyze.py"))
+        .arg(root.join("tests/bench/analyze.py"))
+        .arg("--session-id")
+        .arg(&compare_session_id)
         .arg("--sha")
         .arg(sha1)
         .arg(sha2)
+        .arg("--profile")
+        .arg(args.profile.as_str())
         .status()
         .context("failed to run tests/bench/analyze.py")?;
     if !status.success() {
@@ -331,12 +339,30 @@ fn stage_plugins(root: &Path, mode: &str) -> Result<PathBuf> {
 
     let wasm_dir = format!("wasm32-wasip2/{mode}");
     let mappings = [
-        ("sources/postgres", "source_postgres.wasm", "postgres.wasm", "sources"),
-        ("destinations/postgres", "dest_postgres.wasm", "postgres.wasm", "destinations"),
-        ("transforms/sql", "transform_sql.wasm", "sql.wasm", "transforms"),
+        (
+            "sources/postgres",
+            "source_postgres.wasm",
+            "postgres.wasm",
+            "sources",
+            "source_postgres.wasm",
+        ),
+        (
+            "destinations/postgres",
+            "dest_postgres.wasm",
+            "postgres.wasm",
+            "destinations",
+            "dest_postgres.wasm",
+        ),
+        (
+            "transforms/sql",
+            "transform_sql.wasm",
+            "sql.wasm",
+            "transforms",
+            "transform_sql.wasm",
+        ),
     ];
 
-    for (subpath, file_name, output_name, kind_subdir) in mappings {
+    for (subpath, file_name, output_name, kind_subdir, legacy_name) in mappings {
         let kind_dir = output_dir.join(kind_subdir);
         fs::create_dir_all(&kind_dir)
             .with_context(|| format!("failed to create {}", kind_dir.display()))?;
@@ -355,6 +381,14 @@ fn stage_plugins(root: &Path, mode: &str) -> Result<PathBuf> {
                 dest.display()
             )
         })?;
+        let legacy_dest = output_dir.join(legacy_name);
+        fs::copy(&src, &legacy_dest).with_context(|| {
+            format!(
+                "failed to stage legacy connector wasm {} -> {}",
+                src.display(),
+                legacy_dest.display()
+            )
+        })?;
 
         if mode == "release" {
             let strip = root.join("scripts/strip-wasm.sh");
@@ -365,6 +399,14 @@ fn stage_plugins(root: &Path, mode: &str) -> Result<PathBuf> {
                         .arg(&dest)
                         .status()
                         .with_context(|| format!("failed to strip {}", dest.display()))?,
+                    "wasm strip failed",
+                )?;
+                ensure_success(
+                    Command::new(&strip)
+                        .arg(&legacy_dest)
+                        .arg(&legacy_dest)
+                        .status()
+                        .with_context(|| format!("failed to strip {}", legacy_dest.display()))?,
                     "wasm strip failed",
                 )?;
             }
@@ -404,7 +446,11 @@ fn report_wasm_sizes(plugin_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn init_context(root: PathBuf, plugin_dir: PathBuf) -> Result<BenchContext> {
+async fn init_context(
+    root: PathBuf,
+    plugin_dir: PathBuf,
+    bench_session_id: String,
+) -> Result<BenchContext> {
     let port = shared_postgres_port()?;
     let results_dir = root.join("target/bench_results");
     fs::create_dir_all(&results_dir).context("failed to create target/bench_results")?;
@@ -413,6 +459,7 @@ async fn init_context(root: PathBuf, plugin_dir: PathBuf) -> Result<BenchContext
         root,
         plugin_dir,
         results_file: results_dir.join("results.jsonl"),
+        bench_session_id,
         host: "127.0.0.1".to_string(),
         port,
         user: "postgres".to_string(),
@@ -495,6 +542,7 @@ fn run_pipeline_once(
         .arg("--log-level")
         .arg("warn")
         .env("RAPIDBYTE_PLUGIN_DIR", &context.plugin_dir)
+        .env("RAPIDBYTE_CONNECTOR_DIR", &context.plugin_dir)
         .env("RAPIDBYTE_WASMTIME_AOT", if aot { "1" } else { "0" })
         .env("RAPIDBYTE_BENCH", "1")
         .output()
@@ -589,8 +637,20 @@ fn enrich_result(
         "profile".to_string(),
         JsonValue::String(profile.as_str().to_string()),
     );
+    obj.insert(
+        "bench_session_id".to_string(),
+        JsonValue::String(context.bench_session_id.clone()),
+    );
 
     Ok(JsonValue::Object(Map::from_iter(obj.clone())))
+}
+
+fn make_bench_session_id() -> String {
+    let epoch_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("bench-{}-{}", std::process::id(), epoch_nanos)
 }
 
 fn now_iso8601() -> String {
@@ -758,6 +818,8 @@ fn run_cpu_profile(root: &Path, rows: u32) -> Result<()> {
             .arg(root.join("tests/bench/fixtures/pipelines/bench_pg.yaml"))
             .arg("--log-level")
             .arg("warn")
+            .env("RAPIDBYTE_PLUGIN_DIR", root.join("target/plugins"))
+            .env("RAPIDBYTE_CONNECTOR_DIR", root.join("target/plugins"))
             .status()
             .context("failed to run samply record")?,
         "profiling run failed",

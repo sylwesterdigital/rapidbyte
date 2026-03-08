@@ -6,12 +6,11 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use chrono::Utc;
-use tokio::sync::mpsc;
 use wasmtime::component::ResourceTable;
 use wasmtime::StoreLimits;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
@@ -45,7 +44,10 @@ pub const DEFAULT_DLQ_LIMIT: usize = 10_000;
 /// Channel frame type for batch routing between plugin stages.
 pub enum Frame {
     /// IPC-encoded Arrow `RecordBatch` (optionally compressed).
-    Data(bytes::Bytes),
+    Data {
+        payload: bytes::Bytes,
+        checkpoint_id: u64,
+    },
     /// End-of-stream marker.
     EndStream,
 }
@@ -75,15 +77,17 @@ pub struct HostTimings {
 
 pub(crate) struct PluginIdentity {
     pub pipeline: PipelineId,
-    pub plugin_id: String,
+    pub plugin_instance_key: String,
     pub stream: StreamName,
     pub state_backend: Arc<dyn StateBackend>,
 }
 
 pub(crate) struct BatchRouter {
-    pub sender: Option<mpsc::Sender<Frame>>,
+    pub sender: Option<mpsc::SyncSender<Frame>>,
     pub receiver: Option<mpsc::Receiver<Frame>>,
     pub next_batch_id: u64,
+    pub current_checkpoint_id: Option<u64>,
+    pub last_emitted_checkpoint_id: Option<u64>,
     pub compression: Option<CompressionCodec>,
     /// Optional callback invoked after each `emit-batch` with the payload byte size.
     pub on_emit: Option<Arc<dyn Fn(u64) + Send + Sync>>,
@@ -121,9 +125,10 @@ pub struct ComponentHostState {
 pub struct HostStateBuilder {
     pipeline: Option<String>,
     plugin_id: Option<String>,
+    plugin_instance_key: Option<String>,
     stream: Option<String>,
     state_backend: Option<Arc<dyn StateBackend>>,
-    sender: Option<mpsc::Sender<Frame>>,
+    sender: Option<mpsc::SyncSender<Frame>>,
     receiver: Option<mpsc::Receiver<Frame>>,
     source_checkpoints: Option<Arc<Mutex<Vec<Checkpoint>>>>,
     dest_checkpoints: Option<Arc<Mutex<Vec<Checkpoint>>>>,
@@ -142,6 +147,7 @@ impl HostStateBuilder {
         Self {
             pipeline: None,
             plugin_id: None,
+            plugin_instance_key: None,
             stream: None,
             state_backend: None,
             sender: None,
@@ -172,6 +178,12 @@ impl HostStateBuilder {
     }
 
     #[must_use]
+    pub fn plugin_instance_key(mut self, key: impl Into<String>) -> Self {
+        self.plugin_instance_key = Some(key.into());
+        self
+    }
+
+    #[must_use]
     pub fn stream(mut self, name: impl Into<String>) -> Self {
         self.stream = Some(name.into());
         self
@@ -184,7 +196,7 @@ impl HostStateBuilder {
     }
 
     #[must_use]
-    pub fn sender(mut self, tx: mpsc::Sender<Frame>) -> Self {
+    pub fn sender(mut self, tx: mpsc::SyncSender<Frame>) -> Self {
         self.sender = Some(tx);
         self
     }
@@ -268,6 +280,9 @@ impl HostStateBuilder {
         let plugin_id = self
             .plugin_id
             .ok_or_else(|| anyhow::anyhow!("plugin_id is required"))?;
+        let plugin_instance_key = self
+            .plugin_instance_key
+            .unwrap_or_else(|| plugin_id.clone());
         let stream = self
             .stream
             .ok_or_else(|| anyhow::anyhow!("stream is required"))?;
@@ -278,7 +293,7 @@ impl HostStateBuilder {
         Ok(ComponentHostState {
             identity: PluginIdentity {
                 pipeline: PipelineId::new(pipeline),
-                plugin_id,
+                plugin_instance_key,
                 stream: StreamName::new(stream),
                 state_backend,
             },
@@ -286,6 +301,8 @@ impl HostStateBuilder {
                 sender: self.sender,
                 receiver: self.receiver,
                 next_batch_id: 1,
+                current_checkpoint_id: None,
+                last_emitted_checkpoint_id: None,
                 compression: self.compression,
                 on_emit: self.on_emit,
             },
@@ -332,6 +349,25 @@ impl ComponentHostState {
 
     fn current_stream(&self) -> &str {
         self.identity.stream.as_str()
+    }
+
+    fn next_checkpoint_frontier(&mut self) -> u64 {
+        if let Some(checkpoint_id) = self.batch.current_checkpoint_id {
+            return checkpoint_id;
+        }
+
+        let checkpoint_id = self.batch.next_batch_id;
+        self.batch.next_batch_id += 1;
+        checkpoint_id
+    }
+
+    fn checkpoint_frontier_for(&self, kind: CheckpointKind) -> u64 {
+        match kind {
+            CheckpointKind::Source => self.batch.last_emitted_checkpoint_id.unwrap_or(0),
+            CheckpointKind::Dest | CheckpointKind::Transform => {
+                self.batch.current_checkpoint_id.unwrap_or(0)
+            }
+        }
     }
 
     // ── Frame lifecycle host imports ────────────────────────────────
@@ -414,22 +450,26 @@ impl ComponentHostState {
                 (payload, 0)
             };
 
-        let sender =
-            self.batch.sender.as_ref().ok_or_else(|| {
-                PluginError::internal("NO_SENDER", "No batch sender configured")
-            })?;
-
         let payload_len = payload.len() as u64;
+        let checkpoint_id = self.next_checkpoint_frontier();
+        let sender = self
+            .batch
+            .sender
+            .as_ref()
+            .ok_or_else(|| PluginError::internal("NO_SENDER", "No batch sender configured"))?;
 
         sender
-            .blocking_send(Frame::Data(payload))
+            .send(Frame::Data {
+                payload,
+                checkpoint_id,
+            })
             .map_err(|e| PluginError::internal("CHANNEL_SEND", e.to_string()))?;
 
         if let Some(cb) = &self.batch.on_emit {
             cb(payload_len);
         }
 
-        self.batch.next_batch_id += 1;
+        self.batch.last_emitted_checkpoint_id = Some(checkpoint_id);
 
         let mut t = lock_mutex(&self.checkpoints.timings, "timings")?;
         t.emit_batch_nanos += fn_start.elapsed().as_nanos() as u64;
@@ -443,18 +483,25 @@ impl ComponentHostState {
     pub(crate) fn next_batch_impl(&mut self) -> Result<Option<u64>, PluginError> {
         let fn_start = Instant::now();
 
-        let receiver = self.batch.receiver.as_mut().ok_or_else(|| {
-            PluginError::internal("NO_RECEIVER", "No batch receiver configured")
-        })?;
+        let receiver =
+            self.batch.receiver.as_mut().ok_or_else(|| {
+                PluginError::internal("NO_RECEIVER", "No batch receiver configured")
+            })?;
 
         let wait_start = Instant::now();
-        let Some(frame) = receiver.blocking_recv() else {
+        let Ok(frame) = receiver.recv() else {
             return Ok(None);
         };
         let wait_elapsed_nanos = wait_start.elapsed().as_nanos() as u64;
 
         let payload = match frame {
-            Frame::Data(payload) => payload,
+            Frame::Data {
+                payload,
+                checkpoint_id,
+            } => {
+                self.batch.current_checkpoint_id = Some(checkpoint_id);
+                payload
+            }
             Frame::EndStream => return Ok(None),
         };
 
@@ -487,7 +534,9 @@ impl ComponentHostState {
         match scope {
             StateScope::Pipeline => key.to_string(),
             StateScope::Stream => format!("{}:{}", self.current_stream(), key),
-            StateScope::PluginInstance => format!("{}:{}", self.identity.plugin_id, key),
+            StateScope::PluginInstance => {
+                format!("{}:{}", self.identity.plugin_instance_key, key)
+            }
         }
     }
 
@@ -580,16 +629,17 @@ impl ComponentHostState {
                 .unwrap_or(serde_json::Value::Object(map)),
             other => other,
         };
+
+        let mut cp: Checkpoint = serde_json::from_value(payload)
+            .map_err(|e| PluginError::internal("PARSE_CHECKPOINT", e.to_string()))?;
+        cp.id = self.checkpoint_frontier_for(checkpoint_kind);
+
         match checkpoint_kind {
             CheckpointKind::Source => {
-                if let Ok(cp) = serde_json::from_value::<Checkpoint>(payload) {
-                    lock_mutex(&self.checkpoints.source, "source_checkpoints")?.push(cp);
-                }
+                lock_mutex(&self.checkpoints.source, "source_checkpoints")?.push(cp);
             }
             CheckpointKind::Dest => {
-                if let Ok(cp) = serde_json::from_value::<Checkpoint>(payload) {
-                    lock_mutex(&self.checkpoints.dest, "dest_checkpoints")?.push(cp);
-                }
+                lock_mutex(&self.checkpoints.dest, "dest_checkpoints")?.push(cp);
             }
             CheckpointKind::Transform => {
                 tracing::debug!(
@@ -660,11 +710,7 @@ impl ComponentHostState {
     }
 
     #[allow(clippy::cast_possible_truncation)]
-    pub(crate) fn connect_tcp_impl(
-        &mut self,
-        host: String,
-        port: u16,
-    ) -> Result<u64, PluginError> {
+    pub(crate) fn connect_tcp_impl(&mut self, host: String, port: u16) -> Result<u64, PluginError> {
         if !self.sockets.acl.allows(&host) {
             return Err(PluginError::permission(
                 "NETWORK_DENIED",
@@ -672,9 +718,8 @@ impl ComponentHostState {
             ));
         }
 
-        let addrs = resolve_socket_addrs(&host, port).map_err(|e| {
-            PluginError::transient_network("DNS_RESOLUTION_FAILED", e.to_string())
-        })?;
+        let addrs = resolve_socket_addrs(&host, port)
+            .map_err(|e| PluginError::transient_network("DNS_RESOLUTION_FAILED", e.to_string()))?;
 
         let mut last_error: Option<(SocketAddr, std::io::Error)> = None;
         let mut connected: Option<TcpStream> = None;
@@ -728,10 +773,11 @@ impl ComponentHostState {
         handle: u64,
         len: u64,
     ) -> Result<SocketReadResult, PluginError> {
-        let entry =
-            self.sockets.sockets.get_mut(&handle).ok_or_else(|| {
-                PluginError::internal("INVALID_SOCKET", "Invalid socket handle")
-            })?;
+        let entry = self
+            .sockets
+            .sockets
+            .get_mut(&handle)
+            .ok_or_else(|| PluginError::internal("INVALID_SOCKET", "Invalid socket handle"))?;
 
         let read_len = len.clamp(1, MAX_SOCKET_READ_BYTES) as usize;
         let mut buf = vec![0u8; read_len];
@@ -802,10 +848,11 @@ impl ComponentHostState {
         handle: u64,
         data: Vec<u8>,
     ) -> Result<SocketWriteResult, PluginError> {
-        let entry =
-            self.sockets.sockets.get_mut(&handle).ok_or_else(|| {
-                PluginError::internal("INVALID_SOCKET", "Invalid socket handle")
-            })?;
+        let entry = self
+            .sockets
+            .sockets
+            .get_mut(&handle)
+            .ok_or_else(|| PluginError::internal("INVALID_SOCKET", "Invalid socket handle"))?;
 
         match entry.stream.write(&data) {
             Ok(n) => {
@@ -962,7 +1009,7 @@ mod tests {
     fn builder_creates_valid_state() {
         let host = test_host_state();
         assert_eq!(host.identity.pipeline.as_str(), "test-pipeline");
-        assert_eq!(host.identity.plugin_id, "postgres");
+        assert_eq!(host.identity.plugin_instance_key, "postgres");
         assert_eq!(host.current_stream(), "users");
     }
 
@@ -1026,6 +1073,23 @@ mod tests {
     }
 
     #[test]
+    fn scoped_state_key_plugin_scope_uses_instance_key() {
+        let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
+        let host = ComponentHostState::builder()
+            .pipeline("p")
+            .plugin_id("postgres")
+            .plugin_instance_key("destination:postgres:users:p0")
+            .stream("users")
+            .state_backend(state)
+            .build()
+            .unwrap();
+        assert_eq!(
+            host.scoped_state_key(StateScope::PluginInstance, "offset"),
+            "destination:postgres:users:p0:offset"
+        );
+    }
+
+    #[test]
     fn error_category_from_str_known() {
         assert_eq!("config".parse::<ErrorCategory>(), Ok(ErrorCategory::Config));
         assert_eq!("schema".parse::<ErrorCategory>(), Ok(ErrorCategory::Schema));
@@ -1040,10 +1104,51 @@ mod tests {
     fn frame_data_holds_bytes() {
         use bytes::Bytes;
         let payload = Bytes::from_static(b"test-ipc-payload");
-        let frame = Frame::Data(payload.clone());
+        let frame = Frame::Data {
+            payload: payload.clone(),
+            checkpoint_id: 7,
+        };
         match frame {
-            Frame::Data(b) => assert_eq!(b, payload),
+            Frame::Data {
+                payload: b,
+                checkpoint_id,
+            } => {
+                assert_eq!(b, payload);
+                assert_eq!(checkpoint_id, 7);
+            }
             Frame::EndStream => panic!("expected Data"),
         }
+    }
+
+    #[test]
+    fn checkpoint_impl_rewrites_source_checkpoint_id_from_frontier() {
+        let mut host = test_host_state();
+        host.batch.last_emitted_checkpoint_id = Some(42);
+
+        let cp = Checkpoint {
+            id: 999,
+            kind: CheckpointKind::Source,
+            stream: "users".to_string(),
+            cursor_field: Some("id".to_string()),
+            cursor_value: Some(rapidbyte_types::cursor::CursorValue::Utf8 {
+                value: "42".to_string(),
+            }),
+            records_processed: 10,
+            bytes_processed: 100,
+        };
+
+        host.checkpoint_impl(0, serde_json::to_string(&cp).unwrap())
+            .unwrap();
+
+        let checkpoints = host.checkpoints.source.lock().unwrap();
+        assert_eq!(checkpoints.len(), 1);
+        assert_eq!(checkpoints[0].id, 42);
+    }
+
+    #[test]
+    fn checkpoint_impl_rejects_malformed_payload() {
+        let mut host = test_host_state();
+        let result = host.checkpoint_impl(0, r#"{"payload":{"stream":1}}"#.to_string());
+        assert!(result.is_err());
     }
 }

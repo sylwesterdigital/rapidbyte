@@ -26,6 +26,7 @@ fn bench_run_lifecycle(c: &mut Criterion) {
                         records_read: 1000,
                         records_written: 1000,
                         bytes_read: 50000,
+                        bytes_written: 50000,
                         error_message: None,
                     },
                 )

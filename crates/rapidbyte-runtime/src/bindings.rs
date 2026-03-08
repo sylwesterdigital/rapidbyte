@@ -61,13 +61,11 @@ macro_rules! for_each_world {
 
 macro_rules! define_error_converters {
     ($to_world_fn:ident, $from_world_fn:ident, $module:ident) => {
-        fn $to_world_fn(
-            error: PluginError,
-        ) -> $module::rapidbyte::plugin::types::PluginError {
+        fn $to_world_fn(error: PluginError) -> $module::rapidbyte::plugin::types::PluginError {
             use $module::rapidbyte::plugin::types::{
                 BackoffClass as CBackoffClass, CommitState as CCommitState,
-                PluginError as CPluginError, ErrorCategory as CErrorCategory,
-                ErrorScope as CErrorScope,
+                ErrorCategory as CErrorCategory, ErrorScope as CErrorScope,
+                PluginError as CPluginError,
             };
 
             CPluginError {
@@ -115,9 +113,7 @@ macro_rules! define_error_converters {
                     $module::rapidbyte::plugin::types::ErrorCategory::Config => {
                         ErrorCategory::Config
                     }
-                    $module::rapidbyte::plugin::types::ErrorCategory::Auth => {
-                        ErrorCategory::Auth
-                    }
+                    $module::rapidbyte::plugin::types::ErrorCategory::Auth => ErrorCategory::Auth,
                     $module::rapidbyte::plugin::types::ErrorCategory::Permission => {
                         ErrorCategory::Permission
                     }
@@ -130,27 +126,19 @@ macro_rules! define_error_converters {
                     $module::rapidbyte::plugin::types::ErrorCategory::TransientDb => {
                         ErrorCategory::TransientDb
                     }
-                    $module::rapidbyte::plugin::types::ErrorCategory::Data => {
-                        ErrorCategory::Data
-                    }
+                    $module::rapidbyte::plugin::types::ErrorCategory::Data => ErrorCategory::Data,
                     $module::rapidbyte::plugin::types::ErrorCategory::Schema => {
                         ErrorCategory::Schema
                     }
                     $module::rapidbyte::plugin::types::ErrorCategory::Internal => {
                         ErrorCategory::Internal
                     }
-                    $module::rapidbyte::plugin::types::ErrorCategory::Frame => {
-                        ErrorCategory::Frame
-                    }
+                    $module::rapidbyte::plugin::types::ErrorCategory::Frame => ErrorCategory::Frame,
                 },
                 scope: match error.scope {
-                    $module::rapidbyte::plugin::types::ErrorScope::PerStream => {
-                        ErrorScope::Stream
-                    }
+                    $module::rapidbyte::plugin::types::ErrorScope::PerStream => ErrorScope::Stream,
                     $module::rapidbyte::plugin::types::ErrorScope::PerBatch => ErrorScope::Batch,
-                    $module::rapidbyte::plugin::types::ErrorScope::PerRecord => {
-                        ErrorScope::Record
-                    }
+                    $module::rapidbyte::plugin::types::ErrorScope::PerRecord => ErrorScope::Record,
                 },
                 code: error.code.into(),
                 message: error.message,
@@ -158,9 +146,7 @@ macro_rules! define_error_converters {
                 retry_after_ms: error.retry_after_ms,
                 backoff_class: match error.backoff_class {
                     $module::rapidbyte::plugin::types::BackoffClass::Fast => BackoffClass::Fast,
-                    $module::rapidbyte::plugin::types::BackoffClass::Normal => {
-                        BackoffClass::Normal
-                    }
+                    $module::rapidbyte::plugin::types::BackoffClass::Normal => BackoffClass::Normal,
                     $module::rapidbyte::plugin::types::BackoffClass::Slow => BackoffClass::Slow,
                 },
                 safe_to_retry: error.safe_to_retry,
@@ -195,10 +181,8 @@ macro_rules! impl_host_trait_for_world {
 
             fn next_batch(
                 &mut self,
-            ) -> std::result::Result<
-                Option<u64>,
-                $module::rapidbyte::plugin::types::PluginError,
-            > {
+            ) -> std::result::Result<Option<u64>, $module::rapidbyte::plugin::types::PluginError>
+            {
                 self.next_batch_impl().map_err($to_world_error)
             }
 
@@ -237,10 +221,8 @@ macro_rules! impl_host_trait_for_world {
                 &mut self,
                 scope: u32,
                 key: String,
-            ) -> std::result::Result<
-                Option<String>,
-                $module::rapidbyte::plugin::types::PluginError,
-            > {
+            ) -> std::result::Result<Option<String>, $module::rapidbyte::plugin::types::PluginError>
+            {
                 self.state_get_impl(scope, key).map_err($to_world_error)
             }
 
@@ -260,8 +242,7 @@ macro_rules! impl_host_trait_for_world {
                 key: String,
                 expected: Option<String>,
                 new_val: String,
-            ) -> std::result::Result<bool, $module::rapidbyte::plugin::types::PluginError>
-            {
+            ) -> std::result::Result<bool, $module::rapidbyte::plugin::types::PluginError> {
                 self.state_cas_impl(scope, key, expected, new_val)
                     .map_err($to_world_error)
             }
@@ -269,8 +250,7 @@ macro_rules! impl_host_trait_for_world {
             fn frame_new(
                 &mut self,
                 capacity: u64,
-            ) -> std::result::Result<u64, $module::rapidbyte::plugin::types::PluginError>
-            {
+            ) -> std::result::Result<u64, $module::rapidbyte::plugin::types::PluginError> {
                 Ok(self.frame_new_impl(capacity))
             }
 
@@ -278,8 +258,7 @@ macro_rules! impl_host_trait_for_world {
                 &mut self,
                 handle: u64,
                 chunk: Vec<u8>,
-            ) -> std::result::Result<u64, $module::rapidbyte::plugin::types::PluginError>
-            {
+            ) -> std::result::Result<u64, $module::rapidbyte::plugin::types::PluginError> {
                 self.frame_write_impl(handle, chunk)
                     .map_err($to_world_error)
             }
@@ -294,8 +273,7 @@ macro_rules! impl_host_trait_for_world {
             fn frame_len(
                 &mut self,
                 handle: u64,
-            ) -> std::result::Result<u64, $module::rapidbyte::plugin::types::PluginError>
-            {
+            ) -> std::result::Result<u64, $module::rapidbyte::plugin::types::PluginError> {
                 self.frame_len_impl(handle).map_err($to_world_error)
             }
 
@@ -304,8 +282,7 @@ macro_rules! impl_host_trait_for_world {
                 handle: u64,
                 offset: u64,
                 len: u64,
-            ) -> std::result::Result<Vec<u8>, $module::rapidbyte::plugin::types::PluginError>
-            {
+            ) -> std::result::Result<Vec<u8>, $module::rapidbyte::plugin::types::PluginError> {
                 self.frame_read_impl(handle, offset, len)
                     .map_err($to_world_error)
             }
@@ -318,8 +295,7 @@ macro_rules! impl_host_trait_for_world {
                 &mut self,
                 host: String,
                 port: u16,
-            ) -> std::result::Result<u64, $module::rapidbyte::plugin::types::PluginError>
-            {
+            ) -> std::result::Result<u64, $module::rapidbyte::plugin::types::PluginError> {
                 self.connect_tcp_impl(host, port).map_err($to_world_error)
             }
 

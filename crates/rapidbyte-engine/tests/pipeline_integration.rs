@@ -114,6 +114,7 @@ fn test_state_backend_full_lifecycle() {
                 records_read: 100,
                 records_written: 100,
                 bytes_read: 5000,
+                bytes_written: 5000,
                 error_message: None,
             },
         )
@@ -132,6 +133,7 @@ fn test_state_backend_full_lifecycle() {
                 records_read: 50,
                 records_written: 0,
                 bytes_read: 2500,
+                bytes_written: 0,
                 error_message: Some("Connection lost".to_string()),
             },
         )

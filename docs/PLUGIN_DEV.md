@@ -231,7 +231,7 @@ async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
     Ok((
         Self { config },
         PluginInfo {
-            protocol_version: ProtocolVersion::V4,
+            protocol_version: ProtocolVersion::V5,
             features: vec![],
             default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
         },
@@ -320,6 +320,18 @@ async fn read(
 
 In production plugins, the read loop typically uses server-side cursors and streams data in chunks, emitting multiple batches and respecting `stream.limits.max_batch_bytes`.
 
+For source plugins, `StreamContext` may also carry source-planning hints:
+
+- `partition_key`: optional full-refresh shard key chosen by pipeline config or
+  resolved by the host from table metadata.
+- `cursor.field`: incremental cursor field name.
+- `cursor.tie_breaker_field`: optional deterministic secondary key for
+  incremental resume when the main cursor is not unique.
+
+If a plugin uses timestamp cursors against PostgreSQL, preserve the database
+type in generated predicates: `timestamp` and `timestamptz` are not
+interchangeable.
+
 ### close
 
 Called at the end of the pipeline run. Clean up any resources.
@@ -363,7 +375,7 @@ async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
     Ok((
         Self { config },
         PluginInfo {
-            protocol_version: ProtocolVersion::V4,
+            protocol_version: ProtocolVersion::V5,
             features: vec![Feature::ExactlyOnce],
             default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
         },
@@ -441,7 +453,8 @@ For long-running writes, checkpoint periodically to allow resumption after failu
 
 ```rust
 let checkpoint = Checkpoint {
-    id: checkpoint_count + 1,
+    // Host rewrites this placeholder to the current batch frontier.
+    id: 0,
     kind: CheckpointKind::Dest,
     stream: stream.stream_name.clone(),
     cursor_field: None,
@@ -449,8 +462,11 @@ let checkpoint = Checkpoint {
     records_processed: total_rows,
     bytes_processed: total_bytes,
 };
-let _ = ctx.checkpoint(&checkpoint);
+ctx.checkpoint(&checkpoint)?;
 ```
+
+Emit the checkpoint only after the destination commit that makes the reported
+frontier durable.
 
 ### close
 
@@ -493,7 +509,7 @@ async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
     Ok((
         Self { config },
         PluginInfo {
-            protocol_version: ProtocolVersion::V4,
+            protocol_version: ProtocolVersion::V5,
             features: vec![],
             default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
         },
@@ -565,7 +581,11 @@ async fn transform(
 }
 ```
 
-The built-in `transform-sql` plugin uses Apache DataFusion to execute SQL queries on each batch. It registers incoming batches as a MemTable named `input`, runs the user's SQL, and emits the results.
+The built-in `transform-sql` plugin uses Apache DataFusion to execute SQL
+queries on each batch. It registers incoming batches as a MemTable named
+`input`, parses the query once during init, re-plans it per batch against the
+current `input` snapshot, and streams result batches downstream without calling
+`collect()`.
 
 ## 9. Networking
 

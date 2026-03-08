@@ -55,11 +55,9 @@ impl ArrowWorkspace {
                 .context("failed to deregister previous table")?;
         }
 
-        let mem_table = datafusion::datasource::MemTable::try_new(
-            Arc::clone(&schema),
-            vec![batches.clone()],
-        )
-        .context("failed to create MemTable")?;
+        let mem_table =
+            datafusion::datasource::MemTable::try_new(Arc::clone(&schema), vec![batches.clone()])
+                .context("failed to create MemTable")?;
 
         self.session
             .register_table(name, Arc::new(mem_table))

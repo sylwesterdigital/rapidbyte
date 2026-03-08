@@ -109,6 +109,7 @@ pub struct RunStats {
     pub records_read: u64,
     pub records_written: u64,
     pub bytes_read: u64,
+    pub bytes_written: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
 }
@@ -183,6 +184,7 @@ mod tests {
         assert_eq!(stats.records_read, 0);
         assert_eq!(stats.records_written, 0);
         assert_eq!(stats.bytes_read, 0);
+        assert_eq!(stats.bytes_written, 0);
         assert!(stats.error_message.is_none());
     }
 
