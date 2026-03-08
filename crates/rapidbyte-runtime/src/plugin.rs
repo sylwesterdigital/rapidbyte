@@ -139,6 +139,37 @@ mod tests {
     use super::*;
     use rapidbyte_types::manifest::{Permissions, ResourceLimits, Roles, SourceCapabilities};
     use rapidbyte_types::wire::{PluginKind, ProtocolVersion, SyncMode};
+    use std::sync::{LazyLock, Mutex};
+
+    static PLUGIN_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct PluginDirEnvGuard {
+        previous: Option<String>,
+    }
+
+    impl PluginDirEnvGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::var("RAPIDBYTE_PLUGIN_DIR").ok();
+            std::env::set_var("RAPIDBYTE_PLUGIN_DIR", path);
+            Self { previous }
+        }
+
+        fn set_missing(path: &str) -> Self {
+            let previous = std::env::var("RAPIDBYTE_PLUGIN_DIR").ok();
+            std::env::set_var("RAPIDBYTE_PLUGIN_DIR", path);
+            Self { previous }
+        }
+    }
+
+    impl Drop for PluginDirEnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_deref() {
+                std::env::set_var("RAPIDBYTE_PLUGIN_DIR", previous);
+            } else {
+                std::env::remove_var("RAPIDBYTE_PLUGIN_DIR");
+            }
+        }
+    }
 
     #[test]
     fn test_parse_plugin_ref_with_namespace_version() {
@@ -324,6 +355,7 @@ mod tests {
 
     #[test]
     fn test_resolve_plugin_path_with_kind_subdir() {
+        let _lock = PLUGIN_ENV_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir().join("rapidbyte_plugin_resolve_test");
         let sources_dir = tmp.join("sources");
         let dests_dir = tmp.join("destinations");
@@ -340,7 +372,7 @@ mod tests {
         std::fs::write(transforms_dir.join("transform_sql.wasm"), b"fake-wasm").unwrap();
 
         // Set env var to point to our temp dir
-        std::env::set_var("RAPIDBYTE_PLUGIN_DIR", &tmp);
+        let _env_guard = PluginDirEnvGuard::set(&tmp);
 
         let source_path = resolve_plugin_path("source-postgres", PluginKind::Source).unwrap();
         assert_eq!(source_path, sources_dir.join("source_postgres.wasm"));
@@ -350,37 +382,34 @@ mod tests {
 
         let transform_path = resolve_plugin_path("transform-sql", PluginKind::Transform).unwrap();
         assert_eq!(transform_path, transforms_dir.join("transform_sql.wasm"));
-
-        // Clean up
-        std::env::remove_var("RAPIDBYTE_PLUGIN_DIR");
         std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
     fn test_resolve_plugin_path_not_found() {
-        std::env::set_var("RAPIDBYTE_PLUGIN_DIR", "/nonexistent/path");
+        let _lock = PLUGIN_ENV_LOCK.lock().unwrap();
+        let _env_guard = PluginDirEnvGuard::set_missing("/nonexistent/path");
         let result = resolve_plugin_path("nonexistent-plugin", PluginKind::Source);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Plugin 'nonexistent-plugin'"));
         assert!(err_msg.contains("Source"));
-        std::env::remove_var("RAPIDBYTE_PLUGIN_DIR");
     }
 
     #[test]
     fn test_resolve_plugin_path_with_namespace_and_version() {
+        let _lock = PLUGIN_ENV_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir().join("rapidbyte_plugin_ns_test");
         let sources_dir = tmp.join("sources");
         std::fs::create_dir_all(&sources_dir).unwrap();
         std::fs::write(sources_dir.join("source_postgres.wasm"), b"fake-wasm").unwrap();
 
-        std::env::set_var("RAPIDBYTE_PLUGIN_DIR", &tmp);
+        let _env_guard = PluginDirEnvGuard::set(&tmp);
 
         let path =
             resolve_plugin_path("rapidbyte/source-postgres@v0.1.0", PluginKind::Source).unwrap();
         assert_eq!(path, sources_dir.join("source_postgres.wasm"));
 
-        std::env::remove_var("RAPIDBYTE_PLUGIN_DIR");
         std::fs::remove_dir_all(&tmp).ok();
     }
 
