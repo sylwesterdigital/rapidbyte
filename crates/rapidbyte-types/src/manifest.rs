@@ -147,6 +147,14 @@ impl ConnectorManifest {
             ConnectorRole::Transform => self.roles.transform.is_some(),
         }
     }
+
+    /// Check whether the source role declares a given feature.
+    pub fn has_source_feature(&self, feature: Feature) -> bool {
+        self.roles
+            .source
+            .as_ref()
+            .is_some_and(|s| s.features.contains(&feature))
+    }
 }
 
 #[cfg(test)]
@@ -216,5 +224,32 @@ mod tests {
         assert!(!p.network.allow_runtime_config_domains);
         assert!(p.fs.preopens.is_empty());
         assert!(p.env.allowed_vars.is_empty());
+    }
+
+    #[test]
+    fn manifest_has_source_feature() {
+        let manifest = ConnectorManifest {
+            id: "test/pg".to_string(),
+            name: "Test".to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            author: None,
+            license: None,
+            protocol_version: ProtocolVersion::V4,
+            roles: Roles {
+                source: Some(SourceCapabilities {
+                    supported_sync_modes: vec![SyncMode::FullRefresh],
+                    features: vec![Feature::PartitionedRead],
+                }),
+                destination: None,
+                transform: None,
+            },
+            permissions: Permissions::default(),
+            limits: ResourceLimits::default(),
+            config_schema: None,
+        };
+
+        assert!(manifest.has_source_feature(Feature::PartitionedRead));
+        assert!(!manifest.has_source_feature(Feature::Cdc));
     }
 }
