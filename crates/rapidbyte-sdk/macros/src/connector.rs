@@ -3,10 +3,94 @@
 //! Generates all WIT bindings, component glue, manifest embedding, and config
 //! schema embedding that previously required three separate declarative macros.
 
+use std::path::PathBuf;
+
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::{Ident, ItemStruct, Result};
+
+struct ManifestFeatures {
+    has_partitioned_read: bool,
+    has_cdc: bool,
+    has_bulk_load: bool,
+}
+
+fn read_manifest_features(role: &ConnectorRole) -> Option<ManifestFeatures> {
+    let out_dir = std::env::var("OUT_DIR").ok()?;
+    let path = PathBuf::from(out_dir).join("rapidbyte_manifest.json");
+    let json = std::fs::read_to_string(&path).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&json).ok()?;
+
+    let features_key = match role {
+        ConnectorRole::Source => "source",
+        ConnectorRole::Destination => "destination",
+        ConnectorRole::Transform => {
+            return Some(ManifestFeatures {
+                has_partitioned_read: false,
+                has_cdc: false,
+                has_bulk_load: false,
+            })
+        }
+    };
+
+    let features: Vec<String> = manifest
+        .get("roles")
+        .and_then(|r| r.get(features_key))
+        .and_then(|s| s.get("features"))
+        .and_then(|f| serde_json::from_value(f.clone()).ok())
+        .unwrap_or_default();
+
+    Some(ManifestFeatures {
+        has_partitioned_read: features.iter().any(|f| f == "partitioned_read"),
+        has_cdc: features.iter().any(|f| f == "cdc"),
+        has_bulk_load: features
+            .iter()
+            .any(|f| f == "bulk_load" || f == "bulk_load_copy"),
+    })
+}
+
+fn gen_feature_assertions(
+    role: &ConnectorRole,
+    struct_name: &Ident,
+    features: &ManifestFeatures,
+) -> TokenStream {
+    let mut assertions = Vec::new();
+
+    match role {
+        ConnectorRole::Source => {
+            if features.has_partitioned_read {
+                assertions.push(quote! {
+                    const _: () = {
+                        fn __assert_partitioned_source<T: ::rapidbyte_sdk::features::PartitionedSource>() {}
+                        fn __check() { __assert_partitioned_source::<#struct_name>(); }
+                    };
+                });
+            }
+            if features.has_cdc {
+                assertions.push(quote! {
+                    const _: () = {
+                        fn __assert_cdc_source<T: ::rapidbyte_sdk::features::CdcSource>() {}
+                        fn __check() { __assert_cdc_source::<#struct_name>(); }
+                    };
+                });
+            }
+        }
+        ConnectorRole::Destination => {
+            if features.has_bulk_load {
+                assertions.push(quote! {
+                    const _: () = {
+                        fn __assert_bulk_load_dest<T: ::rapidbyte_sdk::features::BulkLoadDestination>() {}
+                        fn __check() { __assert_bulk_load_dest::<#struct_name>(); }
+                    };
+                });
+            }
+        }
+        ConnectorRole::Transform => {}
+    }
+
+    quote! { #(#assertions)* }
+}
 
 /// The connector role parsed from the attribute argument.
 pub enum ConnectorRole {
@@ -53,10 +137,15 @@ pub fn expand(role: ConnectorRole, input: ItemStruct) -> Result<TokenStream> {
         ),
     };
 
+    let features = read_manifest_features(&role);
     let wit_bindings = gen_wit_bindings(world_name);
     let common = gen_common(struct_name);
-    let guest_impl = gen_guest_impl(&role, struct_name, &trait_path);
+    let guest_impl = gen_guest_impl(&role, struct_name, &trait_path, features.as_ref());
     let embeds = gen_embeds(struct_name, &trait_path);
+    let feature_assertions = features
+        .as_ref()
+        .map(|f| gen_feature_assertions(&role, struct_name, f))
+        .unwrap_or_default();
 
     Ok(quote! {
         #input
@@ -65,6 +154,7 @@ pub fn expand(role: ConnectorRole, input: ItemStruct) -> Result<TokenStream> {
         #common
         #guest_impl
 
+        #feature_assertions
         #bindings_mod::export!(RapidbyteComponent with_types_in #bindings_mod);
 
         #embeds
@@ -224,17 +314,18 @@ fn gen_guest_impl(
     role: &ConnectorRole,
     struct_name: &Ident,
     trait_path: &TokenStream,
+    features: Option<&ManifestFeatures>,
 ) -> TokenStream {
     let lifecycle = gen_lifecycle_methods(struct_name, trait_path);
 
     let (guest_trait_path, role_methods) = match role {
         ConnectorRole::Source => (
             quote! { __rb_bindings::exports::rapidbyte::connector::source::Guest },
-            gen_source_methods(struct_name, trait_path),
+            gen_source_methods(struct_name, trait_path, features),
         ),
         ConnectorRole::Destination => (
             quote! { __rb_bindings::exports::rapidbyte::connector::destination::Guest },
-            gen_dest_methods(struct_name, trait_path),
+            gen_dest_methods(struct_name, trait_path, features),
         ),
         ConnectorRole::Transform => (
             quote! { __rb_bindings::exports::rapidbyte::connector::transform::Guest },
@@ -305,7 +396,76 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
 }
 
 /// Generate source-specific methods: discover, run.
-fn gen_source_methods(struct_name: &Ident, trait_path: &TokenStream) -> TokenStream {
+fn gen_source_methods(
+    struct_name: &Ident,
+    trait_path: &TokenStream,
+    features: Option<&ManifestFeatures>,
+) -> TokenStream {
+    let read_dispatch = match features {
+        Some(f) if f.has_partitioned_read && f.has_cdc => {
+            quote! {
+                rt.block_on(async {
+                    if let Some(partition) = stream.partition_coordinates_typed() {
+                        <#struct_name as ::rapidbyte_sdk::features::PartitionedSource>::read_partition(
+                            conn, &ctx, stream, partition
+                        ).await
+                    } else if stream.sync_mode == ::rapidbyte_sdk::wire::SyncMode::Cdc {
+                        let resume = stream.cdc_resume_token().unwrap_or(
+                            ::rapidbyte_sdk::stream::CdcResumeToken {
+                                value: None,
+                                cursor_type: ::rapidbyte_sdk::cursor::CursorType::Utf8,
+                            }
+                        );
+                        <#struct_name as ::rapidbyte_sdk::features::CdcSource>::read_changes(
+                            conn, &ctx, stream, resume
+                        ).await
+                    } else {
+                        <#struct_name as #trait_path>::read(conn, &ctx, stream).await
+                    }
+                }).map_err(to_component_error)?
+            }
+        }
+        Some(f) if f.has_partitioned_read => {
+            quote! {
+                rt.block_on(async {
+                    if let Some(partition) = stream.partition_coordinates_typed() {
+                        <#struct_name as ::rapidbyte_sdk::features::PartitionedSource>::read_partition(
+                            conn, &ctx, stream, partition
+                        ).await
+                    } else {
+                        <#struct_name as #trait_path>::read(conn, &ctx, stream).await
+                    }
+                }).map_err(to_component_error)?
+            }
+        }
+        Some(f) if f.has_cdc => {
+            quote! {
+                rt.block_on(async {
+                    if stream.sync_mode == ::rapidbyte_sdk::wire::SyncMode::Cdc {
+                        let resume = stream.cdc_resume_token().unwrap_or(
+                            ::rapidbyte_sdk::stream::CdcResumeToken {
+                                value: None,
+                                cursor_type: ::rapidbyte_sdk::cursor::CursorType::Utf8,
+                            }
+                        );
+                        <#struct_name as ::rapidbyte_sdk::features::CdcSource>::read_changes(
+                            conn, &ctx, stream, resume
+                        ).await
+                    } else {
+                        <#struct_name as #trait_path>::read(conn, &ctx, stream).await
+                    }
+                }).map_err(to_component_error)?
+            }
+        }
+        _ => {
+            // No features or no manifest: original behavior
+            quote! {
+                rt.block_on(<#struct_name as #trait_path>::read(conn, &ctx, stream))
+                    .map_err(to_component_error)?
+            }
+        }
+    };
+
     quote! {
         fn discover(
             _session: u64,
@@ -343,9 +503,7 @@ fn gen_source_methods(struct_name: &Ident, trait_path: &TokenStream) -> TokenStr
             let mut state_ref = state_cell.borrow_mut();
             let conn = state_ref.as_mut().expect("Connector not opened");
 
-            let summary = rt
-                .block_on(<#struct_name as #trait_path>::read(conn, &ctx, stream))
-                .map_err(to_component_error)?;
+            let summary = #read_dispatch;
 
             Ok(__rb_bindings::rapidbyte::connector::types::RunSummary {
                 role: __rb_bindings::rapidbyte::connector::types::ConnectorRole::Source,
@@ -364,7 +522,27 @@ fn gen_source_methods(struct_name: &Ident, trait_path: &TokenStream) -> TokenStr
 }
 
 /// Generate destination-specific methods: run.
-fn gen_dest_methods(struct_name: &Ident, trait_path: &TokenStream) -> TokenStream {
+fn gen_dest_methods(
+    struct_name: &Ident,
+    trait_path: &TokenStream,
+    features: Option<&ManifestFeatures>,
+) -> TokenStream {
+    let write_dispatch = match features {
+        Some(f) if f.has_bulk_load => {
+            quote! {
+                rt.block_on(
+                    <#struct_name as ::rapidbyte_sdk::features::BulkLoadDestination>::write_bulk(conn, &ctx, stream)
+                ).map_err(to_component_error)?
+            }
+        }
+        _ => {
+            quote! {
+                rt.block_on(<#struct_name as #trait_path>::write(conn, &ctx, stream))
+                    .map_err(to_component_error)?
+            }
+        }
+    };
+
     quote! {
         fn run(
             _session: u64,
@@ -381,9 +559,7 @@ fn gen_dest_methods(struct_name: &Ident, trait_path: &TokenStream) -> TokenStrea
             let mut state_ref = state_cell.borrow_mut();
             let conn = state_ref.as_mut().expect("Connector not opened");
 
-            let summary = rt
-                .block_on(<#struct_name as #trait_path>::write(conn, &ctx, stream))
-                .map_err(to_component_error)?;
+            let summary = #write_dispatch;
 
             Ok(__rb_bindings::rapidbyte::connector::types::RunSummary {
                 role: __rb_bindings::rapidbyte::connector::types::ConnectorRole::Destination,
