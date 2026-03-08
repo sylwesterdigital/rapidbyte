@@ -1,11 +1,11 @@
 //! Pipeline orchestrator: resolves plugins, loads modules, executes streams, and finalizes state.
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc as sync_mpsc, Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::Result;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc as tokio_mpsc;
 use tokio::task::JoinSet;
 
 use rapidbyte_runtime::{
@@ -318,7 +318,7 @@ fn observe_dest_timing(maxima: &mut DestTimingMaxima, stream: &StreamResult) {
 }
 
 /// Type alias for the progress channel sender used throughout the orchestrator.
-type ProgressTx = Option<tokio::sync::mpsc::UnboundedSender<ProgressEvent>>;
+type ProgressTx = Option<tokio_mpsc::UnboundedSender<ProgressEvent>>;
 
 fn send_progress(tx: &ProgressTx, event: ProgressEvent) {
     if let Some(tx) = tx {
@@ -379,7 +379,7 @@ async fn collect_stream_task_results(
 pub async fn run_pipeline(
     config: &PipelineConfig,
     options: &ExecutionOptions,
-    progress_tx: Option<tokio::sync::mpsc::UnboundedSender<ProgressEvent>>,
+    progress_tx: Option<tokio_mpsc::UnboundedSender<ProgressEvent>>,
 ) -> Result<PipelineOutcome, PipelineError> {
     let max_retries = config.resources.max_retries;
     let mut attempt = 0u32;
@@ -998,8 +998,8 @@ async fn execute_streams(
 
             preflight_join_set.spawn(async move {
                 let _permit = permit;
-                let (tx, rx) = mpsc::channel::<Frame>(1);
-                tx.send(Frame::EndStream).await.map_err(|e| {
+                let (tx, rx) = sync_mpsc::sync_channel::<Frame>(1);
+                tx.send(Frame::EndStream).map_err(|e| {
                     PipelineError::Infrastructure(anyhow::anyhow!(
                         "Failed to prime destination preflight channel for stream '{stream_name}': {e}",
                     ))
@@ -1081,12 +1081,12 @@ async fn execute_streams(
             let num_t = transforms.len();
             let mut channels = Vec::with_capacity(num_t + 1);
             for _ in 0..=num_t {
-                channels.push(mpsc::channel::<Frame>(params.channel_capacity));
+                channels.push(sync_mpsc::sync_channel::<Frame>(params.channel_capacity));
             }
 
             let (mut senders, mut receivers): (
-                Vec<mpsc::Sender<Frame>>,
-                Vec<mpsc::Receiver<Frame>>,
+                Vec<sync_mpsc::SyncSender<Frame>>,
+                Vec<sync_mpsc::Receiver<Frame>>,
             ) = channels.into_iter().unzip();
 
             let source_tx = senders.remove(0);
@@ -1143,6 +1143,7 @@ async fn execute_streams(
                         &params_t.pipeline_name,
                         &t.plugin_id,
                         &t.plugin_version,
+                        i,
                         &t.config,
                         &stream_ctx_t,
                         t.permissions.as_ref(),
@@ -1156,8 +1157,9 @@ async fn execute_streams(
             if is_dry_run {
                 // Dry-run: collect frames instead of running destination plugin
                 let compression = params.compression;
-                let collector_handle =
-                    tokio::spawn(collect_dry_run_frames(dest_rx, dry_run_limit, compression));
+                let collector_handle = tokio::task::spawn_blocking(move || {
+                    collect_dry_run_frames(dest_rx, dry_run_limit, compression)
+                });
 
                 let src_result = src_handle.await.map_err(|e| {
                     PipelineError::Infrastructure(anyhow::anyhow!(
@@ -1452,6 +1454,7 @@ async fn finalize_run(
             records_read: aggregated.final_stats.records_read,
             records_written: aggregated.final_stats.records_written,
             bytes_read: aggregated.final_stats.bytes_read,
+            bytes_written: aggregated.final_stats.bytes_written,
             error_message: Some(format!("Stream error: {err}")),
         };
         tokio::task::spawn_blocking(move || {
@@ -1472,12 +1475,13 @@ async fn finalize_run(
                 &pipeline_id_for_dlq,
                 run_id,
                 &dlq_records,
-            );
+            )
         })
         .await
         .map_err(|e| {
             PipelineError::Infrastructure(anyhow::anyhow!("persist_dlq_records task panicked: {e}"))
-        })?;
+        })?
+        .map_err(|e| PipelineError::Infrastructure(e.into()))?;
 
         return Err(err);
     }
@@ -1491,20 +1495,6 @@ async fn finalize_run(
         - plugin_internal_secs)
         .max(0.0);
 
-    let state_for_complete = state.clone();
-    let complete_stats = RunStats {
-        records_read: aggregated.total_read_summary.records_read,
-        records_written: aggregated.total_write_summary.records_written,
-        bytes_read: aggregated.total_read_summary.bytes_read,
-        error_message: None,
-    };
-    tokio::task::spawn_blocking(move || {
-        state_for_complete.complete_run(run_id, RunStatus::Completed, &complete_stats)
-    })
-    .await
-    .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!("complete_run task panicked: {e}")))?
-    .map_err(|e| PipelineError::Infrastructure(e.into()))?;
-
     tracing::debug!(
         pipeline = config.pipeline,
         source_checkpoint_count = aggregated.source_checkpoints.len(),
@@ -1512,25 +1502,8 @@ async fn finalize_run(
         "About to correlate checkpoints"
     );
 
-    let state_for_cursor = state.clone();
-    let pipeline_id_for_cursor = pipeline_id.clone();
-    let source_checkpoints = std::mem::take(&mut aggregated.source_checkpoints);
-    let dest_checkpoints = std::mem::take(&mut aggregated.dest_checkpoints);
-    let cursors_advanced = tokio::task::spawn_blocking(move || {
-        correlate_and_persist_cursors(
-            state_for_cursor.as_ref(),
-            &pipeline_id_for_cursor,
-            &source_checkpoints,
-            &dest_checkpoints,
-        )
-    })
-    .await
-    .map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!(
-            "correlate_and_persist_cursors task panicked: {e}"
-        ))
-    })?
-    .map_err(PipelineError::Infrastructure)?;
+    let cursors_advanced =
+        finalize_successful_run_state(state.clone(), pipeline_id, run_id, &mut aggregated).await?;
     if cursors_advanced > 0 {
         tracing::info!(
             pipeline = config.pipeline,
@@ -1538,22 +1511,6 @@ async fn finalize_run(
             "Checkpoint coordination complete"
         );
     }
-
-    let state_for_dlq = state.clone();
-    let pipeline_id_for_dlq = pipeline_id.clone();
-    let dlq_records = std::mem::take(&mut aggregated.dlq_records);
-    tokio::task::spawn_blocking(move || {
-        crate::dlq::persist_dlq_records(
-            state_for_dlq.as_ref(),
-            &pipeline_id_for_dlq,
-            run_id,
-            &dlq_records,
-        );
-    })
-    .await
-    .map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!("persist_dlq_records task panicked: {e}"))
-    })?;
 
     let duration = start.elapsed();
     let src_perf = aggregated.total_read_summary.perf.as_ref();
@@ -1615,10 +1572,104 @@ async fn finalize_run(
     })
 }
 
+async fn complete_run_status(
+    state: Arc<dyn StateBackend>,
+    run_id: i64,
+    status: RunStatus,
+    stats: RunStats,
+) -> Result<(), PipelineError> {
+    tokio::task::spawn_blocking(move || state.complete_run(run_id, status, &stats))
+        .await
+        .map_err(|e| {
+            PipelineError::Infrastructure(anyhow::anyhow!("complete_run task panicked: {e}"))
+        })?
+        .map_err(|e| PipelineError::Infrastructure(e.into()))
+}
+
+async fn finalize_successful_run_state(
+    state: Arc<dyn StateBackend>,
+    pipeline_id: &PipelineId,
+    run_id: i64,
+    aggregated: &mut AggregatedStreamResults,
+) -> Result<u64, PipelineError> {
+    let state_for_cursor = state.clone();
+    let pipeline_id_for_cursor = pipeline_id.clone();
+    let source_checkpoints = std::mem::take(&mut aggregated.source_checkpoints);
+    let dest_checkpoints = std::mem::take(&mut aggregated.dest_checkpoints);
+    let cursor_result = tokio::task::spawn_blocking(move || {
+        correlate_and_persist_cursors(
+            state_for_cursor.as_ref(),
+            &pipeline_id_for_cursor,
+            &source_checkpoints,
+            &dest_checkpoints,
+        )
+    })
+    .await
+    .map_err(|e| {
+        PipelineError::Infrastructure(anyhow::anyhow!(
+            "correlate_and_persist_cursors task panicked: {e}"
+        ))
+    })?;
+
+    let cursors_advanced = match cursor_result {
+        Ok(cursors_advanced) => cursors_advanced,
+        Err(error) => {
+            let failed_stats = finalization_failed_stats(aggregated, &error.to_string());
+            let _ = complete_run_status(state, run_id, RunStatus::Failed, failed_stats).await;
+            return Err(PipelineError::Infrastructure(error));
+        }
+    };
+
+    let state_for_dlq = state.clone();
+    let pipeline_id_for_dlq = pipeline_id.clone();
+    let dlq_records = std::mem::take(&mut aggregated.dlq_records);
+    let dlq_result = tokio::task::spawn_blocking(move || {
+        crate::dlq::persist_dlq_records(
+            state_for_dlq.as_ref(),
+            &pipeline_id_for_dlq,
+            run_id,
+            &dlq_records,
+        )
+    })
+    .await
+    .map_err(|e| {
+        PipelineError::Infrastructure(anyhow::anyhow!("persist_dlq_records task panicked: {e}"))
+    })?;
+    if let Err(error) = dlq_result {
+        let failed_stats = finalization_failed_stats(aggregated, &error.to_string());
+        let _ = complete_run_status(state, run_id, RunStatus::Failed, failed_stats).await;
+        return Err(PipelineError::Infrastructure(error.into()));
+    }
+
+    let complete_stats = RunStats {
+        records_read: aggregated.total_read_summary.records_read,
+        records_written: aggregated.total_write_summary.records_written,
+        bytes_read: aggregated.total_read_summary.bytes_read,
+        bytes_written: aggregated.total_write_summary.bytes_written,
+        error_message: None,
+    };
+    complete_run_status(state, run_id, RunStatus::Completed, complete_stats).await?;
+
+    Ok(cursors_advanced)
+}
+
+fn finalization_failed_stats(
+    aggregated: &AggregatedStreamResults,
+    error_message: &str,
+) -> RunStats {
+    RunStats {
+        records_read: aggregated.total_read_summary.records_read,
+        records_written: aggregated.total_write_summary.records_written,
+        bytes_read: aggregated.total_read_summary.bytes_read,
+        bytes_written: aggregated.total_write_summary.bytes_written,
+        error_message: Some(format!("Post-run finalization failed: {error_message}")),
+    }
+}
+
 /// Collect frames from a channel, decode IPC, enforce row limit.
 /// Used in dry-run mode instead of the destination runner.
-async fn collect_dry_run_frames(
-    mut receiver: mpsc::Receiver<Frame>,
+fn collect_dry_run_frames(
+    receiver: sync_mpsc::Receiver<Frame>,
     limit: Option<u64>,
     compression: Option<rapidbyte_runtime::CompressionCodec>,
 ) -> Result<DryRunStreamResult, PipelineError> {
@@ -1626,7 +1677,7 @@ async fn collect_dry_run_frames(
     let mut total_rows: u64 = 0;
     let mut total_bytes: u64 = 0;
 
-    'recv: while let Some(frame) = receiver.recv().await {
+    'recv: while let Ok(frame) = receiver.recv() {
         let Frame::Data { payload: data, .. } = frame else {
             break 'recv;
         };
@@ -1910,48 +1961,46 @@ mod dry_run_tests {
         .unwrap()
     }
 
-    #[tokio::test]
-    async fn collect_dry_run_frames_basic() {
-        let (tx, rx) = mpsc::channel::<Frame>(16);
+    #[test]
+    fn collect_dry_run_frames_basic() {
+        let (tx, rx) = sync_mpsc::sync_channel::<Frame>(16);
         let batch = make_test_batch(5);
         let ipc = record_batch_to_ipc(&batch).unwrap();
         tx.send(Frame::Data {
             payload: bytes::Bytes::from(ipc),
             checkpoint_id: 1,
         })
-        .await
         .unwrap();
-        tx.send(Frame::EndStream).await.unwrap();
+        tx.send(Frame::EndStream).unwrap();
         drop(tx);
 
-        let result = collect_dry_run_frames(rx, None, None).await.unwrap();
+        let result = collect_dry_run_frames(rx, None, None).unwrap();
         assert_eq!(result.total_rows, 5);
         assert_eq!(result.batches.len(), 1);
     }
 
-    #[tokio::test]
-    async fn collect_dry_run_frames_with_limit() {
-        let (tx, rx) = mpsc::channel::<Frame>(16);
+    #[test]
+    fn collect_dry_run_frames_with_limit() {
+        let (tx, rx) = sync_mpsc::sync_channel::<Frame>(16);
         let batch = make_test_batch(100);
         let ipc = record_batch_to_ipc(&batch).unwrap();
         tx.send(Frame::Data {
             payload: bytes::Bytes::from(ipc),
             checkpoint_id: 1,
         })
-        .await
         .unwrap();
-        tx.send(Frame::EndStream).await.unwrap();
+        tx.send(Frame::EndStream).unwrap();
         drop(tx);
 
-        let result = collect_dry_run_frames(rx, Some(10), None).await.unwrap();
+        let result = collect_dry_run_frames(rx, Some(10), None).unwrap();
         assert_eq!(result.total_rows, 10);
         let total: usize = result.batches.iter().map(RecordBatch::num_rows).sum();
         assert_eq!(total, 10);
     }
 
-    #[tokio::test]
-    async fn collect_dry_run_frames_multiple_batches() {
-        let (tx, rx) = mpsc::channel::<Frame>(16);
+    #[test]
+    fn collect_dry_run_frames_multiple_batches() {
+        let (tx, rx) = sync_mpsc::sync_channel::<Frame>(16);
         for _ in 0..3 {
             let batch = make_test_batch(5);
             let ipc = record_batch_to_ipc(&batch).unwrap();
@@ -1959,13 +2008,12 @@ mod dry_run_tests {
                 payload: bytes::Bytes::from(ipc),
                 checkpoint_id: 1,
             })
-            .await
             .unwrap();
         }
-        tx.send(Frame::EndStream).await.unwrap();
+        tx.send(Frame::EndStream).unwrap();
         drop(tx);
 
-        let result = collect_dry_run_frames(rx, Some(12), None).await.unwrap();
+        let result = collect_dry_run_frames(rx, Some(12), None).unwrap();
         assert_eq!(result.total_rows, 12);
     }
 }
@@ -2535,5 +2583,239 @@ mod source_timing_maxima_tests {
         assert_eq!(maxima.query_secs, 2.0);
         assert_eq!(maxima.fetch_secs, 5.0);
         assert_eq!(maxima.arrow_encode_secs, 0.9);
+    }
+}
+
+#[cfg(test)]
+mod finalize_run_state_tests {
+    use super::*;
+    use rapidbyte_state::error::{Result as StateResult, StateError};
+    use rapidbyte_types::checkpoint::{Checkpoint, CheckpointKind};
+    use rapidbyte_types::cursor::CursorValue;
+    use rapidbyte_types::state::CursorState;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct TestStateBackend {
+        complete_statuses: Mutex<Vec<(RunStatus, Option<String>)>>,
+        cursor_written: AtomicBool,
+        fail_set_cursor: bool,
+        fail_insert_dlq: bool,
+    }
+
+    impl TestStateBackend {
+        fn new(fail_set_cursor: bool, fail_insert_dlq: bool) -> Self {
+            Self {
+                complete_statuses: Mutex::new(Vec::new()),
+                cursor_written: AtomicBool::new(false),
+                fail_set_cursor,
+                fail_insert_dlq,
+            }
+        }
+    }
+
+    impl StateBackend for TestStateBackend {
+        fn get_cursor(
+            &self,
+            _pipeline: &PipelineId,
+            _stream: &StreamName,
+        ) -> StateResult<Option<CursorState>> {
+            Ok(None)
+        }
+
+        fn set_cursor(
+            &self,
+            _pipeline: &PipelineId,
+            _stream: &StreamName,
+            _cursor: &CursorState,
+        ) -> StateResult<()> {
+            if self.fail_set_cursor {
+                return Err(StateError::backend(std::io::Error::other(
+                    "cursor write failed",
+                )));
+            }
+            self.cursor_written.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn start_run(&self, _pipeline: &PipelineId, _stream: &StreamName) -> StateResult<i64> {
+            Ok(1)
+        }
+
+        fn complete_run(
+            &self,
+            _run_id: i64,
+            status: RunStatus,
+            stats: &RunStats,
+        ) -> StateResult<()> {
+            self.complete_statuses
+                .lock()
+                .expect("complete statuses lock poisoned")
+                .push((status, stats.error_message.clone()));
+            Ok(())
+        }
+
+        fn compare_and_set(
+            &self,
+            _pipeline: &PipelineId,
+            _stream: &StreamName,
+            _expected: Option<&str>,
+            _new_value: &str,
+        ) -> StateResult<bool> {
+            Ok(true)
+        }
+
+        fn insert_dlq_records(
+            &self,
+            _pipeline: &PipelineId,
+            _run_id: i64,
+            _records: &[DlqRecord],
+        ) -> StateResult<u64> {
+            if self.fail_insert_dlq {
+                return Err(StateError::backend(std::io::Error::other(
+                    "dlq insert failed",
+                )));
+            }
+            Ok(0)
+        }
+    }
+
+    fn make_aggregated_results() -> AggregatedStreamResults {
+        AggregatedStreamResults {
+            total_read_summary: ReadSummary {
+                records_read: 10,
+                bytes_read: 100,
+                batches_emitted: 1,
+                checkpoint_count: 1,
+                records_skipped: 0,
+                perf: None,
+            },
+            total_write_summary: WriteSummary {
+                records_written: 10,
+                bytes_written: 100,
+                batches_written: 1,
+                checkpoint_count: 1,
+                records_failed: 0,
+                perf: None,
+            },
+            source_checkpoints: vec![Checkpoint {
+                id: 7,
+                kind: CheckpointKind::Source,
+                stream: "users".to_string(),
+                cursor_field: Some("id".to_string()),
+                cursor_value: Some(CursorValue::Int64 { value: 42 }),
+                records_processed: 10,
+                bytes_processed: 100,
+            }],
+            dest_checkpoints: vec![Checkpoint {
+                id: 7,
+                kind: CheckpointKind::Dest,
+                stream: "users".to_string(),
+                cursor_field: None,
+                cursor_value: None,
+                records_processed: 10,
+                bytes_processed: 100,
+            }],
+            src_timings: HostTimings::default(),
+            dst_timings: HostTimings::default(),
+            src_timing_maxima: SourceTimingMaxima::default(),
+            dst_timing_maxima: DestTimingMaxima::default(),
+            transform_durations: Vec::new(),
+            dlq_records: Vec::new(),
+            final_stats: RunStats::default(),
+            first_error: None,
+            dry_run_streams: Vec::new(),
+            stream_metrics: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_finalization_marks_run_completed_after_cursor_persist() {
+        let backend = Arc::new(TestStateBackend::new(false, false));
+        let mut aggregated = make_aggregated_results();
+
+        let advanced = finalize_successful_run_state(
+            backend.clone(),
+            &PipelineId::new("p"),
+            1,
+            &mut aggregated,
+        )
+        .await
+        .expect("finalization should succeed");
+
+        assert_eq!(advanced, 1);
+        assert!(backend.cursor_written.load(Ordering::SeqCst));
+        assert_eq!(
+            backend
+                .complete_statuses
+                .lock()
+                .expect("complete statuses lock poisoned")
+                .as_slice(),
+            &[(RunStatus::Completed, None)]
+        );
+    }
+
+    #[tokio::test]
+    async fn cursor_finalization_failure_marks_run_failed_not_completed() {
+        let backend = Arc::new(TestStateBackend::new(true, false));
+        let mut aggregated = make_aggregated_results();
+
+        let result = finalize_successful_run_state(
+            backend.clone(),
+            &PipelineId::new("p"),
+            1,
+            &mut aggregated,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(!backend.cursor_written.load(Ordering::SeqCst));
+
+        let statuses = backend
+            .complete_statuses
+            .lock()
+            .expect("complete statuses lock poisoned");
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].0, RunStatus::Failed);
+        assert!(statuses[0]
+            .1
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Post-run finalization failed"));
+    }
+
+    #[tokio::test]
+    async fn dlq_finalization_failure_marks_run_failed_not_completed() {
+        let backend = Arc::new(TestStateBackend::new(false, true));
+        let mut aggregated = make_aggregated_results();
+        aggregated.dlq_records.push(DlqRecord {
+            stream_name: "users".to_string(),
+            record_json: "{\"id\":42}".to_string(),
+            error_message: "bad row".to_string(),
+            error_category: rapidbyte_types::error::ErrorCategory::Data,
+            failed_at: rapidbyte_types::envelope::Timestamp::new("2026-03-08T00:00:00Z"),
+        });
+
+        let result = finalize_successful_run_state(
+            backend.clone(),
+            &PipelineId::new("p"),
+            1,
+            &mut aggregated,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(backend.cursor_written.load(Ordering::SeqCst));
+
+        let statuses = backend
+            .complete_statuses
+            .lock()
+            .expect("complete statuses lock poisoned");
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].0, RunStatus::Failed);
+        assert!(statuses[0]
+            .1
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Post-run finalization failed"));
     }
 }

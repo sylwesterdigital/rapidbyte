@@ -10,7 +10,7 @@
 )]
 
 use std::io::IsTerminal;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 
 use anyhow::{Context, Result};
 use arrow::record_batch::RecordBatch;
@@ -196,7 +196,7 @@ async fn connect_source(
             );
 
             // Build host state for discover (no batch frames needed).
-            let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::channel::<Frame>(1);
+            let (dummy_tx, _dummy_rx) = mpsc::sync_channel::<Frame>(1);
             let mut builder = ComponentHostState::builder()
                 .pipeline("dev")
                 .plugin_id(&plugin_ref)
@@ -354,7 +354,7 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
     let spinner = make_spinner("Streaming...");
 
     let stream_result = tokio::task::spawn_blocking(move || -> Result<Vec<RecordBatch>> {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Frame>(64);
+        let (tx, rx) = mpsc::sync_channel::<Frame>(64);
 
         let state_backend = Arc::new(
             SqliteStateBackend::in_memory().context("Failed to create in-memory state backend")?,

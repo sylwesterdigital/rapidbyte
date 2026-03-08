@@ -1,10 +1,11 @@
 //! `PostgreSQL`-backed implementation of [`StateBackend`].
 //!
-//! Uses the sync `postgres` crate with a single `Mutex<Client>` for
+//! Uses the sync `postgres` crate with a small pooled set of `Client`s for
 //! thread safety. The `postgres` crate manages its own internal tokio
 //! runtime, so this works from any thread.
 
-use std::sync::{Mutex, MutexGuard};
+use std::ops::{Deref, DerefMut};
+use std::sync::{Condvar, Mutex};
 
 use chrono::Utc;
 use postgres::{Client, NoTls};
@@ -35,6 +36,7 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     records_read BIGINT DEFAULT 0,
     records_written BIGINT DEFAULT 0,
     bytes_read BIGINT DEFAULT 0,
+    bytes_written BIGINT DEFAULT 0,
     error_message TEXT
 );
 
@@ -53,12 +55,75 @@ CREATE TABLE IF NOT EXISTS dlq_records (
 CREATE INDEX IF NOT EXISTS idx_dlq_pipeline_run ON dlq_records (pipeline, run_id);
 "#;
 
+const MIGRATE_BYTES_WRITTEN: &str =
+    "ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS bytes_written BIGINT DEFAULT 0";
+
 /// `PostgreSQL`-backed state storage.
 ///
 /// Create with [`PostgresStateBackend::open`] providing a libpq-style
 /// connection string (e.g. `"host=localhost dbname=rapidbyte user=postgres"`).
 pub struct PostgresStateBackend {
-    client: Mutex<Client>,
+    pool: ClientPool,
+}
+
+struct ClientPool {
+    clients: Mutex<Vec<Client>>,
+    available: Condvar,
+}
+
+struct PooledClient<'a> {
+    pool: &'a ClientPool,
+    client: Option<Client>,
+}
+
+impl ClientPool {
+    fn new(clients: Vec<Client>) -> Self {
+        Self {
+            clients: Mutex::new(clients),
+            available: Condvar::new(),
+        }
+    }
+
+    fn checkout(&self) -> error::Result<PooledClient<'_>> {
+        let mut clients = self.clients.lock().map_err(|_| StateError::LockPoisoned)?;
+        loop {
+            if let Some(client) = clients.pop() {
+                return Ok(PooledClient {
+                    pool: self,
+                    client: Some(client),
+                });
+            }
+            clients = self
+                .available
+                .wait(clients)
+                .map_err(|_| StateError::LockPoisoned)?;
+        }
+    }
+}
+
+impl Deref for PooledClient<'_> {
+    type Target = Client;
+
+    fn deref(&self) -> &Self::Target {
+        self.client.as_ref().expect("pooled client missing")
+    }
+}
+
+impl DerefMut for PooledClient<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.client.as_mut().expect("pooled client missing")
+    }
+}
+
+impl Drop for PooledClient<'_> {
+    fn drop(&mut self) {
+        if let Some(client) = self.client.take() {
+            if let Ok(mut clients) = self.pool.clients.lock() {
+                clients.push(client);
+                self.pool.available.notify_one();
+            }
+        }
+    }
 }
 
 impl PostgresStateBackend {
@@ -72,18 +137,40 @@ impl PostgresStateBackend {
     ///
     /// Returns [`StateError::Backend`] if connection or DDL execution fails.
     pub fn open(connstr: &str) -> error::Result<Self> {
-        let mut client = Client::connect(connstr, NoTls).map_err(StateError::backend)?;
-        client
+        let pool_size = Self::pool_size();
+        let mut primary = Client::connect(connstr, NoTls).map_err(StateError::backend)?;
+        primary
             .batch_execute(CREATE_TABLES)
             .map_err(StateError::backend)?;
+        primary
+            .batch_execute(MIGRATE_BYTES_WRITTEN)
+            .map_err(StateError::backend)?;
+        let mut clients = Vec::with_capacity(pool_size);
+        clients.push(primary);
+        for _ in 1..pool_size {
+            clients.push(Client::connect(connstr, NoTls).map_err(StateError::backend)?);
+        }
         Ok(Self {
-            client: Mutex::new(client),
+            pool: ClientPool::new(clients),
         })
     }
 
-    /// Acquire the client lock.
-    fn lock_client(&self) -> error::Result<MutexGuard<'_, Client>> {
-        self.client.lock().map_err(|_| StateError::LockPoisoned)
+    /// Acquire a pooled client.
+    fn checkout_client(&self) -> error::Result<PooledClient<'_>> {
+        self.pool.checkout()
+    }
+
+    fn pool_size() -> usize {
+        std::env::var("RAPIDBYTE_STATE_PG_POOL_SIZE")
+            .ok()
+            .and_then(|raw| raw.parse::<usize>().ok())
+            .map(|size| size.max(1))
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(std::num::NonZeroUsize::get)
+                    .unwrap_or(4)
+                    .clamp(1, 8)
+            })
     }
 
     /// Current UTC time as ISO-8601 string.
@@ -98,7 +185,7 @@ impl StateBackend for PostgresStateBackend {
         pipeline: &PipelineId,
         stream: &StreamName,
     ) -> error::Result<Option<CursorState>> {
-        let mut client = self.lock_client()?;
+        let mut client = self.checkout_client()?;
         let rows = client
             .query(
                 "SELECT cursor_field, cursor_value, updated_at \
@@ -128,7 +215,7 @@ impl StateBackend for PostgresStateBackend {
         stream: &StreamName,
         cursor: &CursorState,
     ) -> error::Result<()> {
-        let mut client = self.lock_client()?;
+        let mut client = self.checkout_client()?;
         client
             .execute(
                 "INSERT INTO sync_cursors (pipeline, stream, cursor_field, cursor_value, updated_at) \
@@ -148,7 +235,7 @@ impl StateBackend for PostgresStateBackend {
     }
 
     fn start_run(&self, pipeline: &PipelineId, stream: &StreamName) -> error::Result<i64> {
-        let mut client = self.lock_client()?;
+        let mut client = self.checkout_client()?;
         let row = client
             .query_one(
                 "INSERT INTO sync_runs (pipeline, stream, status) \
@@ -165,17 +252,18 @@ impl StateBackend for PostgresStateBackend {
 
     #[allow(clippy::cast_possible_wrap, clippy::similar_names)]
     fn complete_run(&self, run_id: i64, status: RunStatus, stats: &RunStats) -> error::Result<()> {
-        let mut client = self.lock_client()?;
+        let mut client = self.checkout_client()?;
         client
             .execute(
                 "UPDATE sync_runs SET status = $1, finished_at = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), \
-                 records_read = $2, records_written = $3, bytes_read = $4, error_message = $5 \
-                 WHERE id = $6",
+                 records_read = $2, records_written = $3, bytes_read = $4, bytes_written = $5, error_message = $6 \
+                 WHERE id = $7",
                 &[
                     &status.as_str(),
                     &(stats.records_read as i64),
                     &(stats.records_written as i64),
                     &(stats.bytes_read as i64),
+                    &(stats.bytes_written as i64),
                     &stats.error_message,
                     &run_id,
                 ],
@@ -191,7 +279,7 @@ impl StateBackend for PostgresStateBackend {
         expected: Option<&str>,
         new_value: &str,
     ) -> error::Result<bool> {
-        let mut client = self.lock_client()?;
+        let mut client = self.checkout_client()?;
         let now = Self::now_iso();
 
         let rows_affected = match expected {
@@ -230,7 +318,7 @@ impl StateBackend for PostgresStateBackend {
             return Ok(0);
         }
 
-        let mut client = self.lock_client()?;
+        let mut client = self.checkout_client()?;
         let mut tx = client
             .transaction()
             .map_err(|e| StateError::backend_context("insert_dlq_records: begin tx", e))?;
@@ -289,7 +377,7 @@ mod tests {
     #[ignore = "requires TEST_POSTGRES_URL"]
     fn cursor_roundtrip() {
         let backend = PostgresStateBackend::open(&test_connstr()).unwrap();
-        clean_tables(&mut backend.lock_client().unwrap());
+        clean_tables(&mut backend.checkout_client().unwrap());
 
         let pid = PipelineId::new("pg_test");
         let sn = StreamName::new("pg_stream");
@@ -317,7 +405,7 @@ mod tests {
     #[ignore = "requires TEST_POSTGRES_URL"]
     fn run_lifecycle() {
         let backend = PostgresStateBackend::open(&test_connstr()).unwrap();
-        clean_tables(&mut backend.lock_client().unwrap());
+        clean_tables(&mut backend.checkout_client().unwrap());
 
         let pid = PipelineId::new("pg_test");
         let sn = StreamName::new("pg_stream");
@@ -332,6 +420,7 @@ mod tests {
                     records_read: 500,
                     records_written: 500,
                     bytes_read: 25000,
+                    bytes_written: 22000,
                     error_message: None,
                 },
             )
@@ -342,7 +431,7 @@ mod tests {
     #[ignore = "requires TEST_POSTGRES_URL"]
     fn compare_and_set_postgres() {
         let backend = PostgresStateBackend::open(&test_connstr()).unwrap();
-        clean_tables(&mut backend.lock_client().unwrap());
+        clean_tables(&mut backend.checkout_client().unwrap());
 
         let pid = PipelineId::new("pg_cas");
         let sn = StreamName::new("pg_stream");
@@ -368,7 +457,7 @@ mod tests {
     #[ignore = "requires TEST_POSTGRES_URL"]
     fn dlq_records_insert() {
         let backend = PostgresStateBackend::open(&test_connstr()).unwrap();
-        clean_tables(&mut backend.lock_client().unwrap());
+        clean_tables(&mut backend.checkout_client().unwrap());
 
         let pid = PipelineId::new("pg_dlq");
         let sn = StreamName::new("pg_stream");

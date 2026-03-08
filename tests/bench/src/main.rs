@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
@@ -117,6 +118,7 @@ struct BenchContext {
     root: PathBuf,
     plugin_dir: PathBuf,
     results_file: PathBuf,
+    bench_session_id: String,
     host: String,
     port: u16,
     user: String,
@@ -145,12 +147,12 @@ impl Drop for BranchGuard {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        BenchCommand::Run(args) => run_command(args).await,
+        BenchCommand::Run(args) => run_command_with_session(args, None).await,
         BenchCommand::Compare(args) => compare_command(args).await,
     }
 }
 
-async fn run_command(args: RunArgs) -> Result<()> {
+async fn run_command_with_session(args: RunArgs, session_id: Option<String>) -> Result<()> {
     let root = repo_root()?;
     configure_build_env();
 
@@ -172,7 +174,7 @@ async fn run_command(args: RunArgs) -> Result<()> {
     let plugin_dir = stage_plugins(&root, build_mode)?;
     report_wasm_sizes(&plugin_dir)?;
 
-    let context = init_context(root.clone(), plugin_dir).await?;
+    let context = init_context(root.clone(), plugin_dir, session_id.unwrap_or_else(make_bench_session_id)).await?;
     let rows = args.rows.unwrap_or(args.profile.default_rows());
     let iters = args.iters.unwrap_or(3);
 
@@ -235,16 +237,22 @@ async fn compare_command(args: CompareArgs) -> Result<()> {
     };
 
     checkout_ref(&root, &sha1)?;
-    run_command(run_args.clone()).await?;
+    let compare_session_id = make_bench_session_id();
+
+    run_command_with_session(run_args.clone(), Some(compare_session_id.clone())).await?;
 
     checkout_ref(&root, &sha2)?;
-    run_command(run_args).await?;
+    run_command_with_session(run_args, Some(compare_session_id.clone())).await?;
 
     let status = Command::new("python3")
         .arg(root.join("tests/bench/analyze.py"))
+        .arg("--session-id")
+        .arg(&compare_session_id)
         .arg("--sha")
         .arg(sha1)
         .arg(sha2)
+        .arg("--profile")
+        .arg(args.profile.as_str())
         .status()
         .context("failed to run tests/bench/analyze.py")?;
     if !status.success() {
@@ -438,7 +446,11 @@ fn report_wasm_sizes(plugin_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn init_context(root: PathBuf, plugin_dir: PathBuf) -> Result<BenchContext> {
+async fn init_context(
+    root: PathBuf,
+    plugin_dir: PathBuf,
+    bench_session_id: String,
+) -> Result<BenchContext> {
     let port = shared_postgres_port()?;
     let results_dir = root.join("target/bench_results");
     fs::create_dir_all(&results_dir).context("failed to create target/bench_results")?;
@@ -447,6 +459,7 @@ async fn init_context(root: PathBuf, plugin_dir: PathBuf) -> Result<BenchContext
         root,
         plugin_dir,
         results_file: results_dir.join("results.jsonl"),
+        bench_session_id,
         host: "127.0.0.1".to_string(),
         port,
         user: "postgres".to_string(),
@@ -624,8 +637,20 @@ fn enrich_result(
         "profile".to_string(),
         JsonValue::String(profile.as_str().to_string()),
     );
+    obj.insert(
+        "bench_session_id".to_string(),
+        JsonValue::String(context.bench_session_id.clone()),
+    );
 
     Ok(JsonValue::Object(Map::from_iter(obj.clone())))
+}
+
+fn make_bench_session_id() -> String {
+    let epoch_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("bench-{}-{}", std::process::id(), epoch_nanos)
 }
 
 fn now_iso8601() -> String {

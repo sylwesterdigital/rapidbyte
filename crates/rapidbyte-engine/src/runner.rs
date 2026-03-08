@@ -1,11 +1,9 @@
 //! Plugin runner utilities for source, destination, transform, validate, and discover flows.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc;
-
 use rapidbyte_types::catalog::Catalog;
 use rapidbyte_types::checkpoint::Checkpoint;
 use rapidbyte_types::envelope::DlqRecord;
@@ -26,6 +24,25 @@ use rapidbyte_state::{SqliteStateBackend, StateBackend};
 use rapidbyte_types::state::RunStats;
 
 use crate::error::PipelineError;
+
+fn plugin_instance_key(
+    stage: &str,
+    plugin_id: &str,
+    stream_ctx: &StreamContext,
+    instance_ordinal: Option<usize>,
+) -> String {
+    let partition_index = stream_ctx.partition_index.unwrap_or(0);
+    match instance_ordinal {
+        Some(ordinal) => format!(
+            "{stage}:{plugin_id}:{}:p{partition_index}:i{ordinal}",
+            stream_ctx.stream_name
+        ),
+        None => format!(
+            "{stage}:{plugin_id}:{}:p{partition_index}",
+            stream_ctx.stream_name
+        ),
+    }
+}
 
 /// Result of running a source plugin for a single stream.
 pub(crate) struct SourceRunResult {
@@ -86,7 +103,7 @@ fn handle_close_result<E, F>(
 )]
 pub(crate) fn run_source_stream(
     module: &LoadedComponent,
-    sender: mpsc::Sender<Frame>,
+    sender: mpsc::SyncSender<Frame>,
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
     plugin_id: &str,
@@ -107,6 +124,7 @@ pub(crate) fn run_source_stream(
     let mut builder = ComponentHostState::builder()
         .pipeline(pipeline_name)
         .plugin_id(plugin_id)
+        .plugin_instance_key(plugin_instance_key("source", plugin_id, stream_ctx, None))
         .stream(stream_ctx.stream_name.clone())
         .state_backend(state_backend)
         .sender(sender.clone())
@@ -207,7 +225,7 @@ pub(crate) fn run_source_stream(
         s.bytes_read += summary.bytes_read;
     }
 
-    let _ = sender.blocking_send(Frame::EndStream);
+    let _ = sender.send(Frame::EndStream);
 
     tracing::info!(
         plugin = plugin_id,
@@ -274,6 +292,12 @@ pub(crate) fn run_destination_stream(
     let mut builder = ComponentHostState::builder()
         .pipeline(pipeline_name)
         .plugin_id(plugin_id)
+        .plugin_instance_key(plugin_instance_key(
+            "destination",
+            plugin_id,
+            stream_ctx,
+            None,
+        ))
         .stream(stream_ctx.stream_name.clone())
         .state_backend(state_backend)
         .receiver(receiver)
@@ -374,6 +398,7 @@ pub(crate) fn run_destination_stream(
             PipelineError::Infrastructure(anyhow::anyhow!("run stats mutex poisoned"))
         })?;
         s.records_written += summary.records_written;
+        s.bytes_written += summary.bytes_written;
     }
 
     let recv_secs = recv_start.elapsed().as_secs_f64();
@@ -424,12 +449,13 @@ pub(crate) fn run_destination_stream(
 pub(crate) fn run_transform_stream(
     module: &LoadedComponent,
     receiver: mpsc::Receiver<Frame>,
-    sender: mpsc::Sender<Frame>,
+    sender: mpsc::SyncSender<Frame>,
     dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
     plugin_id: &str,
     plugin_version: &str,
+    transform_index: usize,
     transform_config: &serde_json::Value,
     stream_ctx: &StreamContext,
     permissions: Option<&Permissions>,
@@ -445,6 +471,12 @@ pub(crate) fn run_transform_stream(
     let mut builder = ComponentHostState::builder()
         .pipeline(pipeline_name)
         .plugin_id(plugin_id)
+        .plugin_instance_key(plugin_instance_key(
+            "transform",
+            plugin_id,
+            stream_ctx,
+            Some(transform_index),
+        ))
         .stream(stream_ctx.stream_name.clone())
         .state_backend(state_backend)
         .sender(sender.clone())
@@ -531,7 +563,7 @@ pub(crate) fn run_transform_stream(
         }
     };
 
-    let _ = sender.blocking_send(Frame::EndStream);
+    let _ = sender.send(Frame::EndStream);
 
     tracing::info!(
         plugin = plugin_id,
@@ -569,6 +601,7 @@ pub(crate) fn validate_plugin(
     let mut builder = ComponentHostState::builder()
         .pipeline("check")
         .plugin_id(plugin_id)
+        .plugin_instance_key(format!("validate:{kind:?}:{plugin_id}"))
         .stream("check")
         .state_backend(state)
         .config(config)
@@ -684,6 +717,7 @@ pub(crate) fn run_discover(
     let mut builder = ComponentHostState::builder()
         .pipeline("discover")
         .plugin_id(plugin_id)
+        .plugin_instance_key(format!("discover:source:{plugin_id}"))
         .stream("discover")
         .state_backend(state)
         .config(config)

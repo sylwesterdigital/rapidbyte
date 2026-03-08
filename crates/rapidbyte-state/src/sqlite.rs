@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     records_read INTEGER DEFAULT 0,
     records_written INTEGER DEFAULT 0,
     bytes_read INTEGER DEFAULT 0,
+    bytes_written INTEGER DEFAULT 0,
     error_message TEXT
 );
 
@@ -77,6 +78,7 @@ impl SqliteStateBackend {
         let conn = Connection::open(path).map_err(StateError::backend)?;
         conn.execute_batch(CREATE_TABLES)
             .map_err(StateError::backend)?;
+        Self::migrate_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -92,9 +94,25 @@ impl SqliteStateBackend {
         let conn = Connection::open_in_memory().map_err(StateError::backend)?;
         conn.execute_batch(CREATE_TABLES)
             .map_err(StateError::backend)?;
+        Self::migrate_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
+    }
+
+    fn migrate_schema(conn: &Connection) -> error::Result<()> {
+        match conn.execute(
+            "ALTER TABLE sync_runs ADD COLUMN bytes_written INTEGER DEFAULT 0",
+            [],
+        ) {
+            Ok(_) => Ok(()),
+            Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+                if message.contains("duplicate column name") =>
+            {
+                Ok(())
+            }
+            Err(err) => Err(StateError::backend(err)),
+        }
     }
 
     /// Acquire the connection lock.
@@ -133,12 +151,21 @@ impl SqliteStateBackend {
     fn get_run_row(
         &self,
         run_id: i64,
-    ) -> error::Result<(String, i64, Option<String>, Option<String>)> {
+    ) -> error::Result<(String, i64, i64, Option<String>, Option<String>)> {
         let conn = self.lock_conn()?;
         conn.query_row(
-            "SELECT status, records_read, finished_at, error_message FROM sync_runs WHERE id = ?1",
+            "SELECT status, records_read, bytes_written, finished_at, error_message \
+             FROM sync_runs WHERE id = ?1",
             [run_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .map_err(StateError::backend)
     }
@@ -246,13 +273,14 @@ impl StateBackend for SqliteStateBackend {
         let conn = self.lock_conn()?;
         conn.execute(
             "UPDATE sync_runs SET status = ?1, finished_at = datetime('now'), \
-             records_read = ?2, records_written = ?3, bytes_read = ?4, error_message = ?5 \
-             WHERE id = ?6",
+             records_read = ?2, records_written = ?3, bytes_read = ?4, bytes_written = ?5, error_message = ?6 \
+             WHERE id = ?7",
             rusqlite::params![
                 status.as_str(),
                 stats.records_read as i64,
                 stats.records_written as i64,
                 stats.bytes_read as i64,
+                stats.bytes_written as i64,
                 stats.error_message,
                 run_id,
             ],
@@ -475,14 +503,17 @@ mod tests {
                     records_read: 1000,
                     records_written: 1000,
                     bytes_read: 50000,
+                    bytes_written: 45000,
                     error_message: None,
                 },
             )
             .unwrap();
 
-        let (status, records_read, finished, _error) = backend.get_run_row(run_id).unwrap();
+        let (status, records_read, bytes_written, finished, _error) =
+            backend.get_run_row(run_id).unwrap();
         assert_eq!(status, "completed");
         assert_eq!(records_read, 1000);
+        assert_eq!(bytes_written, 45000);
         assert!(finished.is_some());
     }
 
@@ -499,12 +530,14 @@ mod tests {
                     records_read: 50,
                     records_written: 0,
                     bytes_read: 2000,
+                    bytes_written: 0,
                     error_message: Some("Connection reset".into()),
                 },
             )
             .unwrap();
 
-        let (status, _records, _finished, error_msg) = backend.get_run_row(run_id).unwrap();
+        let (status, _records, _bytes_written, _finished, error_msg) =
+            backend.get_run_row(run_id).unwrap();
         assert_eq!(status, "failed");
         assert_eq!(error_msg, Some("Connection reset".into()));
     }

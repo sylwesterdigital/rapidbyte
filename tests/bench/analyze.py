@@ -2,9 +2,10 @@
 """Compare benchmark results across runs.
 
 Usage:
-    python3 tests/bench/analyze.py                    # Compare last 2 runs
-    python3 tests/bench/analyze.py --last 5           # Show last 5 runs
-    python3 tests/bench/analyze.py --sha abc123 def456  # Compare specific commits
+    python3 tests/bench/analyze.py                          # Compare last 2 runs
+    python3 tests/bench/analyze.py --last 5                 # Show last 5 runs
+    python3 tests/bench/analyze.py --sha abc123 def456      # Compare specific commits
+    python3 tests/bench/analyze.py --session-id bench-...   # Compare one isolated invocation
 """
 import argparse
 import json
@@ -72,12 +73,18 @@ def main():
     parser = argparse.ArgumentParser(description="Compare benchmark results across runs")
     parser.add_argument("--last", type=int, default=2, help="Compare last N runs")
     parser.add_argument("--sha", nargs="+", help="Compare specific git SHAs")
+    parser.add_argument("--session-id", help="Filter to a single benchmark session id")
     parser.add_argument("--rows", type=int, help="Filter by row count")
+    parser.add_argument("--profile", help="Filter by benchmark profile")
     args = parser.parse_args()
 
     results = load_results()
     if args.rows:
         results = [r for r in results if r.get("bench_rows") == args.rows]
+    if args.profile:
+        results = [r for r in results if r.get("profile") == args.profile]
+    if args.session_id:
+        results = [r for r in results if r.get("bench_session_id") == args.session_id]
 
     if args.sha:
         results = [r for r in results if r.get("git_sha") in args.sha]

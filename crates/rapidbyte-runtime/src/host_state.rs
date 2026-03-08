@@ -6,12 +6,11 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use chrono::Utc;
-use tokio::sync::mpsc;
 use wasmtime::component::ResourceTable;
 use wasmtime::StoreLimits;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
@@ -78,13 +77,13 @@ pub struct HostTimings {
 
 pub(crate) struct PluginIdentity {
     pub pipeline: PipelineId,
-    pub plugin_id: String,
+    pub plugin_instance_key: String,
     pub stream: StreamName,
     pub state_backend: Arc<dyn StateBackend>,
 }
 
 pub(crate) struct BatchRouter {
-    pub sender: Option<mpsc::Sender<Frame>>,
+    pub sender: Option<mpsc::SyncSender<Frame>>,
     pub receiver: Option<mpsc::Receiver<Frame>>,
     pub next_batch_id: u64,
     pub current_checkpoint_id: Option<u64>,
@@ -126,9 +125,10 @@ pub struct ComponentHostState {
 pub struct HostStateBuilder {
     pipeline: Option<String>,
     plugin_id: Option<String>,
+    plugin_instance_key: Option<String>,
     stream: Option<String>,
     state_backend: Option<Arc<dyn StateBackend>>,
-    sender: Option<mpsc::Sender<Frame>>,
+    sender: Option<mpsc::SyncSender<Frame>>,
     receiver: Option<mpsc::Receiver<Frame>>,
     source_checkpoints: Option<Arc<Mutex<Vec<Checkpoint>>>>,
     dest_checkpoints: Option<Arc<Mutex<Vec<Checkpoint>>>>,
@@ -147,6 +147,7 @@ impl HostStateBuilder {
         Self {
             pipeline: None,
             plugin_id: None,
+            plugin_instance_key: None,
             stream: None,
             state_backend: None,
             sender: None,
@@ -177,6 +178,12 @@ impl HostStateBuilder {
     }
 
     #[must_use]
+    pub fn plugin_instance_key(mut self, key: impl Into<String>) -> Self {
+        self.plugin_instance_key = Some(key.into());
+        self
+    }
+
+    #[must_use]
     pub fn stream(mut self, name: impl Into<String>) -> Self {
         self.stream = Some(name.into());
         self
@@ -189,7 +196,7 @@ impl HostStateBuilder {
     }
 
     #[must_use]
-    pub fn sender(mut self, tx: mpsc::Sender<Frame>) -> Self {
+    pub fn sender(mut self, tx: mpsc::SyncSender<Frame>) -> Self {
         self.sender = Some(tx);
         self
     }
@@ -273,6 +280,9 @@ impl HostStateBuilder {
         let plugin_id = self
             .plugin_id
             .ok_or_else(|| anyhow::anyhow!("plugin_id is required"))?;
+        let plugin_instance_key = self
+            .plugin_instance_key
+            .unwrap_or_else(|| plugin_id.clone());
         let stream = self
             .stream
             .ok_or_else(|| anyhow::anyhow!("stream is required"))?;
@@ -283,7 +293,7 @@ impl HostStateBuilder {
         Ok(ComponentHostState {
             identity: PluginIdentity {
                 pipeline: PipelineId::new(pipeline),
-                plugin_id,
+                plugin_instance_key,
                 stream: StreamName::new(stream),
                 state_backend,
             },
@@ -449,7 +459,7 @@ impl ComponentHostState {
             .ok_or_else(|| PluginError::internal("NO_SENDER", "No batch sender configured"))?;
 
         sender
-            .blocking_send(Frame::Data {
+            .send(Frame::Data {
                 payload,
                 checkpoint_id,
             })
@@ -479,7 +489,7 @@ impl ComponentHostState {
             })?;
 
         let wait_start = Instant::now();
-        let Some(frame) = receiver.blocking_recv() else {
+        let Ok(frame) = receiver.recv() else {
             return Ok(None);
         };
         let wait_elapsed_nanos = wait_start.elapsed().as_nanos() as u64;
@@ -524,7 +534,9 @@ impl ComponentHostState {
         match scope {
             StateScope::Pipeline => key.to_string(),
             StateScope::Stream => format!("{}:{}", self.current_stream(), key),
-            StateScope::PluginInstance => format!("{}:{}", self.identity.plugin_id, key),
+            StateScope::PluginInstance => {
+                format!("{}:{}", self.identity.plugin_instance_key, key)
+            }
         }
     }
 
@@ -997,7 +1009,7 @@ mod tests {
     fn builder_creates_valid_state() {
         let host = test_host_state();
         assert_eq!(host.identity.pipeline.as_str(), "test-pipeline");
-        assert_eq!(host.identity.plugin_id, "postgres");
+        assert_eq!(host.identity.plugin_instance_key, "postgres");
         assert_eq!(host.current_stream(), "users");
     }
 
@@ -1057,6 +1069,23 @@ mod tests {
         assert_eq!(
             host.scoped_state_key(StateScope::PluginInstance, "offset"),
             "postgres:offset"
+        );
+    }
+
+    #[test]
+    fn scoped_state_key_plugin_scope_uses_instance_key() {
+        let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
+        let host = ComponentHostState::builder()
+            .pipeline("p")
+            .plugin_id("postgres")
+            .plugin_instance_key("destination:postgres:users:p0")
+            .stream("users")
+            .state_backend(state)
+            .build()
+            .unwrap();
+        assert_eq!(
+            host.scoped_state_key(StateScope::PluginInstance, "offset"),
+            "destination:postgres:users:p0:offset"
         );
     }
 

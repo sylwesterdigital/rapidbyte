@@ -217,26 +217,9 @@ async fn compute_range_bounds(
     Ok(Some((start_i64, end_i64)))
 }
 
-/// Estimate byte size of a single row for `max_record_bytes` checking.
-pub(crate) fn estimate_row_bytes(columns: &[Column]) -> usize {
-    let mut total = 0usize;
-    for col in columns {
-        total += match col.arrow_type {
-            ArrowDataType::Int16 => 2,
-            ArrowDataType::Int32 | ArrowDataType::Float32 | ArrowDataType::Date32 => 4,
-            ArrowDataType::Int64 | ArrowDataType::Float64 | ArrowDataType::TimestampMicros => 8,
-            ArrowDataType::Boolean => 1,
-            _ => 64,
-        };
-        // 1-byte null bitmap overhead per column.
-        total += 1;
-    }
-    total
-}
-
-/// Encode and emit all currently accumulated rows as one Arrow IPC batch.
-fn emit_accumulated_rows(
-    rows: &mut Vec<tokio_postgres::Row>,
+/// Encode and emit the current Arrow batch builders.
+fn emit_accumulated_batch(
+    batch_builder: &mut encode::RecordBatchBuilder,
     columns: &[Column],
     schema: &Arc<Schema>,
     ctx: &Context,
@@ -244,22 +227,27 @@ fn emit_accumulated_rows(
     estimated_bytes: &mut usize,
 ) -> Result<(), String> {
     let encode_start = Instant::now();
-    let batch = encode::rows_to_record_batch(rows, columns, schema)?;
+    let batch = std::mem::replace(
+        batch_builder,
+        encode::RecordBatchBuilder::new(columns, BATCH_SIZE.min(FETCH_CHUNK)),
+    )
+    .finish(schema)?;
     // Safety: encode timing in nanos will not exceed u64::MAX for any realistic duration.
     #[allow(clippy::cast_possible_truncation)]
     {
         state.arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
     }
 
-    state.total_records += rows.len() as u64;
-    state.total_bytes += batch.get_array_memory_size() as u64;
-    state.batches_emitted += 1;
+    if let Some(batch) = batch {
+        state.total_records += batch.num_rows() as u64;
+        state.total_bytes += batch.get_array_memory_size() as u64;
+        state.batches_emitted += 1;
 
-    ctx.emit_batch(&batch)
-        .map_err(|e| format!("emit_batch failed: {}", e.message))?;
-    emit_read_metrics(ctx, state.total_records, state.total_bytes);
+        ctx.emit_batch(&batch)
+            .map_err(|e| format!("emit_batch failed: {}", e.message))?;
+        emit_read_metrics(ctx, state.total_records, state.total_bytes);
+    }
 
-    rows.clear();
     *estimated_bytes = BATCH_OVERHEAD_BYTES;
     Ok(())
 }
@@ -414,7 +402,6 @@ pub async fn read_stream(
     } else {
         StreamLimits::DEFAULT_MAX_RECORD_BYTES as usize
     };
-    let estimated_row_bytes = estimate_row_bytes(&columns);
     let mut records_skipped: u64 = 0;
 
     let mut tracker: Option<CursorTracker> = match stream.cursor_info.as_ref() {
@@ -423,7 +410,7 @@ pub async fn read_stream(
     };
 
     let fetch_query = format!("FETCH {FETCH_CHUNK} FROM {CURSOR_NAME}");
-    let mut accumulated_rows: Vec<tokio_postgres::Row> = Vec::new();
+    let mut batch_builder = encode::RecordBatchBuilder::new(&columns, BATCH_SIZE.min(FETCH_CHUNK));
     let mut estimated_bytes: usize = BATCH_OVERHEAD_BYTES;
     let mut state = EmitState {
         total_records: 0,
@@ -448,62 +435,131 @@ pub async fn read_stream(
         let exhausted = rows.is_empty();
 
         if !exhausted {
-            if estimated_row_bytes > max_record_bytes {
-                if stream.policies.on_data_error == DataErrorPolicy::Fail {
-                    loop_error = Some(format!(
-                        "Record exceeds max_record_bytes ({estimated_row_bytes} > {max_record_bytes})",
-                    ));
-                    break;
-                }
-                records_skipped += rows.len() as u64;
-                ctx.log(
-                    LogLevel::Warn,
-                    &format!(
-                        "Skipping {} oversized records: {estimated_row_bytes} bytes > max_record_bytes {max_record_bytes}",
-                        rows.len(),
-                    ),
-                );
-            } else {
-                for row in rows {
-                    if !accumulated_rows.is_empty()
-                        && estimated_bytes + estimated_row_bytes >= max_batch_bytes
-                    {
-                        if let Err(e) = emit_accumulated_rows(
-                            &mut accumulated_rows,
-                            &columns,
-                            &arrow_schema,
-                            ctx,
-                            &mut state,
-                            &mut estimated_bytes,
-                        ) {
-                            loop_error = Some(e);
-                            break;
+            for row in rows {
+                let decoded_row = match encode::decode_row(&row, &columns, batch_builder.row_count()) {
+                    Ok(decoded_row) => decoded_row,
+                    Err(invalid) => {
+                        if let Some(ref mut t) = tracker {
+                            t.observe_row(&row);
+                        }
+
+                        records_skipped += 1;
+                        match stream.policies.on_data_error {
+                            DataErrorPolicy::Fail => {
+                                loop_error = Some(invalid.message);
+                                break;
+                            }
+                            DataErrorPolicy::Skip => {
+                                ctx.log(
+                                    LogLevel::Warn,
+                                    &format!(
+                                        "Skipping row with source decode error in stream '{}': {}",
+                                        stream.stream_name, invalid.message
+                                    ),
+                                );
+                                continue;
+                            }
+                            DataErrorPolicy::Dlq => {
+                                ctx.log(
+                                    LogLevel::Warn,
+                                    &format!(
+                                        "Routing row with source decode error to DLQ in stream '{}': {}",
+                                        stream.stream_name, invalid.message
+                                    ),
+                                );
+                                ctx.emit_dlq_record(
+                                    &invalid.record_json,
+                                    &invalid.message,
+                                    rapidbyte_sdk::error::ErrorCategory::Data,
+                                )
+                                .map_err(|e| format!("emit_dlq_record failed: {}", e.message))?;
+                                continue;
+                            }
                         }
                     }
+                };
+                let actual_row_bytes = decoded_row.estimated_bytes;
 
-                    if loop_error.is_some() {
-                        break;
-                    }
-
-                    estimated_bytes += estimated_row_bytes;
-
+                if actual_row_bytes > max_record_bytes {
                     if let Some(ref mut t) = tracker {
                         t.observe_row(&row);
                     }
 
-                    accumulated_rows.push(row);
+                    match stream.policies.on_data_error {
+                        DataErrorPolicy::Fail => {
+                            loop_error = Some(format!(
+                                "Record exceeds max_record_bytes ({} > {})",
+                                actual_row_bytes, max_record_bytes
+                            ));
+                            break;
+                        }
+                        DataErrorPolicy::Skip => {
+                            records_skipped += 1;
+                            ctx.log(
+                                LogLevel::Warn,
+                                &format!(
+                                    "Skipping oversized row in stream '{}': {} bytes > max_record_bytes {}",
+                                    stream.stream_name, actual_row_bytes, max_record_bytes
+                                ),
+                            );
+                            continue;
+                        }
+                        DataErrorPolicy::Dlq => {
+                            records_skipped += 1;
+                            ctx.emit_dlq_record(
+                                &encode::row_to_json(&row, &columns),
+                                &format!(
+                                    "row exceeds max_record_bytes: {} bytes > {}",
+                                    actual_row_bytes, max_record_bytes
+                                ),
+                                rapidbyte_sdk::error::ErrorCategory::Data,
+                            )
+                            .map_err(|e| format!("emit_dlq_record failed: {}", e.message))?;
+                            continue;
+                        }
+                    }
+                }
+
+                if !batch_builder.is_empty() && estimated_bytes + actual_row_bytes >= max_batch_bytes
+                {
+                    if let Err(e) = emit_accumulated_batch(
+                        &mut batch_builder,
+                        &columns,
+                        &arrow_schema,
+                        ctx,
+                        &mut state,
+                        &mut estimated_bytes,
+                    ) {
+                        loop_error = Some(e);
+                        break;
+                    }
+                }
+
+                if loop_error.is_some() {
+                    break;
+                }
+
+                estimated_bytes += actual_row_bytes;
+
+                if let Some(ref mut t) = tracker {
+                    t.observe_row(&row);
+                }
+
+                if let Err(error) = batch_builder.append_decoded_row(decoded_row) {
+                    loop_error = Some(error);
+                    break;
                 }
             }
         }
 
-        let should_emit = !accumulated_rows.is_empty()
+        let should_emit = !batch_builder.is_empty()
             && (estimated_bytes >= max_batch_bytes
-                || accumulated_rows.len() >= BATCH_SIZE
+                || batch_builder.row_count() >= BATCH_SIZE
                 || exhausted);
 
         if should_emit {
-            if let Err(e) = emit_accumulated_rows(
-                &mut accumulated_rows,
+            if let Err(e) = emit_accumulated_batch(
+                &mut batch_builder,
                 &columns,
                 &arrow_schema,
                 ctx,
@@ -625,19 +681,8 @@ pub async fn read_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapidbyte_sdk::catalog::SchemaHint;
     use rapidbyte_sdk::stream::StreamPolicies;
-
-    #[test]
-    fn estimate_row_bytes_matches_expected_mix() {
-        let columns = vec![
-            Column::new("id", "bigint", false),
-            Column::new("name", "text", true),
-            Column::new("active", "boolean", false),
-        ];
-        // Int64(8)+Utf8(64)+Boolean(1) plus 1-byte null bitmap overhead per column.
-        assert_eq!(estimate_row_bytes(&columns), 8 + 64 + 1 + 3);
-    }
+    use rapidbyte_sdk::catalog::SchemaHint;
 
     #[test]
     fn stream_partition_strategy_override_wins_over_env() {
