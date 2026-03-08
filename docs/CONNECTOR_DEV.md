@@ -96,7 +96,7 @@ fn main() {
             WriteMode::Replace,
             WriteMode::Upsert { primary_key: vec![] },
         ])
-        .dest_features(vec![Feature::BulkLoadCopy])
+        .dest_features(vec![Feature::BulkLoad])
         .allow_runtime_network()
         .emit();
 }
@@ -123,7 +123,7 @@ fn main() {
 | `env_vars(&[...])` | Allowlist of environment variables visible inside the Wasm sandbox |
 | `sync_modes(&[...])` | Source only: supported sync modes (`FullRefresh`, `Incremental`, `Cdc`) |
 | `write_modes(&[...])` | Destination only: supported write modes (`Append`, `Replace`, `Upsert`) |
-| `dest_features(vec![...])` | Destination only: feature flags (e.g. `Feature::BulkLoadCopy`, `Feature::ExactlyOnce`) |
+| `dest_features(vec![...])` | Destination only: feature flags (e.g. `Feature::BulkLoad`, `Feature::ExactlyOnce`) |
 
 ## 5. Config Type
 

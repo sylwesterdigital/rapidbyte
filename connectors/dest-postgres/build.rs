@@ -12,7 +12,7 @@ fn main() {
                 primary_key: vec![],
             },
         ])
-        .dest_features(vec![Feature::BulkLoadCopy])
+        .dest_features(vec![Feature::BulkLoad])
         .allow_runtime_network()
         .env_vars(&["PGSSLROOTCERT"])
         .emit();

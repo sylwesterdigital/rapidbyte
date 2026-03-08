@@ -139,7 +139,7 @@ impl ManifestBuilder {
         self
     }
 
-    /// Set destination features (e.g., `Feature::BulkLoadCopy`).
+    /// Set destination features (e.g., `Feature::BulkLoad`).
     pub fn dest_features(mut self, features: Vec<Feature>) -> Self {
         if let Some(ref mut dst) = self.manifest.roles.destination {
             dst.features = features;
@@ -282,7 +282,7 @@ mod tests {
             .name("Test Dest")
             .version("2.0.0")
             .write_modes(&[WriteMode::Append, WriteMode::Replace])
-            .dest_features(vec![Feature::BulkLoadCopy]);
+            .dest_features(vec![Feature::BulkLoad]);
 
         assert_eq!(emitter.manifest.id, "test/dest");
         assert!(emitter.manifest.roles.destination.is_some());
@@ -291,7 +291,7 @@ mod tests {
             dst.supported_write_modes,
             vec![WriteMode::Append, WriteMode::Replace]
         );
-        assert_eq!(dst.features, vec![Feature::BulkLoadCopy]);
+        assert_eq!(dst.features, vec![Feature::BulkLoad]);
     }
 
     #[test]

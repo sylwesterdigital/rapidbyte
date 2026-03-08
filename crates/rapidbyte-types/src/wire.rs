@@ -71,8 +71,9 @@ pub enum Feature {
     ExactlyOnce,
     /// Automatic schema migration on destination.
     SchemaAutoMigrate,
-    /// Bulk load via COPY protocol.
-    BulkLoadCopy,
+    /// Bulk load support (COPY, multipart upload, load jobs, etc.).
+    #[serde(alias = "bulk_load_copy")]
+    BulkLoad,
     /// Source supports parallel partitioned reads (mod/range sharding).
     PartitionedRead,
 }
@@ -135,6 +136,21 @@ mod tests {
         assert_eq!(json, "\"partitioned_read\"");
         let back: Feature = serde_json::from_str(&json).unwrap();
         assert_eq!(back, Feature::PartitionedRead);
+    }
+
+    #[test]
+    fn feature_bulk_load_serde_and_alias() {
+        // New name serializes as "bulk_load"
+        let f = Feature::BulkLoad;
+        assert_eq!(serde_json::to_string(&f).unwrap(), "\"bulk_load\"");
+
+        // New name deserializes
+        let back: Feature = serde_json::from_str("\"bulk_load\"").unwrap();
+        assert_eq!(back, Feature::BulkLoad);
+
+        // Old name still deserializes (backward compat)
+        let old: Feature = serde_json::from_str("\"bulk_load_copy\"").unwrap();
+        assert_eq!(old, Feature::BulkLoad);
     }
 
     #[test]

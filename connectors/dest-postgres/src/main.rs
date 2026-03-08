@@ -29,7 +29,7 @@ impl Destination for DestPostgres {
     async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {
         let mut features = vec![Feature::ExactlyOnce];
         if config.load_method == LoadMethod::Copy {
-            features.push(Feature::BulkLoadCopy);
+            features.push(Feature::BulkLoad);
         }
         Ok((
             Self { config },
