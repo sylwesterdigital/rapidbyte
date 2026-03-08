@@ -49,7 +49,7 @@ Refer to [docs/CODING_STYLE.md](docs/CODING_STYLE.md) for the full style guide. 
 
 - **Linting** — All host crates use `#![warn(clippy::pedantic)]`.
 - **Import ordering** — std, external, workspace, crate-local, each group separated by a blank line.
-- **Error handling** — Use `ConnectorError` factories at plugin crate boundaries; use `thiserror` for internal error types.
+- **Error handling** — Use `PluginError` factories at plugin crate boundaries; use `thiserror` for internal error types.
 - **Visibility** — Default to `pub(crate)` for internal types; only make items fully `pub` when they are part of the crate's external API.
 - **Tests** — Colocate unit tests in `#[cfg(test)] mod tests` at the bottom of each module.
 

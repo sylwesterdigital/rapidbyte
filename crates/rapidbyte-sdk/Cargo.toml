@@ -13,7 +13,7 @@ conformance = []
 rapidbyte-types = { path = "../rapidbyte-types" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# Keep SDK tokio features minimal so wasm connectors don't inherit host-only
+# Keep SDK tokio features minimal so wasm plugins don't inherit host-only
 # runtime/network features via workspace defaults.
 tokio = { version = "1.36", default-features = false, features = ["io-util", "time"], optional = true }
 wit-bindgen = { version = "0.46", optional = true }

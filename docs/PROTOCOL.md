@@ -96,7 +96,7 @@ Defined in `wit/rapidbyte-plugin.wit`:
 Scopes:
 - `0` pipeline
 - `1` stream
-- `2` connector-instance
+- `2` plugin-instance
 
 ### 4.4 Host-proxied TCP
 
@@ -126,7 +126,7 @@ Fields:
 - optional commit state (`before-commit|after-commit-unknown|after-commit-confirmed`)
 - optional JSON details
 
-Host preserves plugin retry metadata and maps plugin failures to `PipelineError::Connector`.
+Host preserves plugin retry metadata and maps plugin failures to `PipelineError::Plugin`.
 
 ## 6. Data Exchange
 

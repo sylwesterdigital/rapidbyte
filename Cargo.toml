@@ -10,12 +10,12 @@ members = [
     "crates/rapidbyte-state",
     "crates/rapidbyte-types",
 ]
-# Connectors target wasm32-wasip2 — build separately
+# Plugins target wasm32-wasip2 — build separately
 exclude = [
-    "connectors/source-postgres",
-    "connectors/dest-postgres",
-    "connectors/transform-sql",
-    "connectors/transform-validate",
+    "plugins/sources/postgres",
+    "plugins/destinations/postgres",
+    "plugins/transforms/sql",
+    "plugins/transforms/validate",
 ]
 
 [workspace.package]
@@ -23,7 +23,7 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 rust-version = "1.75"
-description = "Data pipeline engine using WASI component connectors"
+description = "Data pipeline engine using WASI component plugins"
 
 [workspace.dependencies]
 tokio = { version = "1.36", features = ["full"] }

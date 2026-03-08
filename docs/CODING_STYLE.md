@@ -196,7 +196,7 @@ use crate::runner::{run_destination_stream, run_source_stream};
 | `types` | `PluginError` | Factory + builder, `Serialize`/`Deserialize` | Cross-boundary (host ↔ plugin) |
 | `state` | `StateError` | `thiserror` enum + `Result<T>` alias | Crate-internal |
 | `runtime` | `RuntimeError` | `thiserror` enum + `Result<T>` alias | Crate-internal |
-| `engine` | `PipelineError` | Two-variant boundary enum (Connector / Infrastructure) | Orchestration boundary |
+| `engine` | `PipelineError` | Two-variant boundary enum (Plugin / Infrastructure) | Orchestration boundary |
 
 ### 6.2 `PluginError` Factory + Builder
 
@@ -254,18 +254,18 @@ pub type Result<T> = std::result::Result<T, StateError>;
 
 ### 6.4 `PipelineError` Boundary Enum
 
-The engine uses a two-variant enum to separate typed connector errors from opaque infrastructure failures:
+The engine uses a two-variant enum to separate typed plugin errors from opaque infrastructure failures:
 
 ```rust
 pub enum PipelineError {
-    /// Typed connector error with retry metadata.
+    /// Typed plugin error with retry metadata.
     Plugin(PluginError),
     /// Infrastructure error (WASM load, channel, state backend, etc.)
     Infrastructure(anyhow::Error),
 }
 ```
 
-- `MUST` preserve the Connector/Infrastructure boundary — do not collapse to a single `anyhow::Error`.
+- `MUST` preserve the Plugin/Infrastructure boundary — do not collapse to a single `anyhow::Error`.
 - `MUST` implement `From<anyhow::Error>` for Infrastructure only.
 
 ## 7) Serde and Protocol Type Conventions
