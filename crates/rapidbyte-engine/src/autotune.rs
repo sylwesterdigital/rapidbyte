@@ -36,14 +36,14 @@ pub fn parallelism_candidates(base: u32, cap: u32) -> Vec<u32> {
 pub fn resolve_stream_autotune(
     config: &PipelineConfig,
     baseline_parallelism: u32,
-    source_connector_id: &str,
+    supports_partitioned_read: bool,
 ) -> StreamAutotuneDecision {
     let autotune_cfg = &config.resources.autotune;
 
     let pinned_parallelism = autotune_cfg.pin_parallelism.map(|value| value.max(1));
     let parallelism = pinned_parallelism.unwrap_or_else(|| baseline_parallelism.max(1));
 
-    let partition_strategy = if source_connector_id == "source-postgres" {
+    let partition_strategy = if supports_partitioned_read {
         autotune_cfg.pin_source_partition_mode
     } else {
         None
@@ -92,7 +92,7 @@ destination:
         );
         let config = parse_pipeline_str(&yaml).unwrap();
 
-        let decision = resolve_stream_autotune(&config, 3, "source-postgres");
+        let decision = resolve_stream_autotune(&config, 3, true);
         assert_eq!(decision.parallelism, 8);
     }
 
@@ -104,7 +104,7 @@ destination:
         );
         let config = parse_pipeline_str(&yaml).unwrap();
 
-        let decision = resolve_stream_autotune(&config, 3, "source-postgres");
+        let decision = resolve_stream_autotune(&config, 3, true);
         assert_eq!(decision.partition_strategy, Some(PartitionStrategy::Range));
     }
 
@@ -116,7 +116,7 @@ destination:
         );
         let config = parse_pipeline_str(&yaml).unwrap();
 
-        let decision = resolve_stream_autotune(&config, 3, "source-postgres");
+        let decision = resolve_stream_autotune(&config, 3, true);
         assert_eq!(
             decision.copy_flush_bytes_override,
             Some(MAX_COPY_FLUSH_BYTES as u64)

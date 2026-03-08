@@ -643,7 +643,7 @@ fn build_stream_contexts(
     let autotune_decision = crate::autotune::resolve_stream_autotune(
         config,
         baseline_parallelism,
-        &source_connector_id,
+        source_connector_id == "source-postgres",
     );
     let configured_parallelism = autotune_decision.parallelism;
     tracing::info!(
