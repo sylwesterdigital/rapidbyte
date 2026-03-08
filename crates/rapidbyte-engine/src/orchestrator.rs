@@ -1344,6 +1344,35 @@ async fn execute_streams(
         }
     }
 
+    // Sanity-check partitioned read results
+    {
+        let shard_row_counts: Vec<u64> = stream_metrics
+            .iter()
+            .filter(|m| m.partition_index.is_some())
+            .map(|m| m.records_read)
+            .collect();
+
+        if !shard_row_counts.is_empty() {
+            if shard_row_counts.contains(&0) {
+                tracing::warn!(
+                    "PartitionedRead sanity check: one or more shards returned 0 rows \
+                     — the source may not be honoring partition coordinates"
+                );
+            }
+            if shard_row_counts.len() > 1
+                && shard_row_counts.iter().all(|&c| c == shard_row_counts[0])
+                && shard_row_counts[0] > 100
+            {
+                tracing::warn!(
+                    shard_count = shard_row_counts.len(),
+                    rows_per_shard = shard_row_counts[0],
+                    "PartitionedRead sanity check: all shards returned identical row counts \
+                     — the source may be ignoring partition coordinates"
+                );
+            }
+        }
+    }
+
     let first_error = stream_collection.first_error;
 
     let dlq_records = run_dlq_records
