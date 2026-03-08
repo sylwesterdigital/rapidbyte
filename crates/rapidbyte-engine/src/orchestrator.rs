@@ -16,7 +16,7 @@ use rapidbyte_types::catalog::{Catalog, SchemaHint};
 use rapidbyte_types::cursor::{CursorInfo, CursorType, CursorValue};
 use rapidbyte_types::envelope::DlqRecord;
 use rapidbyte_types::error::ValidationResult;
-use rapidbyte_types::manifest::{ConnectorManifest, Permissions, ResourceLimits};
+use rapidbyte_types::manifest::{PluginManifest, Permissions, ResourceLimits};
 use rapidbyte_types::wire::Feature;
 use rapidbyte_types::metric::{ReadSummary, WriteSummary};
 use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
@@ -474,7 +474,7 @@ async fn execute_pipeline_once(
     let config_for_build = config.clone();
     let state_for_build = state.clone();
     let max_records = options.limit;
-    let source_manifest_for_build = connectors.source_manifest.clone();
+    let source_manifest_for_build = plugins.source_manifest.clone();
     let stream_build = tokio::task::spawn_blocking(move || {
         build_stream_contexts(&config_for_build, state_for_build.as_ref(), max_records, source_manifest_for_build.as_ref())
     })
@@ -639,10 +639,10 @@ fn build_stream_contexts(
     config: &PipelineConfig,
     state: &dyn StateBackend,
     max_records: Option<u64>,
-    source_manifest: Option<&ConnectorManifest>,
+    source_manifest: Option<&PluginManifest>,
 ) -> Result<StreamBuild, PipelineError> {
     let supports_partitioned_read = source_manifest
-        .is_some_and(|m| m.has_source_feature(Feature::PartitionedRead));
+        .is_some_and(|m: &PluginManifest| m.has_source_feature(Feature::PartitionedRead));
     let baseline_parallelism = resolve_effective_parallelism(config, supports_partitioned_read);
     let autotune_decision = crate::autotune::resolve_stream_autotune(
         config,
@@ -1940,15 +1940,15 @@ mod stream_context_partition_tests {
     use rapidbyte_types::manifest::{Roles, SourceCapabilities};
     use rapidbyte_types::wire::ProtocolVersion;
 
-    fn test_manifest_with_partitioned_read() -> ConnectorManifest {
-        ConnectorManifest {
+    fn test_manifest_with_partitioned_read() -> PluginManifest {
+        PluginManifest {
             id: "test/pg".to_string(),
             name: "Test".to_string(),
             version: "0.1.0".to_string(),
             description: String::new(),
             author: None,
             license: None,
-            protocol_version: ProtocolVersion::V4,
+            protocol_version: ProtocolVersion::V5,
             roles: Roles {
                 source: Some(SourceCapabilities {
                     supported_sync_modes: vec![SyncMode::FullRefresh],

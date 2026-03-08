@@ -229,14 +229,14 @@ mod tests {
 
     #[test]
     fn manifest_has_source_feature() {
-        let manifest = ConnectorManifest {
+        let manifest = PluginManifest {
             id: "test/pg".to_string(),
             name: "Test".to_string(),
             version: "0.1.0".to_string(),
             description: String::new(),
             author: None,
             license: None,
-            protocol_version: ProtocolVersion::V4,
+            protocol_version: ProtocolVersion::V5,
             roles: Roles {
                 source: Some(SourceCapabilities {
                     supported_sync_modes: vec![SyncMode::FullRefresh],
