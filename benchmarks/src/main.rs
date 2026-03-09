@@ -21,8 +21,12 @@ fn main() -> Result<()> {
             let root = std::env::current_dir()?;
             let scenarios = scenario::discover_scenarios(&root.join(&args.scenario_dir))?;
             let output_path = root.join(&args.output);
-            let written =
-                runner::emit_scenario_artifacts(&scenarios, args.suite.as_deref(), &output_path)?;
+            let written = runner::emit_scenario_artifacts(
+                &scenarios,
+                args.suite.as_deref(),
+                &args.scenarios,
+                &output_path,
+            )?;
             println!(
                 "benchmark runner: wrote {} artifact(s) from {} discovered scenario(s) to {}",
                 written,

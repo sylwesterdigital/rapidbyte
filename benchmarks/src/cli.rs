@@ -23,6 +23,9 @@ pub struct RunArgs {
     #[arg(long)]
     pub suite: Option<String>,
 
+    #[arg(long = "scenario")]
+    pub scenarios: Vec<String>,
+
     #[arg(long, default_value = "target/benchmarks/results.jsonl")]
     pub output: PathBuf,
 }
