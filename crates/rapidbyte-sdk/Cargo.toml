@@ -19,3 +19,6 @@ tokio = { version = "1.36", default-features = false, features = ["io-util", "ti
 wit-bindgen = { version = "0.46", optional = true }
 arrow = { version = "53", default-features = false, features = ["ipc"], optional = true }
 rapidbyte-sdk-macros = { path = "macros", optional = true }
+
+[dev-dependencies]
+futures = "0.3"

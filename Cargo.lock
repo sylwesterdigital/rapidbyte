@@ -3398,6 +3398,7 @@ name = "rapidbyte-sdk"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "futures",
  "rapidbyte-sdk-macros",
  "rapidbyte-types",
  "serde",
