@@ -71,19 +71,28 @@ The next-generation benchmark platform lives under `benchmarks/`.
 
 - `just bench --suite pr --output target/benchmarks/pr/results.jsonl` runs the smoke suite
 - `just bench-pr` runs the PR smoke suite and compares it against the checked-in baseline artifact set
-- `just bench --suite lab --scenario pg_dest_insert --output target/benchmarks/lab/pg-insert.jsonl` runs the native Postgres INSERT benchmark
-- `just bench --suite lab --scenario pg_dest_copy --output target/benchmarks/lab/pg-copy.jsonl` runs the native Postgres COPY benchmark
+- `just bench-lab pg_dest_insert` runs the native Postgres INSERT benchmark using the committed `local-dev-postgres` environment profile
+- `just bench-lab pg_dest_copy` runs the native Postgres COPY benchmark using the committed `local-dev-postgres` environment profile
 - the checked-in baseline is a local smoke mechanism; CI and future infra should replace it with rolling `main` artifacts
 
-Before running the native Postgres lab scenarios:
+For direct runner use, provide an environment profile explicitly:
 
 ```bash
-docker compose up -d --wait
-just build-all
+just bench --suite lab --scenario pg_dest_insert --env-profile local-dev-postgres
 ```
 
-Those scenarios assume the repo's default local Postgres from `docker-compose.yml`
-on `127.0.0.1:5433` with database `rapidbyte_test`.
+Override the committed local profile with:
+
+- `RB_BENCH_PG_HOST`
+- `RB_BENCH_PG_PORT`
+- `RB_BENCH_PG_USER`
+- `RB_BENCH_PG_PASSWORD`
+- `RB_BENCH_PG_DATABASE`
+- `RB_BENCH_PG_SOURCE_SCHEMA`
+- `RB_BENCH_PG_DEST_SCHEMA`
+
+The core runner does not auto-provision Docker/Testcontainers; `just bench-lab`
+is the local orchestration wrapper for the repo-supported dev environment.
 
 ## PR Process
 

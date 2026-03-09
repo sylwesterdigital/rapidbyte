@@ -20,10 +20,8 @@ just bench-pr
 Run the explicit native PostgreSQL destination benchmarks:
 
 ```bash
-docker compose up -d --wait
-just build-all
-just bench --suite lab --scenario pg_dest_insert --output target/benchmarks/lab/pg-insert.jsonl
-just bench --suite lab --scenario pg_dest_copy --output target/benchmarks/lab/pg-copy.jsonl
+just bench-lab pg_dest_insert
+just bench-lab pg_dest_copy
 ```
 
 Compare the two generated artifact sets directly:
@@ -41,6 +39,7 @@ just bench-compare benchmarks/baselines/main/pr.jsonl target/benchmarks/pr/candi
 ## Layout
 
 - `benchmarks/scenarios/` contains declarative benchmark scenarios
+- `benchmarks/environments/` contains benchmark environment profiles
 - `benchmarks/analysis/` contains comparison and reporting logic
 - `benchmarks/baselines/` contains checked-in smoke baselines
 
@@ -49,5 +48,12 @@ just bench-compare benchmarks/baselines/main/pr.jsonl target/benchmarks/pr/candi
 - The checked-in baseline is a local and CI smoke mechanism.
 - The long-term comparison model is rolling artifacts from `main`.
 - Native lab scenarios currently include `pg_dest_insert` and `pg_dest_copy`.
-- Use `--scenario <id>` to run one lab scenario without executing the entire suite.
+- Native lab scenarios should be run with `--env-profile <id>` or the `just bench-lab` wrapper.
+- The repo-supported local profile is `local-dev-postgres`.
+- Override local profile settings with:
+  `RB_BENCH_PG_HOST`, `RB_BENCH_PG_PORT`, `RB_BENCH_PG_USER`,
+  `RB_BENCH_PG_PASSWORD`, `RB_BENCH_PG_DATABASE`,
+  `RB_BENCH_PG_SOURCE_SCHEMA`, and `RB_BENCH_PG_DEST_SCHEMA`.
+- The core benchmark runner executes against an existing environment; it does not
+  auto-provision Docker/Testcontainers itself.
 - The retired benchmark harness should not be reintroduced.

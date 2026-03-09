@@ -185,7 +185,8 @@ sdk            (types -- plugins depend only on this)
 | `just lint` | Clippy with `-D warnings` |
 | `just fmt` | Format all crates |
 | `just ci` | Run the external-readiness baseline (`fmt`, `clippy`, workspace tests, e2e compile) |
-| `just bench` | Run benchmark scenarios (`--suite pr` or `--suite lab --scenario <id>`) |
+| `just bench` | Run benchmark scenarios (`--suite pr` or `--suite lab --scenario <id> --env-profile <profile>`) |
+| `just bench-lab <scenario>` | Bring up the local benchmark env and run one lab scenario |
 
 By default, `just` builds in release mode. Set `MODE=debug` for debug builds:
 
@@ -202,10 +203,8 @@ just ci
 For the native Postgres destination benchmarks:
 
 ```bash
-docker compose up -d --wait
-just build-all
-just bench --suite lab --scenario pg_dest_insert --output target/benchmarks/lab/pg-insert.jsonl
-just bench --suite lab --scenario pg_dest_copy --output target/benchmarks/lab/pg-copy.jsonl
+just bench-lab pg_dest_insert
+just bench-lab pg_dest_copy
 ```
 
 Benchmark details live in [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md).
