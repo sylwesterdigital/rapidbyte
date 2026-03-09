@@ -19,22 +19,8 @@ execution:
   iterations: 3
   warmups: 1
 environment:
-  postgres:
-    stream_name: bench_events
-    source:
-      host: 127.0.0.1
-      port: 5433
-      user: postgres
-      password: postgres
-      database: rapidbyte_test
-      schema: analytics
-    destination:
-      host: 127.0.0.1
-      port: 5433
-      user: postgres
-      password: postgres
-      database: rapidbyte_test
-      schema: raw
+  ref: local-dev-postgres
+  stream_name: bench_events
 connector_options:
   source:
     sync_mode: full_refresh

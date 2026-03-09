@@ -312,6 +312,20 @@ bindings:
         std::env::remove_var("RB_BENCH_PG_DEST_SCHEMA");
     }
 
+    #[test]
+    fn committed_local_dev_profile_parses() {
+        let profile_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("environments/local-dev-postgres.yaml");
+
+        let profile = EnvironmentProfile::from_path(&profile_path).expect("parse profile");
+
+        assert_eq!(profile.id, "local-dev-postgres");
+        assert_eq!(profile.provider.kind, "docker_compose");
+        assert_eq!(profile.services["postgres"].port, 5433);
+        assert_eq!(profile.bindings.source.schema, "analytics");
+        assert_eq!(profile.bindings.destination.schema, "raw");
+    }
+
     fn temp_dir(label: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "rapidbyte-benchmark-{label}-{}-{}",

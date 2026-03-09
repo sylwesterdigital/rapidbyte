@@ -420,4 +420,24 @@ assertions:
         );
         assert!(scenario.environment.postgres.is_none());
     }
+
+    #[test]
+    fn native_lab_scenarios_reference_committed_environment_profile() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scenarios/lab");
+        let insert =
+            ScenarioManifest::from_path(&root.join("pg_dest_insert.yaml")).expect("insert");
+        let copy = ScenarioManifest::from_path(&root.join("pg_dest_copy.yaml")).expect("copy");
+
+        for scenario in [insert, copy] {
+            assert_eq!(
+                scenario.environment.reference.as_deref(),
+                Some("local-dev-postgres")
+            );
+            assert_eq!(
+                scenario.environment.stream_name.as_deref(),
+                Some("bench_events")
+            );
+            assert!(scenario.environment.postgres.is_none());
+        }
+    }
 }

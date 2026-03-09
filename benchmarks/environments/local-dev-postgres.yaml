@@ -1,0 +1,19 @@
+id: local-dev-postgres
+provider:
+  kind: docker_compose
+  project_dir: .
+services:
+  postgres:
+    kind: postgres
+    host: 127.0.0.1
+    port: 5433
+    user: postgres
+    password: postgres
+    database: rapidbyte_test
+bindings:
+  source:
+    service: postgres
+    schema: analytics
+  destination:
+    service: postgres
+    schema: raw
