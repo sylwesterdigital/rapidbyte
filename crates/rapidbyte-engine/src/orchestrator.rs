@@ -240,18 +240,18 @@ fn auto_worker_core_budget(available_cores: u32) -> u32 {
 fn decode_incremental_last_value(
     raw: String,
     tie_breaker_field: Option<&str>,
-) -> Result<CursorValue, PipelineError> {
+) -> CursorValue {
     if tie_breaker_field.is_some() {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
             if value
                 .as_object()
                 .is_some_and(|object| object.contains_key("cursor"))
             {
-                return Ok(CursorValue::Json { value });
+                return CursorValue::Json { value };
             }
         }
 
-        return Ok(CursorValue::Json {
+        return CursorValue::Json {
             value: serde_json::json!({
                 "cursor": {
                     "type": "utf8",
@@ -261,10 +261,10 @@ fn decode_incremental_last_value(
                     "type": "null",
                 }
             }),
-        });
+        };
     }
 
-    Ok(CursorValue::Utf8 { value: raw })
+    CursorValue::Utf8 { value: raw }
 }
 
 #[allow(clippy::struct_field_names)]
@@ -454,6 +454,7 @@ pub async fn run_pipeline(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn execute_pipeline_once(
     config: &PipelineConfig,
     options: &ExecutionOptions,
@@ -732,8 +733,7 @@ fn build_stream_contexts(
                         .get_cursor(&pipeline_id, &StreamName::new(s.name.clone()))
                         .map_err(|e| PipelineError::Infrastructure(e.into()))?
                         .and_then(|cs| cs.cursor_value)
-                        .map(|v| decode_incremental_last_value(v, s.tie_breaker_field.as_deref()))
-                        .transpose()?;
+                        .map(|v| decode_incremental_last_value(v, s.tie_breaker_field.as_deref()));
                     Some(CursorInfo {
                         cursor_field: cursor_field.clone(),
                         tie_breaker_field: s.tie_breaker_field.clone(),
@@ -1158,7 +1158,7 @@ async fn execute_streams(
                 // Dry-run: collect frames instead of running destination plugin
                 let compression = params.compression;
                 let collector_handle = tokio::task::spawn_blocking(move || {
-                    collect_dry_run_frames(dest_rx, dry_run_limit, compression)
+                    collect_dry_run_frames(&dest_rx, dry_run_limit, compression)
                 });
 
                 let src_result = src_handle.await.map_err(|e| {
@@ -1573,12 +1573,12 @@ async fn finalize_run(
 }
 
 async fn complete_run_status(
-    state: Arc<dyn StateBackend>,
+    backend: Arc<dyn StateBackend>,
     run_id: i64,
     status: RunStatus,
-    stats: RunStats,
+    run_stats: RunStats,
 ) -> Result<(), PipelineError> {
-    tokio::task::spawn_blocking(move || state.complete_run(run_id, status, &stats))
+    tokio::task::spawn_blocking(move || backend.complete_run(run_id, status, &run_stats))
         .await
         .map_err(|e| {
             PipelineError::Infrastructure(anyhow::anyhow!("complete_run task panicked: {e}"))
@@ -1669,7 +1669,7 @@ fn finalization_failed_stats(
 /// Collect frames from a channel, decode IPC, enforce row limit.
 /// Used in dry-run mode instead of the destination runner.
 fn collect_dry_run_frames(
-    receiver: sync_mpsc::Receiver<Frame>,
+    receiver: &sync_mpsc::Receiver<Frame>,
     limit: Option<u64>,
     compression: Option<rapidbyte_runtime::CompressionCodec>,
 ) -> Result<DryRunStreamResult, PipelineError> {
@@ -1974,7 +1974,7 @@ mod dry_run_tests {
         tx.send(Frame::EndStream).unwrap();
         drop(tx);
 
-        let result = collect_dry_run_frames(rx, None, None).unwrap();
+        let result = collect_dry_run_frames(&rx, None, None).unwrap();
         assert_eq!(result.total_rows, 5);
         assert_eq!(result.batches.len(), 1);
     }
@@ -1992,7 +1992,7 @@ mod dry_run_tests {
         tx.send(Frame::EndStream).unwrap();
         drop(tx);
 
-        let result = collect_dry_run_frames(rx, Some(10), None).unwrap();
+        let result = collect_dry_run_frames(&rx, Some(10), None).unwrap();
         assert_eq!(result.total_rows, 10);
         let total: usize = result.batches.iter().map(RecordBatch::num_rows).sum();
         assert_eq!(total, 10);
@@ -2013,7 +2013,7 @@ mod dry_run_tests {
         tx.send(Frame::EndStream).unwrap();
         drop(tx);
 
-        let result = collect_dry_run_frames(rx, Some(12), None).unwrap();
+        let result = collect_dry_run_frames(&rx, Some(12), None).unwrap();
         assert_eq!(result.total_rows, 12);
     }
 }
@@ -2192,8 +2192,7 @@ resources:
 
     #[test]
     fn decode_incremental_last_value_wraps_legacy_scalar_for_tie_breaker_streams() {
-        let value = decode_incremental_last_value("42".to_string(), Some("id"))
-            .expect("legacy scalar cursor should decode");
+        let value = decode_incremental_last_value("42".to_string(), Some("id"));
 
         match value {
             CursorValue::Json { value } => {
@@ -2208,8 +2207,7 @@ resources:
     #[test]
     fn decode_incremental_last_value_preserves_composite_json() {
         let raw = r#"{"cursor":{"type":"utf8","value":"2024-01-01T00:00:00Z"},"tie_breaker":{"type":"int64","value":7}}"#;
-        let value = decode_incremental_last_value(raw.to_string(), Some("id"))
-            .expect("composite cursor should decode");
+        let value = decode_incremental_last_value(raw.to_string(), Some("id"));
 
         match value {
             CursorValue::Json { value } => {
@@ -2644,13 +2642,13 @@ mod finalize_run_state_tests {
         fn complete_run(
             &self,
             _run_id: i64,
-            status: RunStatus,
-            stats: &RunStats,
+            run_status: RunStatus,
+            completion_stats: &RunStats,
         ) -> StateResult<()> {
             self.complete_statuses
                 .lock()
                 .expect("complete statuses lock poisoned")
-                .push((status, stats.error_message.clone()));
+                .push((run_status, completion_stats.error_message.clone()));
             Ok(())
         }
 

@@ -167,7 +167,7 @@ fn print_diagnostic(result: &PipelineResult) {
     let partitioned: Vec<_> = result
         .stream_metrics
         .iter()
-        .filter(|m| m.partition_count.map_or(false, |c| c > 1))
+        .filter(|m| m.partition_count.is_some_and(|c| c > 1))
         .collect();
 
     if !partitioned.is_empty() {

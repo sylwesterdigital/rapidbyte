@@ -1,4 +1,4 @@
-//! In-memory Arrow workspace backed by DataFusion for SQL queries.
+//! In-memory Arrow workspace backed by `DataFusion` for SQL queries.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,7 +17,7 @@ pub struct TableSummary {
 }
 
 /// In-memory workspace that holds streamed `RecordBatch`es and registers them
-/// as DataFusion `MemTable`s for interactive SQL queries.
+/// as `DataFusion` `MemTable`s for interactive SQL queries.
 pub struct ArrowWorkspace {
     tables: HashMap<String, (SchemaRef, Vec<RecordBatch>)>,
     session: SessionContext,
@@ -36,7 +36,7 @@ impl ArrowWorkspace {
     /// Insert or replace a table in the workspace.
     ///
     /// Deregisters any previous table with the same name, creates a new
-    /// `MemTable`, registers it with the DataFusion session, and stores
+    /// `MemTable`, registers it with the `DataFusion` session, and stores
     /// the schema and batches in the internal map.
     ///
     /// # Errors

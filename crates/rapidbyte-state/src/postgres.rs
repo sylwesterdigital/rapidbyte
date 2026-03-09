@@ -164,13 +164,15 @@ impl PostgresStateBackend {
         std::env::var("RAPIDBYTE_STATE_PG_POOL_SIZE")
             .ok()
             .and_then(|raw| raw.parse::<usize>().ok())
-            .map(|size| size.max(1))
-            .unwrap_or_else(|| {
-                std::thread::available_parallelism()
-                    .map(std::num::NonZeroUsize::get)
-                    .unwrap_or(4)
-                    .clamp(1, 8)
-            })
+            .map_or_else(
+                || {
+                    std::thread::available_parallelism()
+                        .map(std::num::NonZeroUsize::get)
+                        .unwrap_or(4)
+                        .clamp(1, 8)
+                },
+                |size| size.max(1),
+            )
     }
 
     /// Current UTC time as ISO-8601 string.

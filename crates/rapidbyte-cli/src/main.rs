@@ -110,9 +110,7 @@ async fn main() -> ExitCode {
         Commands::Check { pipeline } => commands::check::execute(&pipeline, verbosity).await,
         Commands::Discover { pipeline } => commands::discover::execute(&pipeline, verbosity).await,
         Commands::Plugins => commands::plugins::execute(verbosity),
-        Commands::Scaffold { name, output } => {
-            commands::scaffold::run(&name, output.as_deref()).map_err(Into::into)
-        }
+        Commands::Scaffold { name, output } => commands::scaffold::run(&name, output.as_deref()),
         Commands::Dev => commands::dev::execute().await,
     };
 

@@ -39,15 +39,14 @@ pub fn run(name: &str, output: Option<&str>) -> Result<()> {
     };
 
     // Compute output directory
-    let base_dir = match output {
-        Some(dir) => PathBuf::from(dir).join(name),
-        None => {
-            let kind_dir = match role {
-                Role::Source => "plugins/sources",
-                Role::Destination => "plugins/destinations",
-            };
-            PathBuf::from(kind_dir).join(name)
-        }
+    let base_dir = if let Some(dir) = output {
+        PathBuf::from(dir).join(name)
+    } else {
+        let kind_dir = match role {
+            Role::Source => "plugins/sources",
+            Role::Destination => "plugins/destinations",
+        };
+        PathBuf::from(kind_dir).join(name)
     };
 
     if base_dir.exists() {

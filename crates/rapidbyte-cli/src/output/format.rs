@@ -39,10 +39,11 @@ pub fn format_rate(count: u64, duration_secs: f64) -> String {
     } else if rate >= 1000.0 {
         format!("{:.0}K", rate / 1000.0)
     } else {
-        format!("{:.0}", rate)
+        format!("{rate:.0}")
     }
 }
 
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn format_byte_rate(bytes: u64, duration_secs: f64) -> String {
     if duration_secs <= 0.0 {
         return "N/A".to_string();
@@ -51,6 +52,7 @@ pub fn format_byte_rate(bytes: u64, duration_secs: f64) -> String {
     format!("{}/s", format_bytes(bps.round() as u64))
 }
 
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn format_duration(secs: f64) -> String {
     if secs >= 60.0 {
         let mins = (secs / 60.0).floor() as u64;

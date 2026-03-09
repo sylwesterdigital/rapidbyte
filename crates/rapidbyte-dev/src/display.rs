@@ -35,7 +35,7 @@ pub(crate) fn format_count(n: u64) -> String {
     result.chars().rev().collect()
 }
 
-/// Print Arrow RecordBatches as a Unicode box-drawing table with row count footer.
+/// Print Arrow `RecordBatch`es as a Unicode box-drawing table with row count footer.
 pub(crate) fn print_batches(batches: &[RecordBatch]) {
     if batches.is_empty() || batches.iter().all(|b| b.num_rows() == 0) {
         eprintln!("0 rows");
@@ -45,7 +45,7 @@ pub(crate) fn print_batches(batches: &[RecordBatch]) {
     match pretty_format_batches(batches) {
         Ok(table) => {
             eprintln!("{table}");
-            let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+            let total_rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
             eprintln!(
                 "{} row{}",
                 format_count(total_rows as u64),

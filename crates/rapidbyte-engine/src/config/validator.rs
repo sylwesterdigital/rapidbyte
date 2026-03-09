@@ -62,6 +62,7 @@ fn validate_plugin_overrides(
 /// # Errors
 ///
 /// Returns an error listing all validation failures found in the pipeline config.
+#[allow(clippy::too_many_lines)]
 pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
     let mut errors = Vec::new();
 

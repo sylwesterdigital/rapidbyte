@@ -64,6 +64,9 @@ pub struct SqliteStateBackend {
     conn: Mutex<Connection>,
 }
 
+#[cfg(test)]
+type RunRow = (String, i64, i64, Option<String>, Option<String>);
+
 impl SqliteStateBackend {
     /// Open or create a `SQLite` state database at `path`.
     ///
@@ -148,10 +151,7 @@ impl SqliteStateBackend {
     }
 
     #[cfg(test)]
-    fn get_run_row(
-        &self,
-        run_id: i64,
-    ) -> error::Result<(String, i64, i64, Option<String>, Option<String>)> {
+    fn get_run_row(&self, run_id: i64) -> error::Result<RunRow> {
         let conn = self.lock_conn()?;
         conn.query_row(
             "SELECT status, records_read, bytes_written, finished_at, error_message \
