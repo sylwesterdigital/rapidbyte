@@ -1,8 +1,13 @@
+#![cfg_attr(not(test), allow(dead_code))]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use rapidbyte_types::wire::Feature;
 use serde::{Deserialize, Serialize};
+
+use crate::workload::WorkloadFamily;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -21,7 +26,7 @@ pub struct ScenarioConnectorRef {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkloadProfile {
-    pub family: String,
+    pub family: WorkloadFamily,
     pub rows: u64,
 }
 
@@ -42,6 +47,8 @@ pub struct ScenarioManifest {
     pub tags: Vec<String>,
     #[serde(default)]
     pub connectors: Vec<ScenarioConnectorRef>,
+    #[serde(default)]
+    pub requires: Vec<Feature>,
     pub workload: WorkloadProfile,
     pub execution: ExecutionProfile,
 }
@@ -74,6 +81,50 @@ pub fn discover_scenarios(root: &Path) -> Result<Vec<ScenarioManifest>> {
         scenarios.push(ScenarioManifest::from_path(&path)?);
     }
     Ok(scenarios)
+}
+
+pub fn filter_scenarios<'a>(
+    scenarios: &'a [ScenarioManifest],
+    suite: Option<&str>,
+    tags: &[&str],
+) -> Vec<&'a ScenarioManifest> {
+    scenarios
+        .iter()
+        .filter(|scenario| suite.is_none_or(|wanted| scenario.suite == wanted))
+        .filter(|scenario| {
+            tags.iter()
+                .all(|tag| scenario.tags.iter().any(|entry| entry == tag))
+        })
+        .collect()
+}
+
+pub fn validate_scenario_capabilities(
+    scenario: &ScenarioManifest,
+    available: &[Feature],
+) -> Result<()> {
+    let missing: Vec<String> = scenario
+        .requires
+        .iter()
+        .filter(|feature| !available.contains(feature))
+        .map(feature_name)
+        .collect();
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    bail!(
+        "scenario {} requires unsupported feature(s): {}",
+        scenario.id,
+        missing.join(", ")
+    );
+}
+
+fn feature_name(feature: &Feature) -> String {
+    serde_json::to_string(feature)
+        .unwrap_or_else(|_| "\"unknown\"".to_string())
+        .trim_matches('"')
+        .to_string()
 }
 
 fn collect_yaml_files(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {

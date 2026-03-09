@@ -1,6 +1,8 @@
+mod adapters;
 mod artifact;
 mod cli;
 mod scenario;
+mod workload;
 
 use anyhow::Result;
 use clap::Parser;

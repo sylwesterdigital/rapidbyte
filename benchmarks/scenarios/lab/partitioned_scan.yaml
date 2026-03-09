@@ -1,0 +1,21 @@
+id: lab_partitioned_pipeline
+name: Lab partitioned pipeline
+suite: lab
+kind: pipeline
+tags:
+  - lab
+  - synthetic
+  - partitioned
+connectors:
+  - kind: source
+    plugin: postgres
+  - kind: destination
+    plugin: postgres
+requires:
+  - partitioned_read
+workload:
+  family: partitioned_scan
+  rows: 10000
+execution:
+  iterations: 5
+  warmups: 1
