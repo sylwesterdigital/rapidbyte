@@ -153,6 +153,16 @@ mod tests {
         assert_eq!(plan.expected_records_written, 1_000_000);
     }
 
+    #[test]
+    fn logical_environment_reference_does_not_require_embedded_connections() {
+        let plan =
+            resolve_workload_plan(&logical_environment_reference_scenario()).expect("resolve");
+
+        assert!(plan.seed.is_none());
+        assert_eq!(plan.expected_records_read, 1_000_000);
+        assert_eq!(plan.expected_records_written, 1_000_000);
+    }
+
     fn postgres_pipeline_scenario() -> ScenarioManifest {
         ScenarioManifest {
             id: "pg_dest_insert".to_string(),
@@ -180,6 +190,8 @@ mod tests {
                 warmups: 1,
             },
             environment: EnvironmentConfig {
+                reference: None,
+                stream_name: None,
                 postgres: Some(PostgresBenchmarkEnvironment {
                     stream_name: "bench_events".to_string(),
                     source: PostgresConnectionProfile {
@@ -199,6 +211,52 @@ mod tests {
                         schema: "raw".to_string(),
                     },
                 }),
+            },
+            connector_options: ConnectorOptions {
+                source: SourceConnectorOptions {
+                    sync_mode: Some(SyncMode::FullRefresh),
+                    config: Default::default(),
+                },
+                destination: DestinationConnectorOptions {
+                    load_method: Some("insert".to_string()),
+                    write_mode: Some("append".to_string()),
+                    config: Default::default(),
+                },
+            },
+            assertions: ScenarioAssertions::default(),
+        }
+    }
+
+    fn logical_environment_reference_scenario() -> ScenarioManifest {
+        ScenarioManifest {
+            id: "pg_dest_insert".to_string(),
+            name: "Postgres destination via insert".to_string(),
+            suite: "lab".to_string(),
+            kind: BenchmarkKind::Pipeline,
+            tags: vec!["lab".to_string()],
+            connectors: vec![
+                ScenarioConnectorRef {
+                    kind: "source".to_string(),
+                    plugin: "postgres".to_string(),
+                },
+                ScenarioConnectorRef {
+                    kind: "destination".to_string(),
+                    plugin: "postgres".to_string(),
+                },
+            ],
+            requires: vec![],
+            workload: WorkloadProfile {
+                family: WorkloadFamily::NarrowAppend,
+                rows: 1_000_000,
+            },
+            execution: ExecutionProfile {
+                iterations: 3,
+                warmups: 1,
+            },
+            environment: EnvironmentConfig {
+                reference: Some("local-dev-postgres".to_string()),
+                stream_name: Some("bench_events".to_string()),
+                postgres: None,
             },
             connector_options: ConnectorOptions {
                 source: SourceConnectorOptions {

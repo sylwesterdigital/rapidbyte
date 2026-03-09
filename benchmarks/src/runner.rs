@@ -553,6 +553,8 @@ mod tests {
                 warmups: 1,
             },
             environment: EnvironmentConfig {
+                reference: None,
+                stream_name: None,
                 postgres: Some(PostgresBenchmarkEnvironment {
                     stream_name: "bench_events".to_string(),
                     source: PostgresConnectionProfile {

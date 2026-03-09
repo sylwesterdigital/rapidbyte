@@ -40,6 +40,10 @@ pub struct ExecutionProfile {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EnvironmentConfig {
+    #[serde(rename = "ref")]
+    pub reference: Option<String>,
+    pub stream_name: Option<String>,
+    #[serde(default)]
     pub postgres: Option<PostgresBenchmarkEnvironment>,
 }
 
@@ -364,5 +368,56 @@ assertions:
             scenario.assertions.expected_records_written,
             Some(1_000_000)
         );
+    }
+
+    #[test]
+    fn parses_logical_environment_reference_and_stream_name() {
+        let root = temp_dir("logical-env");
+        let scenario_path = root.join("pg_dest_insert.yaml");
+        fs::write(
+            &scenario_path,
+            r#"
+id: pg_dest_insert
+name: Postgres destination via insert
+suite: lab
+kind: pipeline
+tags: [lab, postgres]
+connectors:
+  - kind: source
+    plugin: postgres
+  - kind: destination
+    plugin: postgres
+workload:
+  family: narrow_append
+  rows: 1000000
+execution:
+  iterations: 3
+  warmups: 1
+environment:
+  ref: local-dev-postgres
+  stream_name: bench_events
+connector_options:
+  source:
+    sync_mode: full_refresh
+  destination:
+    load_method: insert
+    write_mode: append
+assertions:
+  expected_records_read: 1000000
+  expected_records_written: 1000000
+"#,
+        )
+        .expect("write scenario");
+
+        let scenario = ScenarioManifest::from_path(&scenario_path).expect("parse scenario");
+        assert_eq!(
+            scenario.environment.reference.as_deref(),
+            Some("local-dev-postgres")
+        );
+        assert_eq!(
+            scenario.environment.stream_name.as_deref(),
+            Some("bench_events")
+        );
+        assert!(scenario.environment.postgres.is_none());
     }
 }
