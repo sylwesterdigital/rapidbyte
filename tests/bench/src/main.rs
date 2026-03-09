@@ -976,6 +976,20 @@ fn shared_postgres_port() -> Result<u16> {
 mod tests {
     use super::*;
 
+    fn test_bench_context() -> BenchContext {
+        BenchContext {
+            root: repo_root().expect("repo root"),
+            plugin_dir: PathBuf::from("/tmp/rapidbyte-test-plugins"),
+            results_file: PathBuf::from("/tmp/rapidbyte-test-results.jsonl"),
+            bench_session_id: "test-session".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 5433,
+            user: "postgres".to_string(),
+            password: "postgres".to_string(),
+            database: "rapidbyte_test".to_string(),
+        }
+    }
+
     #[test]
     fn profile_defaults_match_expected_rows() {
         assert_eq!(Profile::Small.default_rows(), 100_000);
@@ -988,5 +1002,22 @@ mod tests {
         assert!(resolve_aot(false, false));
         assert!(resolve_aot(true, false));
         assert!(!resolve_aot(false, true));
+    }
+
+    #[test]
+    fn insert_benchmark_fixture_explicitly_uses_insert() {
+        let pipeline_path = render_pipeline(&test_bench_context(), "insert").expect("render insert");
+        let rendered = fs::read_to_string(&pipeline_path).expect("read rendered pipeline");
+        let yaml: YamlValue = serde_yaml::from_str(&rendered).expect("parse rendered pipeline");
+
+        let load_method = yaml
+            .get("destination")
+            .and_then(YamlValue::as_mapping)
+            .and_then(|destination| destination.get(YamlValue::String("config".to_string())))
+            .and_then(YamlValue::as_mapping)
+            .and_then(|config| config.get(YamlValue::String("load_method".to_string())))
+            .and_then(YamlValue::as_str);
+
+        assert_eq!(load_method, Some("insert"));
     }
 }
