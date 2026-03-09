@@ -96,6 +96,12 @@ e2e *args="":
 bench *args="":
     cargo run --manifest-path benchmarks/Cargo.toml -- run {{args}}
 
+# Run a lab benchmark scenario against a named benchmark environment profile
+bench-lab scenario env="local-dev-postgres" *args="":
+    docker compose up -d --wait
+    just build-all
+    cargo run --manifest-path benchmarks/Cargo.toml -- run --suite lab --scenario {{scenario}} --env-profile {{env}} --output target/benchmarks/lab/{{scenario}}.jsonl {{args}}
+
 # Compare two benchmark artifact sets
 bench-compare baseline candidate *args="":
     python3 benchmarks/analysis/compare.py {{baseline}} {{candidate}} {{args}}
