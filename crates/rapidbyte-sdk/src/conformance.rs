@@ -221,11 +221,7 @@ mod tests {
 
     #[allow(async_fn_in_trait)]
     impl ConformanceHarness for FakeHarness {
-        async fn seed(
-            &self,
-            _table: &str,
-            _row_count: u64,
-        ) -> Result<(), Box<dyn Error>> {
+        async fn seed(&self, _table: &str, _row_count: u64) -> Result<(), Box<dyn Error>> {
             Ok(())
         }
 
@@ -233,10 +229,7 @@ mod tests {
             Ok(self.seeded_rows)
         }
 
-        async fn collect_ids(
-            &self,
-            _table: &str,
-        ) -> Result<Vec<String>, Box<dyn Error>> {
+        async fn collect_ids(&self, _table: &str) -> Result<Vec<String>, Box<dyn Error>> {
             Ok(self.source_ids.clone())
         }
 
