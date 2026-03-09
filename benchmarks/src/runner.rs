@@ -17,8 +17,8 @@ use crate::scenario::{
     filter_scenarios, PostgresBenchmarkEnvironment, PostgresConnectionProfile, ScenarioManifest,
 };
 use crate::workload::{
-    resolve_workload_plan, resolve_workload_plan_with_environment, PostgresSeedPlan,
-    ResolvedWorkloadPlan, WorkloadFamily,
+    resolve_workload_plan_with_environment, PostgresSeedPlan, ResolvedWorkloadPlan,
+    WorkloadFamily,
 };
 
 const BENCH_JSON_MARKER: &str = "@@BENCH_JSON@@";
@@ -468,7 +468,7 @@ mod tests {
         ScenarioAssertions, ScenarioConnectorRef, ScenarioManifest, SourceConnectorOptions,
         WorkloadProfile,
     };
-    use crate::workload::WorkloadFamily;
+    use crate::workload::{resolve_workload_plan, WorkloadFamily};
 
     #[test]
     fn bench_json_maps_into_benchmark_artifact() {

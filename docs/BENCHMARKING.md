@@ -50,6 +50,8 @@ just bench-compare benchmarks/baselines/main/pr.jsonl target/benchmarks/pr/candi
 - Native lab scenarios currently include `pg_dest_insert` and `pg_dest_copy`.
 - Native lab scenarios should be run with `--env-profile <id>` or the `just bench-lab` wrapper.
 - The repo-supported local profile is `local-dev-postgres`.
+- `just bench-lab` reuses the shared repo Docker Compose project, so it works
+  from linked git worktrees without creating a second Postgres container.
 - Override local profile settings with:
   `RB_BENCH_PG_HOST`, `RB_BENCH_PG_PORT`, `RB_BENCH_PG_USER`,
   `RB_BENCH_PG_PASSWORD`, `RB_BENCH_PG_DATABASE`,

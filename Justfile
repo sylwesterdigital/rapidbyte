@@ -98,7 +98,7 @@ bench *args="":
 
 # Run a lab benchmark scenario against a named benchmark environment profile
 bench-lab scenario env="local-dev-postgres" *args="":
-    docker compose up -d --wait
+    ./scripts/bench-env-up.sh
     just build-all
     cargo run --manifest-path benchmarks/Cargo.toml -- run --suite lab --scenario {{scenario}} --env-profile {{env}} --output target/benchmarks/lab/{{scenario}}.jsonl {{args}}
 
