@@ -91,7 +91,7 @@ fn render_source_mapping(
     let mut stream = Mapping::new();
     stream.insert(
         str_key("name"),
-        YamlValue::String(qualified_stream_name(&env.source.schema, &env.stream_name)),
+        YamlValue::String(env.stream_name.clone()),
     );
     stream.insert(
         str_key("sync_mode"),
@@ -213,10 +213,6 @@ fn ensure_postgres_connector(scenario: &ScenarioManifest, kind: &str) -> Result<
     Ok(())
 }
 
-fn qualified_stream_name(schema: &str, stream_name: &str) -> String {
-    format!("{schema}.{stream_name}")
-}
-
 fn merge_yaml_mapping(
     target: &mut Mapping,
     overrides: &std::collections::BTreeMap<String, YamlValue>,
@@ -266,7 +262,7 @@ mod tests {
         assert_eq!(parsed.destination.use_ref, "postgres");
         assert_eq!(parsed.destination.write_mode, PipelineWriteMode::Append);
         assert_eq!(parsed.source.streams.len(), 1);
-        assert_eq!(parsed.source.streams[0].name, "analytics.bench_events");
+        assert_eq!(parsed.source.streams[0].name, "bench_events");
         assert_eq!(parsed.source.streams[0].sync_mode, SyncMode::FullRefresh);
     }
 
@@ -329,7 +325,7 @@ mod tests {
                 user: "postgres".to_string(),
                 password: "postgres".to_string(),
                 database: "rapidbyte_test".to_string(),
-                schema: "analytics".to_string(),
+                schema: "public".to_string(),
             },
             destination: PostgresConnectionProfile {
                 host: "dest-db".to_string(),
@@ -387,7 +383,7 @@ mod tests {
                         user: "postgres".to_string(),
                         password: "postgres".to_string(),
                         database: "bench_source".to_string(),
-                        schema: "analytics".to_string(),
+                        schema: "public".to_string(),
                     },
                     destination: PostgresConnectionProfile {
                         host: "dest-db".to_string(),

@@ -52,6 +52,9 @@ just bench-compare benchmarks/baselines/main/pr.jsonl target/benchmarks/pr/candi
 - The repo-supported local profile is `local-dev-postgres`.
 - `just bench-lab` reuses the shared repo Docker Compose project, so it works
   from linked git worktrees without creating a second Postgres container.
+- `just bench-lab` also normalizes the local `postgres` role password to the
+  repo default before running lab benchmarks, so stale local container state
+  does not break auth after config changes.
 - Override local profile settings with:
   `RB_BENCH_PG_HOST`, `RB_BENCH_PG_PORT`, `RB_BENCH_PG_USER`,
   `RB_BENCH_PG_PASSWORD`, `RB_BENCH_PG_DATABASE`,

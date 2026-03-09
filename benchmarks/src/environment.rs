@@ -322,7 +322,7 @@ bindings:
         assert_eq!(profile.id, "local-dev-postgres");
         assert_eq!(profile.provider.kind, "docker_compose");
         assert_eq!(profile.services["postgres"].port, 5433);
-        assert_eq!(profile.bindings.source.schema, "analytics");
+        assert_eq!(profile.bindings.source.schema, "public");
         assert_eq!(profile.bindings.destination.schema, "raw");
     }
 

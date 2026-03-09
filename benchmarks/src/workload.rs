@@ -140,7 +140,7 @@ mod tests {
         let plan = resolve_workload_plan(&postgres_pipeline_scenario()).expect("resolve workload");
         let seed = plan.seed.expect("postgres seed plan");
 
-        assert_eq!(seed.source_schema, "analytics");
+        assert_eq!(seed.source_schema, "public");
         assert_eq!(seed.source_table, "bench_events");
         assert_eq!(seed.destination_schema, "raw");
         assert_eq!(seed.destination_table, "bench_events");
@@ -203,7 +203,7 @@ mod tests {
                         user: "postgres".to_string(),
                         password: "postgres".to_string(),
                         database: "bench_source".to_string(),
-                        schema: "analytics".to_string(),
+                        schema: "public".to_string(),
                     },
                     destination: PostgresConnectionProfile {
                         host: "dest-db".to_string(),

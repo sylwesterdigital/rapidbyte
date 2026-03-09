@@ -13,7 +13,7 @@ services:
 bindings:
   source:
     service: postgres
-    schema: analytics
+    schema: public
   destination:
     service: postgres
     schema: raw

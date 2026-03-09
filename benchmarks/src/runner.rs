@@ -191,18 +191,7 @@ fn execute_real_postgres_pipeline(
 
 fn invoke_rapidbyte_run(pipeline_path: &Path) -> Result<JsonValue> {
     let repo_root = std::env::current_dir().context("failed to determine benchmark cwd")?;
-    let output = Command::new("cargo")
-        .current_dir(&repo_root)
-        .env("RAPIDBYTE_BENCH", "1")
-        .args([
-            "run",
-            "--quiet",
-            "--manifest-path",
-            "crates/rapidbyte-cli/Cargo.toml",
-            "--",
-            "run",
-        ])
-        .arg(pipeline_path)
+    let output = rapidbyte_run_command(&repo_root, pipeline_path)
         .output()
         .context("failed to invoke rapidbyte CLI")?;
 
@@ -216,6 +205,24 @@ fn invoke_rapidbyte_run(pipeline_path: &Path) -> Result<JsonValue> {
     }
 
     parse_bench_json_from_stdout(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn rapidbyte_run_command(repo_root: &Path, pipeline_path: &Path) -> Command {
+    let mut command = Command::new("cargo");
+    command
+        .current_dir(repo_root)
+        .env("RAPIDBYTE_BENCH", "1")
+        .env("RAPIDBYTE_PLUGIN_DIR", repo_root.join("target").join("plugins"))
+        .args([
+            "run",
+            "--quiet",
+            "--manifest-path",
+            "crates/rapidbyte-cli/Cargo.toml",
+            "--",
+            "run",
+        ])
+        .arg(pipeline_path);
+    command
 }
 
 fn parse_bench_json_from_stdout(stdout: &str) -> Result<JsonValue> {
@@ -569,6 +576,27 @@ mod tests {
         .expect_err("logical environment should require an env profile");
 
         assert!(err.to_string().contains("requires environment profile"));
+    }
+
+    #[test]
+    fn rapidbyte_run_command_sets_plugin_dir() {
+        let repo_root = std::path::Path::new("/tmp/rapidbyte");
+        let pipeline_path = std::path::Path::new("/tmp/rapidbyte/bench.yaml");
+
+        let command = rapidbyte_run_command(repo_root, pipeline_path);
+        let envs = command.get_envs().collect::<Vec<_>>();
+        let plugin_dir = envs
+            .iter()
+            .find_map(|(key, value)| {
+                if *key == std::ffi::OsStr::new("RAPIDBYTE_PLUGIN_DIR") {
+                    value.as_deref()
+                } else {
+                    None
+                }
+            })
+            .expect("plugin dir env");
+
+        assert_eq!(plugin_dir, std::ffi::OsStr::new("/tmp/rapidbyte/target/plugins"));
     }
 
     fn sample_postgres_scenario(load_method: &str) -> ScenarioManifest {
