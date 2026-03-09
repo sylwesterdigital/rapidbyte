@@ -382,7 +382,7 @@ pub struct Config {
     pub host: String,
     /// Port
     #[serde(default = "default_port")]
-    #[schema(default = 3306)]
+    #[schema(default = 0)]
     pub port: u16,
     /// Database user
     pub user: String,
@@ -395,7 +395,7 @@ pub struct Config {
 }
 
 fn default_port() -> u16 {
-    3306 // TODO: Change to your plugin's default port
+    0
 }
 
 impl Config {
@@ -414,62 +414,118 @@ fn gen_client_rs() -> &'static str {
 use crate::config::Config;
 
 pub async fn validate(config: &Config) -> Result<ValidationResult, PluginError> {
-    // TODO: Connect and run a test query
     let _ = config;
-    Ok(ValidationResult {
-        status: ValidationStatus::Success,
-        message: "Validation not yet implemented".to_string(),
-    })
+    Err(PluginError::config(
+        "UNIMPLEMENTED",
+        "Connection validation is not implemented yet".to_string(),
+    ))
 }
 "#
 }
 
 fn gen_reader_rs() -> &'static str {
-    r"use rapidbyte_sdk::prelude::*;
+    r#"use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
 pub async fn read_stream(config: &Config, ctx: &Context, stream: &StreamContext) -> Result<ReadSummary, PluginError> {
-    // TODO: Implement stream reading
     let _ = (config, ctx, stream);
-    Ok(ReadSummary {
-        records_read: 0,
-        bytes_read: 0,
-        batches_emitted: 0,
-        checkpoint_count: 0,
-        records_skipped: 0,
-        perf: None,
-    })
+    Err(PluginError::internal(
+        "UNIMPLEMENTED",
+        "Stream reading is not implemented yet".to_string(),
+    ))
 }
-"
+"#
 }
 
 fn gen_schema_rs() -> &'static str {
-    r"use rapidbyte_sdk::prelude::*;
+    r#"use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
 pub fn discover_catalog(config: &Config) -> Result<Catalog, PluginError> {
-    // TODO: Implement schema discovery
     let _ = config;
-    Ok(Catalog { streams: vec![] })
+    Err(PluginError::schema(
+        "UNIMPLEMENTED",
+        "Schema discovery is not implemented yet".to_string(),
+    ))
 }
-"
+"#
 }
 
 fn gen_writer_rs() -> &'static str {
-    r"use rapidbyte_sdk::prelude::*;
+    r#"use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
 pub async fn write_stream(config: &Config, ctx: &Context, stream: &StreamContext) -> Result<WriteSummary, PluginError> {
-    // TODO: Implement stream writing
     let _ = (config, ctx, stream);
-    Ok(WriteSummary {
-        records_written: 0,
-        bytes_written: 0,
-        batches_written: 0,
-        checkpoint_count: 0,
-        records_failed: 0,
-        perf: None,
-    })
+    Err(PluginError::internal(
+        "UNIMPLEMENTED",
+        "Stream writing is not implemented yet".to_string(),
+    ))
 }
-"
+"#
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::run;
+
+    #[test]
+    fn scaffold_source_generates_explicit_unimplemented_stubs() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let temp_dir_str = temp_dir
+            .path()
+            .to_str()
+            .expect("temp dir path should be valid utf-8");
+
+        run("source-example", Some(temp_dir_str)).expect("source scaffold should succeed");
+
+        let plugin_dir = temp_dir.path().join("source-example").join("src");
+        let config_rs = fs::read_to_string(plugin_dir.join("config.rs"))
+            .expect("config.rs should exist in generated source plugin");
+        let client_rs = fs::read_to_string(plugin_dir.join("client.rs"))
+            .expect("client.rs should exist in generated source plugin");
+        let reader_rs = fs::read_to_string(plugin_dir.join("reader.rs"))
+            .expect("reader.rs should exist in generated source plugin");
+        let schema_rs = fs::read_to_string(plugin_dir.join("schema.rs"))
+            .expect("schema.rs should exist in generated source plugin");
+
+        assert!(!config_rs.contains("3306"));
+        assert!(client_rs.contains("PluginError::config("));
+        assert!(client_rs.contains("\"UNIMPLEMENTED\""));
+        assert!(reader_rs.contains("PluginError::internal("));
+        assert!(reader_rs.contains("\"UNIMPLEMENTED\""));
+        assert!(schema_rs.contains("PluginError::schema("));
+        assert!(schema_rs.contains("\"UNIMPLEMENTED\""));
+        assert!(!client_rs.contains("ValidationStatus::Success"));
+        assert!(!reader_rs.contains("records_read: 0"));
+    }
+
+    #[test]
+    fn scaffold_destination_generates_explicit_unimplemented_stubs() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let temp_dir_str = temp_dir
+            .path()
+            .to_str()
+            .expect("temp dir path should be valid utf-8");
+
+        run("dest-example", Some(temp_dir_str)).expect("destination scaffold should succeed");
+
+        let plugin_dir = temp_dir.path().join("dest-example").join("src");
+        let config_rs = fs::read_to_string(plugin_dir.join("config.rs"))
+            .expect("config.rs should exist in generated destination plugin");
+        let client_rs = fs::read_to_string(plugin_dir.join("client.rs"))
+            .expect("client.rs should exist in generated destination plugin");
+        let writer_rs = fs::read_to_string(plugin_dir.join("writer.rs"))
+            .expect("writer.rs should exist in generated destination plugin");
+
+        assert!(!config_rs.contains("3306"));
+        assert!(client_rs.contains("PluginError::config("));
+        assert!(client_rs.contains("\"UNIMPLEMENTED\""));
+        assert!(writer_rs.contains("PluginError::internal("));
+        assert!(writer_rs.contains("\"UNIMPLEMENTED\""));
+        assert!(!client_rs.contains("ValidationStatus::Success"));
+        assert!(!writer_rs.contains("records_written: 0"));
+    }
 }

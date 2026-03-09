@@ -22,3 +22,6 @@ arrow = { version = "53", features = ["prettyprint"] }
 libc = "0.2"
 indicatif = { workspace = true }
 console = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
