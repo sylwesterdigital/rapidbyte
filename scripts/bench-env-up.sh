@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-git_common_dir="$(git rev-parse --git-common-dir)"
+git_common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
 repo_root="$(dirname "$git_common_dir")"
 compose_project="$(basename "$repo_root")"
 
