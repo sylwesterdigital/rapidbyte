@@ -12,6 +12,11 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - name: Install just
+        run: cargo install just --locked
 
       - name: Verify benchmark crate
         run: cargo test -p rapidbyte-benchmarks
@@ -20,9 +25,7 @@ jobs:
         run: python3 -m unittest benchmarks.analysis.tests.test_compare
 
       - name: Run PR benchmark smoke suite
-        run: |
-          cargo run --manifest-path benchmarks/Cargo.toml -- run --suite pr --output target/benchmarks/pr/candidate.jsonl
-          python3 benchmarks/analysis/compare.py benchmarks/baselines/main/pr.jsonl target/benchmarks/pr/candidate.jsonl --min-samples 1
+        run: just bench-pr
 
       - name: Upload PR benchmark artifact
         uses: actions/upload-artifact@v4

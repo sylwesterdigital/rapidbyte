@@ -114,8 +114,10 @@ benchmarks *args="":
     cargo run --manifest-path benchmarks/Cargo.toml -- {{args}}
 
 # Run the PR benchmark smoke suite and compare against the checked-in baseline artifact set
-bench-pr:
-    cargo run --manifest-path benchmarks/Cargo.toml -- run --suite pr --output target/benchmarks/pr/candidate.jsonl
+bench-pr env="local-dev-postgres":
+    ./scripts/bench-env-up.sh
+    just build-all
+    cargo run --manifest-path benchmarks/Cargo.toml -- run --suite pr --env-profile {{env}} --output target/benchmarks/pr/candidate.jsonl
     python3 benchmarks/analysis/compare.py benchmarks/baselines/main/pr.jsonl target/benchmarks/pr/candidate.jsonl --min-samples 1
 
 # ── Utilities ────────────────────────────────────────────────────────
