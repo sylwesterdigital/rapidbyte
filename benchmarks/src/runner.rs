@@ -571,6 +571,48 @@ mod tests {
     }
 
     #[test]
+    fn destination_benchmark_execution_reports_not_implemented() {
+        let mut scenario = sample_postgres_scenario("insert");
+        scenario.id = "pg_dest_write".to_string();
+        scenario.kind = BenchmarkKind::Destination;
+        scenario.connectors = vec![ScenarioConnectorRef {
+            kind: "destination".to_string(),
+            plugin: "postgres".to_string(),
+        }];
+
+        let workload = resolve_workload_plan(&scenario).expect("workload");
+        let env = scenario.environment.postgres.as_ref();
+        let err = execute_scenario_once(&scenario, &workload, env)
+            .expect_err("destination not implemented");
+
+        assert!(err.to_string().contains("pg_dest_write"));
+        assert!(err
+            .to_string()
+            .contains("destination benchmarks are not implemented"));
+    }
+
+    #[test]
+    fn transform_benchmark_execution_reports_not_implemented() {
+        let mut scenario = sample_postgres_scenario("insert");
+        scenario.id = "sql_transform".to_string();
+        scenario.kind = BenchmarkKind::Transform;
+        scenario.connectors = vec![ScenarioConnectorRef {
+            kind: "transform".to_string(),
+            plugin: "sql".to_string(),
+        }];
+
+        let workload = resolve_workload_plan(&scenario).expect("workload");
+        let env = scenario.environment.postgres.as_ref();
+        let err = execute_scenario_once(&scenario, &workload, env)
+            .expect_err("transform not implemented");
+
+        assert!(err.to_string().contains("sql_transform"));
+        assert!(err
+            .to_string()
+            .contains("transform benchmarks are not implemented"));
+    }
+
+    #[test]
     fn committed_pr_smoke_scenario_requires_environment_profile_resolution() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let output_path = std::env::temp_dir().join(format!(

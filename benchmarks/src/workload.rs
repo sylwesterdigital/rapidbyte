@@ -58,9 +58,11 @@ pub fn resolve_workload_plan_with_environment(
         WorkloadFamily::CdcBackfill => 1024,
         WorkloadFamily::TransformHeavy => 1536,
     };
-    let seed = match environment {
-        Some(env) => resolve_real_seed_plan(scenario, env, target_row_bytes)?,
-        None => None,
+    let seed = match (scenario.kind, environment) {
+        (crate::scenario::BenchmarkKind::Pipeline, Some(env)) => {
+            resolve_real_seed_plan(scenario, env, target_row_bytes)?
+        }
+        _ => None,
     };
     let expected_records_read = scenario
         .assertions
