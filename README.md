@@ -208,9 +208,13 @@ Before opening a pull request, run:
 just ci
 ```
 
-The local pre-commit hook is auto-fix only: it formats code, re-stages any
-changed staged paths, then asks you to review the diff and re-run `git commit`.
-It does not replace `just ci`.
+The local hooks are intentionally light:
+- `pre-commit` auto-formats Rust changes, re-stages touched staged paths, then
+  stops so you can review the diff and re-run `git commit`
+- `pre-push` auto-formats the checked-out repo state, stages newly formatted
+  files, then stops so you can review, create a follow-up commit, and push again
+
+They do not replace `just ci`.
 
 For the native Postgres destination benchmarks:
 

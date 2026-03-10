@@ -36,9 +36,12 @@ just run tests/fixtures/pipelines/simple_pg_to_pg.yaml -v
 2. Make your changes and run `just ci` plus any extra checks listed in [Testing Expectations](#testing-expectations).
 3. Open a pull request against `main`.
 
-The local Git hook installed by `just install-hooks` is intentionally light: it
-auto-runs formatting before commit and stops if it changed files so you can
-review and recommit. It is a convenience layer, not a substitute for `just ci`.
+The local Git hooks installed by `just install-hooks` are intentionally light:
+`pre-commit` auto-runs formatting before commit and stops if it changed staged
+files so you can review and recommit, while `pre-push` auto-runs formatting on
+the checked-out repo state, stages newly formatted files, and stops so you can
+review, commit, and push again. They are convenience layers, not a substitute
+for `just ci`.
 
 ### New Plugins
 
@@ -104,10 +107,12 @@ is the local orchestration wrapper for the repo-supported dev environment.
 ## Local Hooks
 
 - `just install-hooks` sets `git config core.hooksPath .githooks`
-- the repo-managed pre-commit hook runs the fast auto-fix path only
+- the repo-managed `pre-commit` and `pre-push` hooks run the fast auto-fix path only
 - today that auto-fix path is `cargo fmt --all`
 - if the hook changes files, it re-stages the originally staged paths it
   touched and aborts the commit so you can inspect the diff and re-run `git commit`
+- if `pre-push` changes files, it stages newly formatted files and aborts the
+  push so you can inspect the diff, create a follow-up commit, and push again
 - no Python `pre-commit` package is required
 
 ## PR Process

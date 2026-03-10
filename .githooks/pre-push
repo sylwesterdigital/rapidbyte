@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+if [ ! -f Cargo.toml ]; then
+  exit 0
+fi
+
+mapfile -t modified_before_fmt < <(git diff --name-only --diff-filter=M)
+
+cargo fmt --all
+
+mapfile -t modified_after_fmt < <(git diff --name-only --diff-filter=M)
+
+newly_modified=()
+for path in "${modified_after_fmt[@]}"; do
+  already_modified=0
+  for existing_path in "${modified_before_fmt[@]}"; do
+    if [ "$path" = "$existing_path" ]; then
+      already_modified=1
+      break
+    fi
+  done
+  if [ "$already_modified" -eq 0 ]; then
+    newly_modified+=("$path")
+  fi
+done
+
+if [ "${#newly_modified[@]}" -gt 0 ]; then
+  git add -- "${newly_modified[@]}"
+  cat <<'EOF'
+pre-push: applied formatting updates.
+review the diff, create a commit, and push again.
+EOF
+  exit 1
+fi
+
+cargo fmt --all -- --check
