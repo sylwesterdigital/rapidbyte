@@ -71,7 +71,7 @@ Refer to [docs/CODING_STYLE.md](docs/CODING_STYLE.md) for the full style guide. 
 | `just fmt` | Always |
 | `just lint` | Always |
 | `just test` | Always |
-| `just bench-pr` | Connector changes or benchmark-sensitive changes |
+| `just bench-pr` | Local perf-regression checks when connector or hot-path changes need investigation |
 | `just e2e` | Engine, runtime, or plugin changes |
 | `cargo bench` | Hot-path code changes |
 
@@ -79,11 +79,11 @@ Refer to [docs/CODING_STYLE.md](docs/CODING_STYLE.md) for the full style guide. 
 
 The next-generation benchmark platform lives under `benchmarks/`.
 
-- `just bench --suite pr --output target/benchmarks/pr/results.jsonl` runs the smoke suite
-- `just bench-pr` runs the PR smoke suite and compares it against the checked-in baseline artifact set
+- `just bench --suite pr --output target/benchmarks/pr/results.jsonl --env-profile local-dev-postgres` runs the PR smoke suite directly
+- `just bench-pr` is the recommended local perf-regression command; it provisions the local benchmark environment, runs the PR smoke suite, and compares against the checked-in baseline artifact set
 - `just bench-lab pg_dest_insert` runs the native Postgres INSERT benchmark using the committed `local-dev-postgres` environment profile
 - `just bench-lab pg_dest_copy` runs the native Postgres COPY benchmark using the committed `local-dev-postgres` environment profile
-- the checked-in baseline is a local smoke mechanism; CI and future infra should replace it with rolling `main` artifacts
+- the checked-in baseline is a local/manual smoke mechanism; the GitHub benchmark workflow is `workflow_dispatch` only until dedicated benchmark runners exist
 
 For direct runner use, provide an environment profile explicitly:
 
