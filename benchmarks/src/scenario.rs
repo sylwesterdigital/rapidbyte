@@ -447,4 +447,20 @@ assertions:
             assert!(scenario.environment.postgres.is_none());
         }
     }
+
+    #[test]
+    fn pr_smoke_scenario_references_committed_environment_profile() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scenarios/pr");
+        let scenario = ScenarioManifest::from_path(&root.join("smoke.yaml")).expect("smoke");
+
+        assert_eq!(
+            scenario.environment.reference.as_deref(),
+            Some("local-dev-postgres")
+        );
+        assert_eq!(
+            scenario.environment.stream_name.as_deref(),
+            Some("bench_events")
+        );
+        assert!(!scenario.tags.iter().any(|tag| tag == "synthetic"));
+    }
 }

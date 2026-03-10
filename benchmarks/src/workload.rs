@@ -85,9 +85,12 @@ pub fn resolve_workload_plan_with_environment(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use rapidbyte_types::wire::SyncMode;
 
     use super::{resolve_workload_plan, WorkloadFamily};
+    use crate::environment::resolve_postgres_environment;
     use crate::scenario::{
         BenchmarkKind, ConnectorOptions, DestinationConnectorOptions, EnvironmentConfig,
         ExecutionProfile, PostgresBenchmarkEnvironment, PostgresConnectionProfile,
@@ -172,6 +175,30 @@ mod tests {
         let err = resolve_workload_plan(&scenario).expect_err("unsupported real workload");
         assert!(err.to_string().contains("partitioned_scan"));
         assert!(err.to_string().contains("PartitionedScan"));
+    }
+
+    #[test]
+    fn pr_smoke_scenario_resolves_to_real_workload_plan() {
+        let benchmarks_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = benchmarks_root
+            .parent()
+            .expect("benchmarks crate should live under repo root")
+            .to_path_buf();
+        let scenario = crate::scenario::ScenarioManifest::from_path(
+            &benchmarks_root.join("scenarios/pr/smoke.yaml"),
+        )
+        .expect("smoke scenario");
+        let resolved_env =
+            resolve_postgres_environment(&repo_root, &scenario, Some("local-dev-postgres"))
+                .expect("resolve env")
+                .expect("env");
+
+        let plan = super::resolve_workload_plan_with_environment(&scenario, Some(&resolved_env))
+            .expect("plan");
+
+        assert!(!plan.synthetic);
+        assert!(plan.seed.is_some());
+        assert_eq!(plan.expected_records_read, scenario.workload.rows);
     }
 
     fn postgres_pipeline_scenario() -> ScenarioManifest {

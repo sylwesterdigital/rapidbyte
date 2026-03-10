@@ -4,7 +4,9 @@ suite: pr
 kind: pipeline
 tags:
   - pr
-  - synthetic
+  - postgres
+  - native
+  - insert
 connectors:
   - kind: source
     plugin: postgres
@@ -16,3 +18,15 @@ workload:
 execution:
   iterations: 3
   warmups: 1
+environment:
+  ref: local-dev-postgres
+  stream_name: bench_events
+connector_options:
+  source:
+    sync_mode: full_refresh
+  destination:
+    load_method: insert
+    write_mode: append
+assertions:
+  expected_records_read: 1000
+  expected_records_written: 1000

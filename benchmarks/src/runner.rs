@@ -570,6 +570,34 @@ mod tests {
             .contains("source benchmarks are not implemented"));
     }
 
+    #[test]
+    fn committed_pr_smoke_scenario_requires_environment_profile_resolution() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let output_path = std::env::temp_dir().join(format!(
+            "rapidbyte-pr-smoke-env-required-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let scenario =
+            crate::scenario::ScenarioManifest::from_path(&root.join("scenarios/pr/smoke.yaml"))
+                .expect("smoke scenario");
+
+        let err = emit_scenario_artifacts(
+            root,
+            &[scenario],
+            Some("pr"),
+            &["pr_smoke_pipeline".to_string()],
+            None,
+            &output_path,
+        )
+        .expect_err("pr smoke should require env profile");
+
+        assert!(err.to_string().contains("requires environment profile"));
+    }
+
     fn sample_postgres_scenario(load_method: &str) -> ScenarioManifest {
         ScenarioManifest {
             id: format!("pg_dest_{load_method}"),
