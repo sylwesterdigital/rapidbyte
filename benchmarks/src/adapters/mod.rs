@@ -3,8 +3,10 @@ pub mod source;
 pub mod transform;
 
 use anyhow::{bail, Context, Result};
+use serde_yaml::Mapping;
 
-use crate::scenario::{BenchmarkKind, ScenarioManifest};
+use crate::scenario::{BenchmarkKind, PostgresBenchmarkEnvironment, ScenarioManifest};
+use crate::workload::{PostgresSeedPlan, ResolvedWorkloadPlan};
 
 pub use destination::DestinationAdapter;
 pub use source::SourceAdapter;
@@ -15,6 +17,12 @@ pub struct ResolvedScenarioAdapters {
     pub source: Option<SourceAdapter>,
     pub destination: Option<DestinationAdapter>,
     pub transforms: Vec<TransformAdapter>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedPipelineComponents {
+    pub source: Mapping,
+    pub destination: Mapping,
 }
 
 pub fn resolve_scenario_adapters(scenario: &ScenarioManifest) -> Result<ResolvedScenarioAdapters> {
@@ -180,6 +188,73 @@ pub fn validate_scenario_adapters(scenario: &ScenarioManifest) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+pub fn prepare_pipeline_components(
+    scenario: &ScenarioManifest,
+    env: &PostgresBenchmarkEnvironment,
+) -> Result<PreparedPipelineComponents> {
+    let resolved = resolve_scenario_adapters(scenario)?;
+    if scenario.kind != BenchmarkKind::Pipeline {
+        bail!("scenario {} is not a pipeline benchmark", scenario.id);
+    }
+
+    let source = resolved.source.with_context(|| {
+        format!(
+            "scenario {} pipeline benchmark requires a source connector",
+            scenario.id
+        )
+    })?;
+    let destination = resolved.destination.with_context(|| {
+        format!(
+            "scenario {} pipeline benchmark requires a destination connector",
+            scenario.id
+        )
+    })?;
+
+    Ok(PreparedPipelineComponents {
+        source: source.prepare_pipeline_mapping(scenario, env)?,
+        destination: destination.prepare_pipeline_mapping(scenario, env)?,
+    })
+}
+
+pub fn resolve_real_seed_plan(
+    scenario: &ScenarioManifest,
+    env: &PostgresBenchmarkEnvironment,
+    target_row_bytes: u64,
+) -> Result<Option<PostgresSeedPlan>> {
+    let resolved = resolve_scenario_adapters(scenario)?;
+    let source = resolved.source.with_context(|| {
+        format!(
+            "scenario {} requires a source adapter for real workload planning",
+            scenario.id
+        )
+    })?;
+    source.seed_plan(scenario, env, target_row_bytes)
+}
+
+pub fn prepare_pipeline_fixtures(
+    scenario: &ScenarioManifest,
+    workload: &ResolvedWorkloadPlan,
+    env: &PostgresBenchmarkEnvironment,
+) -> Result<()> {
+    let resolved = resolve_scenario_adapters(scenario)?;
+    let source = resolved.source.with_context(|| {
+        format!(
+            "scenario {} pipeline benchmark requires a source connector",
+            scenario.id
+        )
+    })?;
+    let destination = resolved.destination.with_context(|| {
+        format!(
+            "scenario {} pipeline benchmark requires a destination connector",
+            scenario.id
+        )
+    })?;
+
+    source.prepare_fixtures(scenario, workload, env)?;
+    destination.prepare_fixtures(scenario, workload, env)?;
     Ok(())
 }
 

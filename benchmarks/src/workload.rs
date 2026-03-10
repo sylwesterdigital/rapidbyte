@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 
+use crate::adapters::resolve_real_seed_plan;
 use crate::scenario::{PostgresBenchmarkEnvironment, ScenarioManifest};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -57,14 +58,10 @@ pub fn resolve_workload_plan_with_environment(
         WorkloadFamily::CdcBackfill => 1024,
         WorkloadFamily::TransformHeavy => 1536,
     };
-    let seed = environment.map(|env| PostgresSeedPlan {
-        source_schema: env.source.schema.clone(),
-        source_table: env.stream_name.clone(),
-        destination_schema: env.destination.schema.clone(),
-        destination_table: env.stream_name.clone(),
-        rows: scenario.workload.rows,
-        target_row_bytes,
-    });
+    let seed = match environment {
+        Some(env) => resolve_real_seed_plan(scenario, env, target_row_bytes)?,
+        None => None,
+    };
     let expected_records_read = scenario
         .assertions
         .expected_records_read
@@ -164,6 +161,17 @@ mod tests {
         assert!(plan.seed.is_none());
         assert_eq!(plan.expected_records_read, 1_000_000);
         assert_eq!(plan.expected_records_written, 1_000_000);
+    }
+
+    #[test]
+    fn unsupported_real_workload_family_fails_explicitly() {
+        let mut scenario = postgres_pipeline_scenario();
+        scenario.id = "partitioned_scan".to_string();
+        scenario.workload.family = WorkloadFamily::PartitionedScan;
+
+        let err = resolve_workload_plan(&scenario).expect_err("unsupported real workload");
+        assert!(err.to_string().contains("partitioned_scan"));
+        assert!(err.to_string().contains("PartitionedScan"));
     }
 
     fn postgres_pipeline_scenario() -> ScenarioManifest {

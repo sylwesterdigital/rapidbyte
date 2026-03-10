@@ -4,10 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
 use serde_yaml::{Mapping, Value as YamlValue};
 
-use crate::scenario::{BenchmarkKind, PostgresConnectionProfile, ScenarioManifest};
+use crate::adapters::prepare_pipeline_components;
+use crate::scenario::{BenchmarkKind, ScenarioManifest};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedPipeline {
@@ -40,8 +40,7 @@ fn render_pipeline_yaml_with_environment_and_state(
         bail!("scenario {} is not a pipeline benchmark", scenario.id);
     }
 
-    ensure_postgres_connector(scenario, "source")?;
-    ensure_postgres_connector(scenario, "destination")?;
+    let prepared = prepare_pipeline_components(scenario, env)?;
 
     let mut root = Mapping::new();
     root.insert(str_key("version"), YamlValue::String("1.0".to_string()));
@@ -49,13 +48,10 @@ fn render_pipeline_yaml_with_environment_and_state(
         str_key("pipeline"),
         YamlValue::String(format!("benchmark_{}", scenario.id)),
     );
-    root.insert(
-        str_key("source"),
-        YamlValue::Mapping(render_source_mapping(scenario, env)?),
-    );
+    root.insert(str_key("source"), YamlValue::Mapping(prepared.source));
     root.insert(
         str_key("destination"),
-        YamlValue::Mapping(render_destination_mapping(scenario, env)?),
+        YamlValue::Mapping(prepared.destination),
     );
     root.insert(str_key("state"), render_state_mapping(state_connection));
 
@@ -81,118 +77,6 @@ pub fn write_rendered_pipeline(
     Ok(RenderedPipeline { path, yaml })
 }
 
-fn render_source_mapping(
-    scenario: &ScenarioManifest,
-    env: &crate::scenario::PostgresBenchmarkEnvironment,
-) -> Result<Mapping> {
-    let mut source = Mapping::new();
-    source.insert(str_key("use"), YamlValue::String("postgres".to_string()));
-    source.insert(
-        str_key("config"),
-        YamlValue::Mapping(render_source_config(
-            &env.source,
-            &scenario.connector_options.source.config,
-        )?),
-    );
-
-    let mut stream = Mapping::new();
-    stream.insert(str_key("name"), YamlValue::String(env.stream_name.clone()));
-    stream.insert(
-        str_key("sync_mode"),
-        to_yaml_value(
-            scenario
-                .connector_options
-                .source
-                .sync_mode
-                .unwrap_or(rapidbyte_types::wire::SyncMode::FullRefresh),
-        )?,
-    );
-    source.insert(
-        str_key("streams"),
-        YamlValue::Sequence(vec![YamlValue::Mapping(stream)]),
-    );
-    Ok(source)
-}
-
-fn render_destination_mapping(
-    scenario: &ScenarioManifest,
-    env: &crate::scenario::PostgresBenchmarkEnvironment,
-) -> Result<Mapping> {
-    let mut destination = Mapping::new();
-    destination.insert(str_key("use"), YamlValue::String("postgres".to_string()));
-    destination.insert(
-        str_key("config"),
-        YamlValue::Mapping(render_destination_config(
-            &env.destination,
-            scenario
-                .connector_options
-                .destination
-                .load_method
-                .as_deref(),
-            &scenario.connector_options.destination.config,
-        )?),
-    );
-    destination.insert(
-        str_key("write_mode"),
-        YamlValue::String(
-            scenario
-                .connector_options
-                .destination
-                .write_mode
-                .clone()
-                .unwrap_or_else(|| "append".to_string()),
-        ),
-    );
-    Ok(destination)
-}
-
-fn render_source_config(
-    profile: &PostgresConnectionProfile,
-    overrides: &std::collections::BTreeMap<String, YamlValue>,
-) -> Result<Mapping> {
-    let mut mapping = postgres_connection_mapping(profile, false);
-    merge_yaml_mapping(&mut mapping, overrides)?;
-    Ok(mapping)
-}
-
-fn render_destination_config(
-    profile: &PostgresConnectionProfile,
-    load_method: Option<&str>,
-    overrides: &std::collections::BTreeMap<String, YamlValue>,
-) -> Result<Mapping> {
-    let mut mapping = postgres_connection_mapping(profile, true);
-    if let Some(load_method) = load_method {
-        mapping.insert(
-            str_key("load_method"),
-            YamlValue::String(load_method.to_string()),
-        );
-    }
-    merge_yaml_mapping(&mut mapping, overrides)?;
-    Ok(mapping)
-}
-
-fn postgres_connection_mapping(
-    profile: &PostgresConnectionProfile,
-    include_schema: bool,
-) -> Mapping {
-    let mut mapping = Mapping::new();
-    mapping.insert(str_key("host"), YamlValue::String(profile.host.clone()));
-    mapping.insert(str_key("port"), YamlValue::Number(profile.port.into()));
-    mapping.insert(str_key("user"), YamlValue::String(profile.user.clone()));
-    mapping.insert(
-        str_key("password"),
-        YamlValue::String(profile.password.clone()),
-    );
-    mapping.insert(
-        str_key("database"),
-        YamlValue::String(profile.database.clone()),
-    );
-    if include_schema {
-        mapping.insert(str_key("schema"), YamlValue::String(profile.schema.clone()));
-    }
-    mapping
-}
-
 fn render_state_mapping(state_connection: Option<&Path>) -> YamlValue {
     let mut state = Mapping::new();
     state.insert(str_key("backend"), YamlValue::String("sqlite".to_string()));
@@ -203,39 +87,6 @@ fn render_state_mapping(state_connection: Option<&Path>) -> YamlValue {
         );
     }
     YamlValue::Mapping(state)
-}
-
-fn ensure_postgres_connector(scenario: &ScenarioManifest, kind: &str) -> Result<()> {
-    let connector = scenario
-        .connectors
-        .iter()
-        .find(|entry| entry.kind == kind)
-        .with_context(|| format!("scenario {} is missing {kind} connector", scenario.id))?;
-    if connector.plugin != "postgres" {
-        bail!(
-            "scenario {} only supports postgres {kind} connector, found {}",
-            scenario.id,
-            connector.plugin
-        );
-    }
-    Ok(())
-}
-
-fn merge_yaml_mapping(
-    target: &mut Mapping,
-    overrides: &std::collections::BTreeMap<String, YamlValue>,
-) -> Result<()> {
-    for (key, value) in overrides {
-        if matches!(value, YamlValue::Mapping(_)) {
-            bail!("nested connector config override is not supported for key {key}");
-        }
-        target.insert(str_key(key), value.clone());
-    }
-    Ok(())
-}
-
-fn to_yaml_value<T: Serialize>(value: T) -> Result<YamlValue> {
-    serde_yaml::to_value(value).context("failed to serialize pipeline value")
 }
 
 fn str_key(value: &str) -> YamlValue {
@@ -354,6 +205,23 @@ mod tests {
         assert_eq!(parsed.source.config["host"], "source-db");
         assert_eq!(parsed.destination.config["host"], "dest-db");
         assert_eq!(parsed.destination.config["load_method"], "copy");
+    }
+
+    #[test]
+    fn pipeline_components_are_materialized_via_adapters() {
+        let scenario = sample_postgres_pipeline("copy");
+        let env = scenario.environment.postgres.clone().expect("env");
+
+        let prepared = prepare_pipeline_components(&scenario, &env).expect("prepare pipeline");
+
+        assert_eq!(
+            prepared.source["use"],
+            YamlValue::String("postgres".to_string())
+        );
+        assert_eq!(
+            prepared.destination["config"]["load_method"],
+            YamlValue::String("copy".to_string())
+        );
     }
 
     fn sample_postgres_pipeline(load_method: &str) -> ScenarioManifest {

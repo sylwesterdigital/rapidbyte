@@ -1,24 +1,19 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::fs::{self, File};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
-use postgres::{Client, Config as PostgresConfig, NoTls};
 use serde_json::{json, Map, Value as JsonValue};
 
+use crate::adapters::prepare_pipeline_fixtures;
 use crate::artifact::{ArtifactCorrectness, BenchmarkArtifact};
 use crate::environment::resolve_postgres_environment;
 use crate::output::write_artifact_json;
 use crate::pipeline::write_rendered_pipeline;
-use crate::scenario::{
-    filter_scenarios, PostgresBenchmarkEnvironment, PostgresConnectionProfile, ScenarioManifest,
-};
-use crate::workload::{
-    resolve_workload_plan_with_environment, PostgresSeedPlan, ResolvedWorkloadPlan, WorkloadFamily,
-};
+use crate::scenario::{filter_scenarios, PostgresBenchmarkEnvironment, ScenarioManifest};
+use crate::workload::{resolve_workload_plan_with_environment, ResolvedWorkloadPlan};
 
 const BENCH_JSON_MARKER: &str = "@@BENCH_JSON@@";
 const DEFAULT_GIT_SHA: &str = "unknown";
@@ -152,18 +147,40 @@ fn execute_scenario_once(
     workload: &ResolvedWorkloadPlan,
     environment: Option<&PostgresBenchmarkEnvironment>,
 ) -> Result<RunResult> {
-    if workload.seed.is_some() && !workload.synthetic {
-        return execute_real_postgres_pipeline(scenario, workload, environment);
-    }
+    match scenario.kind {
+        crate::scenario::BenchmarkKind::Pipeline => {
+            if workload.seed.is_some() && !workload.synthetic {
+                return execute_real_postgres_pipeline(scenario, workload, environment);
+            }
 
-    Ok(RunResult::success(
-        scenario.suite.clone(),
-        scenario.id.clone(),
-        json!({
-            "workload_family": format!("{:?}", scenario.workload.family),
-        }),
-        workload.rows,
-    ))
+            Ok(RunResult::success(
+                scenario.suite.clone(),
+                scenario.id.clone(),
+                json!({
+                    "workload_family": format!("{:?}", scenario.workload.family),
+                }),
+                workload.rows,
+            ))
+        }
+        crate::scenario::BenchmarkKind::Source => {
+            bail!(
+                "scenario {} source benchmarks are not implemented yet",
+                scenario.id
+            )
+        }
+        crate::scenario::BenchmarkKind::Destination => {
+            bail!(
+                "scenario {} destination benchmarks are not implemented yet",
+                scenario.id
+            )
+        }
+        crate::scenario::BenchmarkKind::Transform => {
+            bail!(
+                "scenario {} transform benchmarks are not implemented yet",
+                scenario.id
+            )
+        }
+    }
 }
 
 fn execute_real_postgres_pipeline(
@@ -178,7 +195,7 @@ fn execute_real_postgres_pipeline(
             scenario.id
         )
     })?;
-    prepare_postgres_seed(&scenario.workload.family, workload, env)?;
+    prepare_pipeline_fixtures(scenario, workload, env)?;
     let rendered = write_rendered_pipeline(scenario, env, &temp_root)?;
     let bench_json = invoke_rapidbyte_run(&rendered.path)?;
     enforce_row_count_assertions(&scenario.id, workload, &bench_json)?;
@@ -323,101 +340,6 @@ fn enforce_row_count_assertions(
     Ok(())
 }
 
-fn prepare_postgres_seed(
-    family: &WorkloadFamily,
-    workload: &ResolvedWorkloadPlan,
-    env: &PostgresBenchmarkEnvironment,
-) -> Result<()> {
-    let seed = workload
-        .seed
-        .as_ref()
-        .context("missing postgres seed plan")?;
-
-    let mut source = connect_postgres(&env.source)?;
-    source
-        .batch_execute(&format!(
-            "CREATE SCHEMA IF NOT EXISTS {source_schema};
-             DROP TABLE IF EXISTS {source_table} CASCADE;
-             CREATE TABLE {source_table} (
-                 id BIGINT PRIMARY KEY,
-                 tenant_id INTEGER NOT NULL,
-                 event_name TEXT NOT NULL,
-                 payload TEXT NOT NULL,
-                 created_at TIMESTAMPTZ NOT NULL
-             );",
-            source_schema = quote_identifier(&seed.source_schema),
-            source_table = qualified_table_name(&seed.source_schema, &seed.source_table),
-        ))
-        .context("failed to prepare benchmark source table")?;
-
-    seed_postgres_source(&mut source, family, seed)?;
-
-    let mut destination = connect_postgres(&env.destination)?;
-    destination
-        .batch_execute(&format!(
-            "CREATE SCHEMA IF NOT EXISTS {dest_schema};
-             DROP TABLE IF EXISTS {dest_table} CASCADE;",
-            dest_schema = quote_identifier(&seed.destination_schema),
-            dest_table = qualified_table_name(&seed.destination_schema, &seed.destination_table),
-        ))
-        .context("failed to prepare benchmark destination schema")?;
-
-    Ok(())
-}
-
-fn seed_postgres_source(
-    client: &mut Client,
-    family: &WorkloadFamily,
-    seed: &PostgresSeedPlan,
-) -> Result<()> {
-    match family {
-        WorkloadFamily::NarrowAppend => seed_narrow_append(client, seed),
-        other => bail!("postgres seed generation is not implemented for {other:?}"),
-    }
-}
-
-fn seed_narrow_append(client: &mut Client, seed: &PostgresSeedPlan) -> Result<()> {
-    let copy_stmt = format!(
-        "COPY {} (id, tenant_id, event_name, payload, created_at) FROM STDIN",
-        qualified_table_name(&seed.source_schema, &seed.source_table)
-    );
-    let mut writer = client
-        .copy_in(&copy_stmt)
-        .context("failed to start postgres benchmark seed copy")?;
-
-    for row in 0..seed.rows {
-        let row_id = row + 1;
-        let tenant_id = row % 128;
-        let event_name = if row % 2 == 0 { "signup" } else { "purchase" };
-        let payload = format!("payload-{row_id:010}");
-        writeln!(
-            writer,
-            "{row_id}\t{tenant_id}\t{event_name}\t{payload}\t2024-01-01 00:00:00+00"
-        )
-        .context("failed to write postgres benchmark seed row")?;
-    }
-
-    let _ = writer
-        .finish()
-        .context("failed to finish postgres benchmark seed copy")?;
-    Ok(())
-}
-
-fn connect_postgres(profile: &PostgresConnectionProfile) -> Result<Client> {
-    let mut config = PostgresConfig::new();
-    config.host(&profile.host);
-    config.port(profile.port);
-    config.user(&profile.user);
-    config.password(&profile.password);
-    config.dbname(&profile.database);
-    config.connect(NoTls).with_context(|| {
-        format!(
-            "failed to connect to postgres {}:{}",
-            profile.host, profile.port
-        )
-    })
-}
-
 fn benchmark_temp_root(scenario_id: &str) -> Result<PathBuf> {
     let root = std::env::current_dir()
         .context("failed to determine benchmark cwd")?
@@ -435,14 +357,6 @@ fn benchmark_temp_root(scenario_id: &str) -> Result<PathBuf> {
     fs::create_dir_all(&root)
         .with_context(|| format!("failed to create benchmark temp root {}", root.display()))?;
     Ok(root)
-}
-
-fn qualified_table_name(schema: &str, table: &str) -> String {
-    format!("{}.{}", quote_identifier(schema), quote_identifier(table))
-}
-
-fn quote_identifier(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 fn required_u64(json: &JsonValue, key: &str) -> Result<u64> {
@@ -610,6 +524,50 @@ mod tests {
             plugin_dir,
             std::ffi::OsStr::new("/tmp/rapidbyte/target/plugins")
         );
+    }
+
+    #[test]
+    fn source_benchmark_execution_reports_not_implemented() {
+        let mut scenario = sample_postgres_scenario("insert");
+        scenario.id = "pg_source_read".to_string();
+        scenario.kind = BenchmarkKind::Source;
+        scenario.connectors = vec![ScenarioConnectorRef {
+            kind: "source".to_string(),
+            plugin: "postgres".to_string(),
+        }];
+        scenario.environment = EnvironmentConfig {
+            reference: None,
+            stream_name: None,
+            postgres: Some(PostgresBenchmarkEnvironment {
+                stream_name: "bench_events".to_string(),
+                source: PostgresConnectionProfile {
+                    host: "source-db".to_string(),
+                    port: 5432,
+                    user: "postgres".to_string(),
+                    password: "postgres".to_string(),
+                    database: "bench_source".to_string(),
+                    schema: "analytics".to_string(),
+                },
+                destination: PostgresConnectionProfile {
+                    host: "dest-db".to_string(),
+                    port: 5432,
+                    user: "postgres".to_string(),
+                    password: "postgres".to_string(),
+                    database: "bench_dest".to_string(),
+                    schema: "raw".to_string(),
+                },
+            }),
+        };
+
+        let workload = resolve_workload_plan(&scenario).expect("workload");
+        let env = scenario.environment.postgres.as_ref();
+        let err =
+            execute_scenario_once(&scenario, &workload, env).expect_err("source not implemented");
+
+        assert!(err.to_string().contains("pg_source_read"));
+        assert!(err
+            .to_string()
+            .contains("source benchmarks are not implemented"));
     }
 
     fn sample_postgres_scenario(load_method: &str) -> ScenarioManifest {
