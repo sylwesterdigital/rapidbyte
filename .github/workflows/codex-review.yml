@@ -1,0 +1,121 @@
+name: Codex Review
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - ready_for_review
+
+jobs:
+  codex-review:
+    if: >-
+      ${{
+        !github.event.pull_request.draft &&
+        github.event.pull_request.head.repo.full_name == github.repository
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      final_message: ${{ steps.run_codex.outputs.final-message }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          fetch-depth: 1
+
+      - name: Pre-fetch base and head refs for the PR
+        run: |
+          git fetch --no-tags --depth=1 origin \
+            ${{ github.event.pull_request.base.sha }} \
+            ${{ github.event.pull_request.head.sha }}
+
+      - name: Run Codex PR review
+        id: run_codex
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          sandbox: read-only
+          safety-strategy: drop-sudo
+          prompt: |
+            You are reviewing pull request #${{ github.event.pull_request.number }}
+            for `${{ github.repository }}`.
+
+            Review only the changes introduced by this pull request.
+
+            Relevant diff commands:
+            - git log --oneline ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}
+            - git diff --stat ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}
+            - git diff ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}
+
+            Focus on:
+            - correctness bugs and behavioral regressions
+            - security issues
+            - missing or weak test coverage for changed behavior
+
+            Ignore style-only feedback unless it hides a correctness problem.
+            Be concise. If there are findings, rank the most important ones first.
+            If there are no material findings, say so plainly.
+
+            Pull request title:
+            ${{ github.event.pull_request.title }}
+
+            Pull request body:
+            ${{ github.event.pull_request.body }}
+
+  post-review:
+    if: >-
+      ${{
+        !github.event.pull_request.draft &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        needs.codex-review.outputs.final_message != ''
+      }}
+    runs-on: ubuntu-latest
+    needs: codex-review
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Upsert Codex review comment
+        uses: actions/github-script@v7
+        env:
+          CODEX_FINAL_MESSAGE: ${{ needs.codex-review.outputs.final_message }}
+          COMMENT_MARKER: <!-- codex-pr-review -->
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const body = `${process.env.COMMENT_MARKER}
+
+            ## Codex Review
+
+            ${process.env.CODEX_FINAL_MESSAGE}`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              per_page: 100,
+            });
+
+            const existing = comments.find((comment) =>
+              comment.user?.type === "Bot" &&
+              comment.body?.includes(process.env.COMMENT_MARKER)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+              return;
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body,
+            });
