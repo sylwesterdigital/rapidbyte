@@ -24,6 +24,12 @@ just bench-lab pg_dest_insert
 just bench-lab pg_dest_copy
 ```
 
+Print a readable summary for a single artifact set:
+
+```bash
+just bench-summary target/benchmarks/lab/pg_dest_copy.jsonl
+```
+
 Compare the two generated artifact sets directly:
 
 ```bash
@@ -48,6 +54,8 @@ just bench-compare benchmarks/baselines/main/pr.jsonl target/benchmarks/pr/candi
 - The checked-in baseline is a local and CI smoke mechanism.
 - The long-term comparison model is rolling artifacts from `main`.
 - Native lab scenarios currently include `pg_dest_insert` and `pg_dest_copy`.
+- Use `just bench-summary <artifact>` when you only have one JSONL artifact set
+  and want to inspect latency and throughput without a saved baseline.
 - Native lab scenarios should be run with `--env-profile <id>` or the `just bench-lab` wrapper.
 - The repo-supported local profile is `local-dev-postgres`.
 - `just bench-lab` reuses the shared repo Docker Compose project, so it works

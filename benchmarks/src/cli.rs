@@ -13,6 +13,7 @@ pub struct BenchCli {
 pub enum BenchCommand {
     Run(RunArgs),
     Compare(CompareArgs),
+    Summary(SummaryArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -39,8 +40,15 @@ pub struct CompareArgs {
     pub candidate: PathBuf,
 }
 
+#[derive(Debug, clap::Args)]
+pub struct SummaryArgs {
+    pub artifact: PathBuf,
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use clap::Parser;
 
     use super::{BenchCli, BenchCommand};
@@ -64,7 +72,26 @@ mod tests {
                 assert_eq!(args.env_profile.as_deref(), Some("local-dev-postgres"));
                 assert_eq!(args.scenarios, vec!["pg_dest_insert"]);
             }
-            BenchCommand::Compare(_) => panic!("expected run command"),
+            BenchCommand::Compare(_) | BenchCommand::Summary(_) => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn summary_args_accept_artifact_path() {
+        let cli = BenchCli::parse_from([
+            "rapidbyte-benchmarks",
+            "summary",
+            "target/benchmarks/lab/pg_dest_copy.jsonl",
+        ]);
+
+        match cli.command {
+            BenchCommand::Summary(args) => {
+                assert_eq!(
+                    args.artifact,
+                    PathBuf::from("target/benchmarks/lab/pg_dest_copy.jsonl")
+                );
+            }
+            BenchCommand::Run(_) | BenchCommand::Compare(_) => panic!("expected summary command"),
         }
     }
 }

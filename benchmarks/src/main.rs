@@ -7,6 +7,7 @@ mod output;
 mod pipeline;
 mod runner;
 mod scenario;
+mod summary;
 mod workload;
 
 use anyhow::Result;
@@ -43,6 +44,12 @@ fn main() -> Result<()> {
                 args.baseline.display(),
                 args.candidate.display()
             );
+        }
+        BenchCommand::Summary(args) => {
+            let root = std::env::current_dir()?;
+            let artifact_path = root.join(&args.artifact);
+            let rendered = summary::load_and_render_summary(&artifact_path)?;
+            println!("{rendered}");
         }
     }
 

@@ -109,6 +109,10 @@ bench-lab scenario env="local-dev-postgres" *args="":
 bench-compare baseline candidate *args="":
     python3 benchmarks/analysis/compare.py {{baseline}} {{candidate}} {{args}}
 
+# Print a readable summary for a single benchmark artifact set
+bench-summary artifact:
+    cargo run --manifest-path benchmarks/Cargo.toml -- summary {{artifact}}
+
 # Run the next-generation connector-agnostic benchmark runner
 benchmarks *args="":
     cargo run --manifest-path benchmarks/Cargo.toml -- {{args}}
