@@ -7,7 +7,7 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize, ConfigSchema)]
 pub struct Config {
     /// SQL query to execute against each incoming batch.
-    /// Must reference `input` as the table name.
+    /// Must reference the current stream name as the table name.
     pub query: String,
 }
 
@@ -41,11 +41,11 @@ mod tests {
     #[test]
     fn normalized_query_trims_valid_query() {
         let config = Config {
-            query: "  SELECT * FROM input  ".to_string(),
+            query: "  SELECT * FROM users  ".to_string(),
         };
         assert_eq!(
             config.normalized_query().expect("query should be valid"),
-            "SELECT * FROM input"
+            "SELECT * FROM users"
         );
     }
 }

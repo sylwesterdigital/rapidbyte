@@ -63,9 +63,6 @@ fn ensure_plugin(
     std::fs::create_dir_all(&kind_dir)
         .with_context(|| format!("failed to create {}", kind_dir.display()))?;
     let target_file = kind_dir.join(format!("{output_name}.wasm"));
-    if target_file.exists() {
-        return Ok(());
-    }
 
     let plugin_dir = repo_root.join("plugins").join(plugin_subpath);
     let status = Command::new("cargo")

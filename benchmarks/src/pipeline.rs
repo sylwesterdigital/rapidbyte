@@ -246,7 +246,7 @@ mod tests {
         scenario.connector_options.transforms = vec![TransformConnectorOptions {
             config: std::collections::BTreeMap::from([(
                 "query".to_string(),
-                YamlValue::String("SELECT * FROM input".to_string()),
+                YamlValue::String("SELECT * FROM bench_events".to_string()),
             )]),
         }];
 
@@ -255,7 +255,10 @@ mod tests {
 
         assert_eq!(parsed.transforms.len(), 1);
         assert_eq!(parsed.transforms[0].use_ref, "sql");
-        assert_eq!(parsed.transforms[0].config["query"], "SELECT * FROM input");
+        assert_eq!(
+            parsed.transforms[0].config["query"],
+            "SELECT * FROM bench_events"
+        );
     }
 
     fn sample_postgres_pipeline(load_method: &str) -> ScenarioManifest {

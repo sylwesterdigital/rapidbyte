@@ -583,9 +583,9 @@ async fn transform(
 
 The built-in `transform-sql` plugin uses Apache DataFusion to execute SQL
 queries on each batch. It registers incoming batches as a MemTable named
-`input`, parses the query once during init, re-plans it per batch against the
-current `input` snapshot, and streams result batches downstream without calling
-`collect()`.
+the current stream name, parses the query once during init, re-plans it per
+batch against that stream's current snapshot, and streams result batches
+downstream without calling `collect()`.
 
 ## 9. Networking
 
