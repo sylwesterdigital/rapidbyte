@@ -8,6 +8,37 @@ use rapidbyte_engine::config::types::{PipelineWriteMode, StateBackendKind};
 use rapidbyte_engine::config::validator;
 use rapidbyte_state::{SqliteStateBackend, StateBackend};
 use rapidbyte_types::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
+use std::sync::{LazyLock, Mutex};
+
+static PLUGIN_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+struct PluginDirEnvGuard {
+    previous: Option<String>,
+}
+
+impl PluginDirEnvGuard {
+    fn set(path: &std::path::Path) -> Self {
+        let previous = std::env::var("RAPIDBYTE_PLUGIN_DIR").ok();
+        std::env::set_var("RAPIDBYTE_PLUGIN_DIR", path);
+        Self { previous }
+    }
+
+    fn set_missing(path: &str) -> Self {
+        let previous = std::env::var("RAPIDBYTE_PLUGIN_DIR").ok();
+        std::env::set_var("RAPIDBYTE_PLUGIN_DIR", path);
+        Self { previous }
+    }
+}
+
+impl Drop for PluginDirEnvGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.as_deref() {
+            std::env::set_var("RAPIDBYTE_PLUGIN_DIR", previous);
+        } else {
+            std::env::remove_var("RAPIDBYTE_PLUGIN_DIR");
+        }
+    }
+}
 
 /// Test parsing and validating a well-formed pipeline YAML fixture.
 #[test]
@@ -146,6 +177,8 @@ fn test_plugin_path_resolution_with_env() {
     use rapidbyte_runtime::resolve_plugin_path;
     use rapidbyte_types::wire::PluginKind;
 
+    let _env_lock = PLUGIN_ENV_LOCK.lock().unwrap();
+
     // Create a temp directory with a fake .wasm file in sources/ subdir
     let tmp = std::env::temp_dir().join("rapidbyte_test_plugins");
     let sources_dir = tmp.join("sources");
@@ -153,7 +186,7 @@ fn test_plugin_path_resolution_with_env() {
     let fake_wasm = sources_dir.join("postgres.wasm");
     std::fs::write(&fake_wasm, b"fake wasm").unwrap();
 
-    std::env::set_var("RAPIDBYTE_PLUGIN_DIR", tmp.to_str().unwrap());
+    let _guard = PluginDirEnvGuard::set(&tmp);
 
     let result = resolve_plugin_path("rapidbyte/postgres@v0.1.0", PluginKind::Source);
     assert!(
@@ -164,7 +197,6 @@ fn test_plugin_path_resolution_with_env() {
 
     // Clean up
     std::fs::remove_dir_all(&tmp).unwrap();
-    std::env::remove_var("RAPIDBYTE_PLUGIN_DIR");
 }
 
 /// Test that plugin path resolution fails gracefully for missing plugins.
@@ -173,15 +205,15 @@ fn test_plugin_path_resolution_missing() {
     use rapidbyte_runtime::resolve_plugin_path;
     use rapidbyte_types::wire::PluginKind;
 
+    let _env_lock = PLUGIN_ENV_LOCK.lock().unwrap();
+
     // Ensure RAPIDBYTE_PLUGIN_DIR points nowhere useful
-    std::env::set_var("RAPIDBYTE_PLUGIN_DIR", "/tmp/nonexistent_dir_rapidbyte");
+    let _guard = PluginDirEnvGuard::set_missing("/tmp/nonexistent_dir_rapidbyte");
 
     let result = resolve_plugin_path("rapidbyte/nonexistent-plugin@v0.1.0", PluginKind::Source);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("not found"));
-
-    std::env::remove_var("RAPIDBYTE_PLUGIN_DIR");
 }
 
 /// Test Arrow IPC round-trip with realistic schema (similar to PG users table).

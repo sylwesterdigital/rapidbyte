@@ -45,7 +45,7 @@ fn plugin_instance_key(
 }
 
 /// Result of running a source plugin for a single stream.
-pub(crate) struct SourceRunResult {
+pub struct SourceRunResult {
     pub duration_secs: f64,
     pub summary: ReadSummary,
     pub checkpoints: Vec<Checkpoint>,
@@ -53,7 +53,7 @@ pub(crate) struct SourceRunResult {
 }
 
 /// Result of running a destination plugin for a single stream.
-pub(crate) struct DestRunResult {
+pub struct DestRunResult {
     pub duration_secs: f64,
     pub summary: WriteSummary,
     pub vm_setup_secs: f64,
@@ -63,7 +63,7 @@ pub(crate) struct DestRunResult {
 }
 
 /// Result of running a transform plugin for a single stream.
-pub(crate) struct TransformRunResult {
+pub struct TransformRunResult {
     pub duration_secs: f64,
     pub summary: TransformSummary,
 }
@@ -96,12 +96,17 @@ fn handle_close_result<E, F>(
 }
 
 /// Run a source plugin for a single stream.
+///
+/// # Errors
+///
+/// Returns an error if the component cannot be instantiated, opened, run, or
+/// closed cleanly for the given stream.
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
     clippy::needless_pass_by_value
 )]
-pub(crate) fn run_source_stream(
+pub fn run_source_stream(
     module: &LoadedComponent,
     sender: mpsc::SyncSender<Frame>,
     state_backend: Arc<dyn StateBackend>,
@@ -263,12 +268,17 @@ pub(crate) fn run_source_stream(
 }
 
 /// Run a destination plugin for a single stream.
+///
+/// # Errors
+///
+/// Returns an error if the component cannot be instantiated, opened, consume
+/// all input frames, or close cleanly for the given stream.
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
     clippy::needless_pass_by_value
 )]
-pub(crate) fn run_destination_stream(
+pub fn run_destination_stream(
     module: &LoadedComponent,
     receiver: mpsc::Receiver<Frame>,
     dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
@@ -441,12 +451,17 @@ pub(crate) fn run_destination_stream(
 }
 
 /// Run a transform plugin for a single stream.
+///
+/// # Errors
+///
+/// Returns an error if the component cannot be instantiated, opened, consume
+/// input frames, emit output frames, or close cleanly for the given stream.
 #[allow(
     clippy::too_many_arguments,
     clippy::needless_pass_by_value,
     clippy::too_many_lines
 )]
-pub(crate) fn run_transform_stream(
+pub fn run_transform_stream(
     module: &LoadedComponent,
     receiver: mpsc::Receiver<Frame>,
     sender: mpsc::SyncSender<Frame>,
@@ -584,7 +599,14 @@ pub(crate) fn run_transform_stream(
     })
 }
 
-pub(crate) fn validate_plugin(
+/// Validate a plugin configuration by invoking its lifecycle validation
+/// entrypoint in-process.
+///
+/// # Errors
+///
+/// Returns an error if the component cannot be loaded, opened, validated,
+/// or if the plugin reports an invalid configuration.
+pub fn validate_plugin(
     wasm_path: &std::path::Path,
     kind: PluginKind,
     plugin_id: &str,

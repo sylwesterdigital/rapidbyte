@@ -76,16 +76,26 @@ fn parse_stream(args: &[&str]) -> Result<Command, String> {
     let mut limit: Option<u64> = None;
     let mut i = 1;
     while i < args.len() {
-        if args[i] == "--limit" {
-            i += 1;
-            if i >= args.len() {
-                return Err("--limit requires a value".to_string());
+        match args[i] {
+            "--limit" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--limit requires a value".to_string());
+                }
+                limit = Some(
+                    args[i]
+                        .parse()
+                        .map_err(|_| format!("Invalid limit: {}", args[i]))?,
+                );
             }
-            limit = Some(
-                args[i]
-                    .parse()
-                    .map_err(|_| format!("Invalid limit: {}", args[i]))?,
-            );
+            flag if flag.starts_with("--") => {
+                return Err(format!(
+                    "Unknown flag for .stream: {flag}. Usage: .stream <table> [--limit N]"
+                ));
+            }
+            _ => {
+                return Err("Usage: .stream <table> [--limit N]".to_string());
+            }
         }
         i += 1;
     }
@@ -198,6 +208,18 @@ mod tests {
     #[test]
     fn test_stream_missing_arg() {
         assert!(parse(".stream").unwrap().is_err());
+    }
+
+    #[test]
+    fn test_stream_rejects_unknown_flag() {
+        let err = parse(".stream users --foo 1").unwrap().unwrap_err();
+        assert!(err.contains("Unknown flag"));
+    }
+
+    #[test]
+    fn test_stream_rejects_extra_positional_argument() {
+        let err = parse(".stream users extra").unwrap().unwrap_err();
+        assert!(err.contains("Usage"));
     }
 
     #[test]

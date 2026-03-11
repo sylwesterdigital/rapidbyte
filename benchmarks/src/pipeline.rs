@@ -1,5 +1,3 @@
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -15,7 +13,8 @@ pub struct RenderedPipeline {
     pub yaml: String,
 }
 
-pub fn render_pipeline_yaml(scenario: &ScenarioManifest) -> Result<String> {
+#[cfg(test)]
+fn render_pipeline_yaml(scenario: &ScenarioManifest) -> Result<String> {
     let env = scenario
         .environment
         .postgres
@@ -24,7 +23,8 @@ pub fn render_pipeline_yaml(scenario: &ScenarioManifest) -> Result<String> {
     render_pipeline_yaml_with_environment_and_state(scenario, env, None)
 }
 
-pub fn render_pipeline_yaml_for_environment(
+#[cfg(test)]
+fn render_pipeline_yaml_for_environment(
     scenario: &ScenarioManifest,
     env: &crate::scenario::PostgresBenchmarkEnvironment,
 ) -> Result<String> {
@@ -53,6 +53,18 @@ fn render_pipeline_yaml_with_environment_and_state(
         str_key("destination"),
         YamlValue::Mapping(prepared.destination),
     );
+    if !prepared.transforms.is_empty() {
+        root.insert(
+            str_key("transforms"),
+            YamlValue::Sequence(
+                prepared
+                    .transforms
+                    .into_iter()
+                    .map(YamlValue::Mapping)
+                    .collect(),
+            ),
+        );
+    }
     root.insert(str_key("state"), render_state_mapping(state_connection));
 
     serde_yaml::to_string(&root).context("failed to serialize rendered pipeline")
@@ -105,7 +117,7 @@ mod tests {
         BenchmarkKind, ConnectorOptions, DestinationConnectorOptions, EnvironmentConfig,
         ExecutionProfile, PostgresBenchmarkEnvironment, PostgresConnectionProfile,
         ScenarioAssertions, ScenarioConnectorRef, ScenarioManifest, SourceConnectorOptions,
-        WorkloadProfile,
+        TransformConnectorOptions, WorkloadProfile,
     };
     use crate::workload::WorkloadFamily;
 
@@ -224,6 +236,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn renders_transform_sections_for_pipeline_benchmarks() {
+        let mut scenario = sample_postgres_pipeline("copy");
+        scenario.connectors.push(ScenarioConnectorRef {
+            kind: "transform".to_string(),
+            plugin: "sql".to_string(),
+        });
+        scenario.connector_options.transforms = vec![TransformConnectorOptions {
+            config: std::collections::BTreeMap::from([(
+                "query".to_string(),
+                YamlValue::String("SELECT * FROM input".to_string()),
+            )]),
+        }];
+
+        let yaml = render_pipeline_yaml(&scenario).expect("render pipeline yaml");
+        let parsed = parse_pipeline_str(&yaml).expect("rendered yaml must parse");
+
+        assert_eq!(parsed.transforms.len(), 1);
+        assert_eq!(parsed.transforms[0].use_ref, "sql");
+        assert_eq!(parsed.transforms[0].config["query"], "SELECT * FROM input");
+    }
+
     fn sample_postgres_pipeline(load_method: &str) -> ScenarioManifest {
         ScenarioManifest {
             id: format!("pg_dest_{load_method}"),
@@ -284,6 +318,7 @@ mod tests {
                     write_mode: Some("append".to_string()),
                     config: Default::default(),
                 },
+                transforms: vec![],
             },
             assertions: ScenarioAssertions {
                 expected_records_read: Some(1_000_000),
@@ -334,6 +369,7 @@ mod tests {
                     write_mode: Some("append".to_string()),
                     config: Default::default(),
                 },
+                transforms: vec![],
             },
             assertions: ScenarioAssertions {
                 expected_records_read: Some(1_000_000),

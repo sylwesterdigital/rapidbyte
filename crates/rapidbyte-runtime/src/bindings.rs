@@ -367,6 +367,7 @@ macro_rules! define_validation_to_sdk {
                     }
                 },
                 message: value.message,
+                warnings: value.warnings,
             }
         }
     };
@@ -395,5 +396,29 @@ mod tests {
 
         let _: Option<source_bindings::rapidbyte::plugin::types::RunRequest> = None;
         let _: Option<source_bindings::rapidbyte::plugin::types::RunSummary> = None;
+    }
+
+    #[test]
+    fn source_validation_conversion_preserves_warnings() {
+        let report = source_bindings::rapidbyte::plugin::types::ValidationReport {
+            status: source_bindings::rapidbyte::plugin::types::ValidationStatus::Warning,
+            message: "validation incomplete".to_string(),
+            warnings: vec![
+                "missing live check".to_string(),
+                "using defaults".to_string(),
+            ],
+        };
+
+        let converted = source_validation_to_sdk(report);
+
+        assert_eq!(converted.status, ValidationStatus::Warning);
+        assert_eq!(converted.message, "validation incomplete");
+        assert_eq!(
+            converted.warnings,
+            vec![
+                "missing live check".to_string(),
+                "using defaults".to_string()
+            ]
+        );
     }
 }

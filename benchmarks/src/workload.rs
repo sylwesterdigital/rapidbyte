@@ -1,5 +1,3 @@
-#![cfg_attr(not(test), allow(dead_code))]
-
 use anyhow::Result;
 
 use crate::adapters::resolve_real_seed_plan;
@@ -39,6 +37,7 @@ pub struct PostgresSeedPlan {
     pub target_row_bytes: u64,
 }
 
+#[cfg(test)]
 pub fn resolve_workload_plan(scenario: &ScenarioManifest) -> Result<ResolvedWorkloadPlan> {
     resolve_workload_plan_with_environment(scenario, scenario.environment.postgres.as_ref())
 }
@@ -58,11 +57,9 @@ pub fn resolve_workload_plan_with_environment(
         WorkloadFamily::CdcBackfill => 1024,
         WorkloadFamily::TransformHeavy => 1536,
     };
-    let seed = match (scenario.kind, environment) {
-        (crate::scenario::BenchmarkKind::Pipeline, Some(env)) => {
-            resolve_real_seed_plan(scenario, env, target_row_bytes)?
-        }
-        _ => None,
+    let seed = match environment {
+        Some(env) => resolve_real_seed_plan(scenario, env, target_row_bytes)?,
+        None => None,
     };
     let expected_records_read = scenario
         .assertions
@@ -264,6 +261,7 @@ mod tests {
                     write_mode: Some("append".to_string()),
                     config: Default::default(),
                 },
+                transforms: vec![],
             },
             assertions: ScenarioAssertions::default(),
         }
@@ -311,6 +309,7 @@ mod tests {
                     write_mode: Some("append".to_string()),
                     config: Default::default(),
                 },
+                transforms: vec![],
             },
             assertions: ScenarioAssertions::default(),
         }

@@ -62,10 +62,11 @@ pub(crate) async fn run() -> Result<()> {
         source: None,
     };
 
-    let completer = Box::new(crate::completer::DevCompleter::new());
+    let completer = crate::completer::DevCompleter::new();
+    let completer_state = completer.clone();
     let highlighter = Box::new(crate::highlighter::DevHighlighter);
     let mut editor = Reedline::create()
-        .with_completer(completer)
+        .with_completer(Box::new(completer))
         .with_highlighter(highlighter);
     let prompt = DefaultPrompt::new(
         DefaultPromptSegment::Basic("rb".to_string()),
@@ -73,6 +74,21 @@ pub(crate) async fn run() -> Result<()> {
     );
 
     loop {
+        completer_state.refresh(
+            state
+                .source
+                .as_ref()
+                .map(|source| {
+                    source
+                        .catalog
+                        .streams
+                        .iter()
+                        .map(|stream| stream.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            state.workspace.table_names(),
+        );
         match editor.read_line(&prompt) {
             Ok(Signal::Success(line)) => {
                 let Some(parsed) = commands::parse(&line) else {
@@ -135,7 +151,7 @@ async fn handle_source(
     // Build config object from key-value args.
     let mut config_map = serde_json::Map::new();
     for (key, value) in args {
-        // Try to parse as i64, then as f64, fallback to string.
+        // Try to parse as i64, then bool, then fallback to string.
         let json_value = if let Ok(n) = value.parse::<i64>() {
             serde_json::Value::Number(serde_json::Number::from(n))
         } else if let Ok(b) = value.parse::<bool>() {

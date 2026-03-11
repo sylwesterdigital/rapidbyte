@@ -12,8 +12,9 @@ use crate::wire::PluginInfo;
 /// Default validation response for plugins that do not implement validation.
 pub fn default_validation<C>(_config: &C, _ctx: &Context) -> Result<ValidationResult, PluginError> {
     Ok(ValidationResult {
-        status: ValidationStatus::Success,
+        status: ValidationStatus::Warning,
         message: "Validation not implemented".to_string(),
+        warnings: Vec::new(),
     })
 }
 
@@ -229,5 +230,21 @@ mod tests {
         assert_source::<TestSource>();
         assert_dest::<TestDest>();
         assert_transform::<TestTransform>();
+    }
+
+    #[test]
+    fn default_validation_returns_warning_status() {
+        let ctx = Context::new("test-plugin", "test-stream");
+        let result = default_validation(
+            &TestConfig {
+                host: "localhost".to_string(),
+            },
+            &ctx,
+        )
+        .expect("default validation");
+
+        assert_eq!(result.status, ValidationStatus::Warning);
+        assert_eq!(result.message, "Validation not implemented");
+        assert!(result.warnings.is_empty());
     }
 }

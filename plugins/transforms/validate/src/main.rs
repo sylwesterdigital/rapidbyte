@@ -38,10 +38,12 @@ impl Transform for TransformValidate {
             Ok(_) => Ok(ValidationResult {
                 status: ValidationStatus::Success,
                 message: "Validation transform config is valid".to_string(),
+                warnings: Vec::new(),
             }),
             Err(message) => Ok(ValidationResult {
                 status: ValidationStatus::Failed,
                 message,
+                warnings: Vec::new(),
             }),
         }
     }

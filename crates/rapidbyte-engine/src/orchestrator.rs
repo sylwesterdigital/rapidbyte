@@ -34,7 +34,8 @@ use crate::resolve::{
     resolve_plugins, validate_config_against_schema, ResolvedPlugins,
 };
 use crate::result::{
-    CheckResult, DestTiming, PipelineCounts, PipelineResult, SourceTiming, StreamShardMetric,
+    CheckItemResult, CheckResult, DestTiming, PipelineCounts, PipelineResult, SourceTiming,
+    StreamShardMetric,
 };
 use crate::runner::{
     run_destination_stream, run_discover, run_source_stream, run_transform_stream, validate_plugin,
@@ -474,6 +475,18 @@ async fn execute_pipeline_once(
         },
     );
     let plugins = resolve_plugins(config)?;
+    if let Some(ref manifest) = plugins.source_manifest {
+        validate_config_against_schema(&config.source.use_ref, &config.source.config, manifest)
+            .map_err(PipelineError::Infrastructure)?;
+    }
+    if let Some(ref manifest) = plugins.dest_manifest {
+        validate_config_against_schema(
+            &config.destination.use_ref,
+            &config.destination.config,
+            manifest,
+        )
+        .map_err(PipelineError::Infrastructure)?;
+    }
     let state = create_state_backend(config).map_err(PipelineError::Infrastructure)?;
 
     // Skip run tracking in dry-run mode to avoid orphaned run records.
@@ -1155,8 +1168,14 @@ async fn execute_streams(
             if is_dry_run {
                 // Dry-run: collect frames instead of running destination plugin
                 let compression = params.compression;
+                let dry_run_stream_name = stream_ctx_for_dst.stream_name.clone();
                 let collector_handle = tokio::task::spawn_blocking(move || {
-                    collect_dry_run_frames(&dest_rx, dry_run_limit, compression)
+                    collect_dry_run_frames(
+                        &dry_run_stream_name,
+                        &dest_rx,
+                        dry_run_limit,
+                        compression,
+                    )
                 });
 
                 let src_result = src_handle.await.map_err(|e| {
@@ -1170,7 +1189,7 @@ async fn execute_streams(
                 let transforms =
                     collect_transform_results(transform_handles, &stream_ctx.stream_name).await?;
 
-                let mut collected = collector_handle.await.map_err(|e| {
+                let collected = collector_handle.await.map_err(|e| {
                     PipelineError::Infrastructure(anyhow::anyhow!(
                         "Dry-run collector task panicked for stream '{}': {}",
                         stream_ctx.stream_name,
@@ -1185,9 +1204,6 @@ async fn execute_streams(
                 }
 
                 let src = src_result?;
-                collected
-                    .stream_name
-                    .clone_from(&stream_ctx_for_dst.stream_name);
 
                 Ok(StreamResult {
                     stream_name: stream_ctx.stream_name.clone(),
@@ -1676,6 +1692,7 @@ fn finalization_failed_stats(
 /// Collect frames from a channel, decode IPC, enforce row limit.
 /// Used in dry-run mode instead of the destination runner.
 fn collect_dry_run_frames(
+    stream_name: &str,
     receiver: &sync_mpsc::Receiver<Frame>,
     limit: Option<u64>,
     compression: Option<rapidbyte_runtime::CompressionCodec>,
@@ -1724,7 +1741,7 @@ fn collect_dry_run_frames(
     }
 
     Ok(DryRunStreamResult {
-        stream_name: String::new(),
+        stream_name: stream_name.to_string(),
         batches,
         total_rows,
         total_bytes,
@@ -1744,33 +1761,28 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
     );
 
     let plugins = resolve_plugins(config).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    if plugins.source_manifest.is_some() {
-        println!("Source manifest:    OK");
-    }
-    if plugins.dest_manifest.is_some() {
-        println!("Dest manifest:      OK");
-    }
-
-    if let Some(ref sm) = plugins.source_manifest {
-        match validate_config_against_schema(&config.source.use_ref, &config.source.config, sm) {
-            Ok(()) => println!("Source config:      OK"),
-            Err(e) => println!("Source config:      FAILED\n  {e}"),
-        }
-    }
-    if let Some(ref dm) = plugins.dest_manifest {
-        match validate_config_against_schema(
+    let source_manifest = plugins.source_manifest.as_ref().map(|_| CheckItemResult {
+        ok: true,
+        message: String::new(),
+    });
+    let destination_manifest = plugins.dest_manifest.as_ref().map(|_| CheckItemResult {
+        ok: true,
+        message: String::new(),
+    });
+    let source_config = plugins.source_manifest.as_ref().map(|manifest| {
+        config_check_result(&config.source.use_ref, &config.source.config, manifest)
+    });
+    let destination_config = plugins.dest_manifest.as_ref().map(|manifest| {
+        config_check_result(
             &config.destination.use_ref,
             &config.destination.config,
-            dm,
-        ) {
-            Ok(()) => println!("Dest config:        OK"),
-            Err(e) => println!("Dest config:        FAILED\n  {e}"),
-        }
-    }
+            manifest,
+        )
+    });
 
-    let state_ok = check_state_backend(config);
+    let state = check_state_backend(config);
 
-    let source_config = config.source.config.clone();
+    let source_config_json = config.source.config.clone();
     let source_permissions = plugins.source_permissions.clone();
     let (src_id, src_ver) = parse_plugin_ref(&config.source.use_ref);
     let source_wasm = plugins.source_wasm.clone();
@@ -1781,12 +1793,12 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
                 PluginKind::Source,
                 &src_id,
                 &src_ver,
-                &source_config,
+                &source_config_json,
                 source_permissions.as_ref(),
             )
         });
 
-    let dest_config = config.destination.config.clone();
+    let dest_config_json = config.destination.config.clone();
     let dest_permissions = plugins.dest_permissions.clone();
     let (dst_id, dst_ver) = parse_plugin_ref(&config.destination.use_ref);
     let dest_wasm = plugins.dest_wasm.clone();
@@ -1797,7 +1809,7 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
                 PluginKind::Destination,
                 &dst_id,
                 &dst_ver,
-                &dest_config,
+                &dest_config_json,
                 dest_permissions.as_ref(),
             )
         });
@@ -1810,14 +1822,17 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
         .map_err(|e| anyhow::anyhow!("Destination validation task panicked: {e}"))??;
 
     let mut transform_tasks = Vec::with_capacity(config.transforms.len());
+    let mut transform_configs = Vec::with_capacity(config.transforms.len());
     for (index, tc) in config.transforms.iter().enumerate() {
         let wasm_path = rapidbyte_runtime::resolve_plugin_path(&tc.use_ref, PluginKind::Transform)?;
         let manifest = load_and_validate_manifest(&wasm_path, &tc.use_ref, PluginKind::Transform)?;
         if let Some(ref m) = manifest {
-            match validate_config_against_schema(&tc.use_ref, &tc.config, m) {
-                Ok(()) => println!("Transform config ({}): OK", tc.use_ref),
-                Err(e) => println!("Transform config ({}): FAILED\n  {}", tc.use_ref, e),
-            }
+            transform_configs.push(config_check_result(&tc.use_ref, &tc.config, m));
+        } else {
+            transform_configs.push(CheckItemResult {
+                ok: true,
+                message: String::new(),
+            });
         }
         let transform_perms = manifest.as_ref().map(|m| m.permissions.clone());
         let config_val = tc.config.clone();
@@ -1845,11 +1860,33 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
     }
 
     Ok(CheckResult {
+        source_manifest,
+        destination_manifest,
+        source_config,
+        destination_config,
+        transform_configs,
         source_validation,
         destination_validation: dest_validation,
         transform_validations,
-        state_ok,
+        state,
     })
+}
+
+fn config_check_result(
+    plugin_ref: &str,
+    config: &serde_json::Value,
+    manifest: &PluginManifest,
+) -> CheckItemResult {
+    match validate_config_against_schema(plugin_ref, config, manifest) {
+        Ok(()) => CheckItemResult {
+            ok: true,
+            message: String::new(),
+        },
+        Err(error) => CheckItemResult {
+            ok: false,
+            message: error.to_string(),
+        },
+    }
 }
 
 /// Discover available streams from a source plugin.
@@ -1981,7 +2018,8 @@ mod dry_run_tests {
         tx.send(Frame::EndStream).unwrap();
         drop(tx);
 
-        let result = collect_dry_run_frames(&rx, None, None).unwrap();
+        let result = collect_dry_run_frames("public.users", &rx, None, None).unwrap();
+        assert_eq!(result.stream_name, "public.users");
         assert_eq!(result.total_rows, 5);
         assert_eq!(result.batches.len(), 1);
     }
@@ -1999,7 +2037,7 @@ mod dry_run_tests {
         tx.send(Frame::EndStream).unwrap();
         drop(tx);
 
-        let result = collect_dry_run_frames(&rx, Some(10), None).unwrap();
+        let result = collect_dry_run_frames("public.users", &rx, Some(10), None).unwrap();
         assert_eq!(result.total_rows, 10);
         let total: usize = result.batches.iter().map(RecordBatch::num_rows).sum();
         assert_eq!(total, 10);
@@ -2020,7 +2058,8 @@ mod dry_run_tests {
         tx.send(Frame::EndStream).unwrap();
         drop(tx);
 
-        let result = collect_dry_run_frames(&rx, Some(12), None).unwrap();
+        let result = collect_dry_run_frames("public.users", &rx, Some(12), None).unwrap();
+        assert_eq!(result.stream_name, "public.users");
         assert_eq!(result.total_rows, 12);
     }
 }

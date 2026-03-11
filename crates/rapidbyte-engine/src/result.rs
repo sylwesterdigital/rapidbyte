@@ -76,10 +76,22 @@ pub struct StreamShardMetric {
 }
 
 /// Result of a pipeline check.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckItemResult {
+    pub ok: bool,
+    pub message: String,
+}
+
+/// Result of a pipeline check.
+#[derive(Debug, Clone)]
 pub struct CheckResult {
+    pub source_manifest: Option<CheckItemResult>,
+    pub destination_manifest: Option<CheckItemResult>,
+    pub source_config: Option<CheckItemResult>,
+    pub destination_config: Option<CheckItemResult>,
+    pub transform_configs: Vec<CheckItemResult>,
     pub source_validation: ValidationResult,
     pub destination_validation: ValidationResult,
     pub transform_validations: Vec<ValidationResult>,
-    pub state_ok: bool,
+    pub state: CheckItemResult,
 }

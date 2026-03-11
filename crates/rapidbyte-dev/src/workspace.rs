@@ -115,6 +115,14 @@ impl ArrowWorkspace {
         summaries
     }
 
+    /// Return sorted workspace table names.
+    #[must_use]
+    pub fn table_names(&self) -> Vec<String> {
+        let mut names = self.tables.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
     /// Drop one table (if `table` is `Some`) or all tables from the workspace.
     pub fn clear(&mut self, table: Option<&str>) {
         if let Some(name) = table {
@@ -240,6 +248,22 @@ mod tests {
 
         assert!(!ws.has_table("users"));
         assert!(ws.has_table("orders"));
+    }
+
+    #[test]
+    fn test_table_names_are_sorted() {
+        let mut ws = ArrowWorkspace::new();
+        let schema = test_schema();
+
+        ws.insert("users", Arc::clone(&schema), test_batches(&schema))
+            .unwrap();
+        ws.insert("orders", Arc::clone(&schema), test_batches(&schema))
+            .unwrap();
+
+        assert_eq!(
+            ws.table_names(),
+            vec!["orders".to_string(), "users".to_string()]
+        );
     }
 
     #[test]

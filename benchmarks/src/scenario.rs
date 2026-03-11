@@ -1,5 +1,3 @@
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -98,6 +96,8 @@ pub struct ConnectorOptions {
     pub source: SourceConnectorOptions,
     #[serde(default)]
     pub destination: DestinationConnectorOptions,
+    #[serde(default)]
+    pub transforms: Vec<TransformConnectorOptions>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -111,6 +111,12 @@ pub struct SourceConnectorOptions {
 pub struct DestinationConnectorOptions {
     pub load_method: Option<String>,
     pub write_mode: Option<String>,
+    #[serde(default)]
+    pub config: std::collections::BTreeMap<String, YamlValue>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransformConnectorOptions {
     #[serde(default)]
     pub config: std::collections::BTreeMap<String, YamlValue>,
 }
@@ -196,6 +202,7 @@ pub fn filter_scenarios<'a>(
         .collect()
 }
 
+#[cfg(test)]
 pub fn validate_scenario_capabilities(
     scenario: &ScenarioManifest,
     available: &[Feature],
@@ -218,6 +225,7 @@ pub fn validate_scenario_capabilities(
     );
 }
 
+#[cfg(test)]
 fn feature_name(feature: &Feature) -> String {
     serde_json::to_string(feature)
         .unwrap_or_else(|_| "\"unknown\"".to_string())

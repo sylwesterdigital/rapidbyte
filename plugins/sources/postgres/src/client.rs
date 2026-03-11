@@ -50,5 +50,6 @@ pub(crate) async fn validate(
             "Connected to {}:{}/{}",
             config.host, config.port, config.database
         ),
+        warnings: Vec::new(),
     })
 }

@@ -1,5 +1,3 @@
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -16,6 +14,8 @@ pub struct SummaryReport {
 pub struct SummaryGroup {
     pub scenario_id: String,
     pub suite_id: String,
+    pub benchmark_kind: String,
+    pub git_sha: String,
     pub build_mode: String,
     pub aot: bool,
     pub sample_count: usize,
@@ -44,7 +44,7 @@ pub fn load_and_render_summary(path: &Path) -> Result<String> {
     Ok(render_summary_report(&report))
 }
 
-fn load_artifacts(path: &Path) -> Result<Vec<BenchmarkArtifact>> {
+pub(crate) fn load_artifacts(path: &Path) -> Result<Vec<BenchmarkArtifact>> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read benchmark artifact file {}", path.display()))?;
     let mut artifacts = Vec::new();
@@ -121,6 +121,8 @@ fn summarize_group(group: &[&BenchmarkArtifact]) -> Result<SummaryGroup> {
     Ok(SummaryGroup {
         scenario_id: first.scenario_id.clone(),
         suite_id: first.suite_id.clone(),
+        benchmark_kind: format!("{:?}", first.benchmark_kind).to_lowercase(),
+        git_sha: first.git_sha.clone(),
         build_mode: first.build_mode.clone(),
         aot: first
             .execution_flags
@@ -197,14 +199,17 @@ fn summarize_metric(group: &[&BenchmarkArtifact], name: &str) -> Result<MetricSu
     })
 }
 
-fn identity_key(artifact: &BenchmarkArtifact) -> String {
+pub(crate) fn identity_key(artifact: &BenchmarkArtifact) -> String {
     format!(
-        "{}|{}|{}|{}|{}",
+        "{}|{}|{:?}|{}|{}|{}|{}|{}",
         artifact.scenario_id,
         artifact.suite_id,
+        artifact.benchmark_kind,
+        artifact.git_sha,
         artifact.hardware_class,
         artifact.build_mode,
-        serde_json::to_string(&artifact.execution_flags).unwrap_or_default()
+        serde_json::to_string(&artifact.execution_flags).unwrap_or_default(),
+        artifact.scenario_fingerprint,
     )
 }
 
@@ -262,6 +267,8 @@ pub fn render_summary_report(report: &SummaryReport) -> String {
     for group in &report.groups {
         lines.push(format!("- scenario: {}", group.scenario_id));
         lines.push(format!("  suite: {}", group.suite_id));
+        lines.push(format!("  benchmark kind: {}", group.benchmark_kind));
+        lines.push(format!("  git sha: {}", group.git_sha));
         lines.push("  measurement: end-to-end wall-clock".to_string());
         lines.push(format!("  build mode: {}", group.build_mode));
         lines.push(format!("  aot: {}", group.aot));
@@ -323,6 +330,7 @@ mod tests {
     use serde_json::{json, Map, Value};
 
     use crate::artifact::{ArtifactCorrectness, BenchmarkArtifact};
+    use crate::scenario::BenchmarkKind;
 
     use super::{render_summary_report, summarize_artifacts};
 
@@ -336,8 +344,10 @@ mod tests {
             schema_version: 1,
             suite_id: "lab".to_string(),
             scenario_id: "pg_dest_copy".to_string(),
+            benchmark_kind: BenchmarkKind::Pipeline,
             git_sha: "abc1234".to_string(),
             hardware_class: "local-dev".to_string(),
+            scenario_fingerprint: "fingerprint".to_string(),
             build_mode: "debug".to_string(),
             execution_flags: json!({"aot": false}),
             canonical_metrics: json!({
@@ -356,6 +366,7 @@ mod tests {
             correctness: ArtifactCorrectness {
                 passed,
                 validator: "row_count".to_string(),
+                details: None,
             },
         }
     }
@@ -371,8 +382,10 @@ mod tests {
             schema_version: 1,
             suite_id: "lab".to_string(),
             scenario_id: "pg_dest_copy_release".to_string(),
+            benchmark_kind: BenchmarkKind::Pipeline,
             git_sha: "abc1234".to_string(),
             hardware_class: "local-dev".to_string(),
+            scenario_fingerprint: "fingerprint".to_string(),
             build_mode: build_mode.to_string(),
             execution_flags: json!({"aot": aot}),
             canonical_metrics: json!({
@@ -402,6 +415,7 @@ mod tests {
             correctness: ArtifactCorrectness {
                 passed: true,
                 validator: "row_count".to_string(),
+                details: None,
             },
         }
     }
@@ -411,8 +425,10 @@ mod tests {
             schema_version: 1,
             suite_id: "lab".to_string(),
             scenario_id: "pg_dest_copy_release".to_string(),
+            benchmark_kind: BenchmarkKind::Pipeline,
             git_sha: "abc1234".to_string(),
             hardware_class: "local-dev".to_string(),
+            scenario_fingerprint: "fingerprint".to_string(),
             build_mode: "release".to_string(),
             execution_flags,
             canonical_metrics: json!({
@@ -430,6 +446,7 @@ mod tests {
             correctness: ArtifactCorrectness {
                 passed: true,
                 validator: "row_count".to_string(),
+                details: None,
             },
         }
     }

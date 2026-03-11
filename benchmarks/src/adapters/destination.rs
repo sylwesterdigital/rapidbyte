@@ -3,7 +3,7 @@ use postgres::{Config as PostgresConfig, NoTls};
 use serde_yaml::{Mapping, Value as YamlValue};
 
 use crate::scenario::{BenchmarkKind, PostgresBenchmarkEnvironment, ScenarioManifest};
-use crate::workload::ResolvedWorkloadPlan;
+use crate::workload::{PostgresSeedPlan, ResolvedWorkloadPlan, WorkloadFamily};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DestinationAdapter {
@@ -40,6 +40,17 @@ impl DestinationAdapter {
     ) -> Result<()> {
         match self {
             Self::Postgres => prepare_postgres_fixtures(scenario, workload, env),
+        }
+    }
+
+    pub fn seed_plan(
+        self,
+        scenario: &ScenarioManifest,
+        env: &PostgresBenchmarkEnvironment,
+        target_row_bytes: u64,
+    ) -> Result<Option<PostgresSeedPlan>> {
+        match self {
+            Self::Postgres => postgres_seed_plan(scenario, env, target_row_bytes),
         }
     }
 }
@@ -113,6 +124,28 @@ fn prepare_postgres_fixtures(
             )
         })?;
     Ok(())
+}
+
+fn postgres_seed_plan(
+    scenario: &ScenarioManifest,
+    env: &PostgresBenchmarkEnvironment,
+    target_row_bytes: u64,
+) -> Result<Option<PostgresSeedPlan>> {
+    match scenario.workload.family {
+        WorkloadFamily::NarrowAppend => Ok(Some(PostgresSeedPlan {
+            source_schema: env.source.schema.clone(),
+            source_table: env.stream_name.clone(),
+            destination_schema: env.destination.schema.clone(),
+            destination_table: env.stream_name.clone(),
+            rows: scenario.workload.rows,
+            target_row_bytes,
+        })),
+        other => bail!(
+            "scenario {} postgres destination adapter does not support real workload {:?}",
+            scenario.id,
+            other
+        ),
+    }
 }
 
 fn render_destination_config(
