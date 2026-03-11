@@ -6,14 +6,14 @@
 
 mod cdc;
 mod client;
-pub mod config;
+mod config;
 mod cursor;
 mod discovery;
 mod encode;
 mod metrics;
 mod query;
 mod reader;
-pub mod types;
+mod types;
 
 use std::time::Instant;
 
