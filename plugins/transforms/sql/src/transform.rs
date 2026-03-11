@@ -1,8 +1,8 @@
 //! DataFusion-powered SQL transform execution.
 //!
 //! For each incoming Arrow batch:
-//! 1. Register it as a DataFusion MemTable named `input`
-//! 2. Re-plan the cached SQL statement against the current `input` table
+//! 1. Register it as a DataFusion MemTable named after the current stream
+//! 2. Re-plan the cached SQL statement against the current stream-named table
 //! 3. Forward result batches downstream via `ctx.emit_batch()`
 
 use std::sync::Arc;
@@ -27,6 +27,7 @@ pub async fn run(
     statement: &Statement,
 ) -> Result<TransformSummary, PluginError> {
     let session = SessionContext::new();
+    let stream_name = ctx.stream_name();
 
     let mut records_in: u64 = 0;
     let mut records_out: u64 = 0;
@@ -48,15 +49,15 @@ pub async fn run(
             .sum();
         bytes_in += batch_bytes;
 
-        // Register as MemTable named "input".
+        // Register as MemTable named after the current stream.
         let mem_table = datafusion::datasource::MemTable::try_new(schema, vec![batches]).map_err(
             |e| PluginError::internal("SQL_MEMTABLE", format!("Failed to create MemTable: {e}")),
         )?;
 
         // Deregister previous table (no-op on first iteration).
-        let _ = session.deregister_table("input");
+        let _ = session.deregister_table(stream_name);
         session
-            .register_table("input", Arc::new(mem_table))
+            .register_table(stream_name, Arc::new(mem_table))
             .map_err(|e| {
                 PluginError::internal(
                     "SQL_REGISTER",
@@ -64,7 +65,7 @@ pub async fn run(
                 )
             })?;
 
-        // Re-plan against the current input table and stream results instead of buffering them.
+        // Re-plan against the current stream table and stream results instead of buffering them.
         let logical_plan = session
             .state()
             .statement_to_plan(statement.clone())
@@ -104,4 +105,43 @@ pub async fn run(
         bytes_out,
         batches_processed,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow::array::Int32Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use datafusion::datasource::MemTable;
+    use datafusion::prelude::SessionContext;
+    use datafusion::sql::parser::DFParser;
+
+    #[tokio::test]
+    async fn qualified_stream_names_plan_against_registered_table() {
+        let session = SessionContext::new();
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
+        )
+        .expect("record batch should build");
+        let mem_table =
+            MemTable::try_new(schema, vec![vec![batch]]).expect("mem table should build");
+
+        session
+            .register_table("public.users", Arc::new(mem_table))
+            .expect("qualified table should register");
+
+        let statement = DFParser::parse_sql("SELECT id FROM public.users")
+            .expect("query should parse")
+            .pop_front()
+            .expect("one statement");
+        session
+            .state()
+            .statement_to_plan(statement)
+            .await
+            .expect("query should plan against qualified table");
+    }
 }

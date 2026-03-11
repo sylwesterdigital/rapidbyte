@@ -612,6 +612,7 @@ pub fn validate_plugin(
     plugin_id: &str,
     plugin_version: &str,
     config: &serde_json::Value,
+    stream_name: &str,
     permissions: Option<&Permissions>,
 ) -> Result<ValidationResult> {
     tracing::info!(plugin = plugin_id, version = plugin_version, kind = ?kind, "Validating plugin");
@@ -624,7 +625,7 @@ pub fn validate_plugin(
         .pipeline("check")
         .plugin_id(plugin_id)
         .plugin_instance_key(format!("validate:{kind:?}:{plugin_id}"))
-        .stream("check")
+        .stream(stream_name)
         .state_backend(state)
         .config(config)
         .compression(None);

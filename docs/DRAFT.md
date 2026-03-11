@@ -266,7 +266,7 @@ transforms:                                       # optional, zero or more
     config:
       query: |
         SELECT user_id, count(order_id) as total_orders, sum(amount) as ltv
-        FROM input
+        FROM orders
         GROUP BY user_id
 
 destination:
@@ -426,13 +426,14 @@ transforms:
     config:
       query: |
         SELECT user_id, count(order_id) as total_orders, sum(amount) as ltv
-        FROM input
+        FROM orders
         GROUP BY user_id
 ```
 
-Arrow IPC batches are registered as a DataFusion table provider named `input`.
-The SQL is parsed once during plugin init, re-planned against the current
-`input` snapshot each batch, and streamed downstream as new Arrow batches. This eliminates
+Arrow IPC batches are registered as a DataFusion table provider using the
+current stream name, such as `orders`. The SQL is parsed once during plugin
+init, re-planned against that stream's current snapshot each batch, and
+streamed downstream as new Arrow batches. This eliminates
 the dual cost of ELT pipelines — move data with Fivetran, then transform in Snowflake
 with dbt. Rapidbyte aggregates, filters, and reshapes data before it reaches the
 warehouse, saving significant compute costs.

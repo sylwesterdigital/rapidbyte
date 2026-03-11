@@ -15,7 +15,7 @@ use rapidbyte_state::StateBackend;
 use rapidbyte_types::catalog::{Catalog, SchemaHint};
 use rapidbyte_types::cursor::{CursorInfo, CursorType, CursorValue};
 use rapidbyte_types::envelope::DlqRecord;
-use rapidbyte_types::error::ValidationResult;
+use rapidbyte_types::error::{ValidationResult, ValidationStatus};
 use rapidbyte_types::manifest::{Permissions, PluginManifest, ResourceLimits};
 use rapidbyte_types::metric::{ReadSummary, WriteSummary};
 use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
@@ -1794,6 +1794,7 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
                 &src_id,
                 &src_ver,
                 &source_config_json,
+                "check",
                 source_permissions.as_ref(),
             )
         });
@@ -1810,6 +1811,7 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
                 &dst_id,
                 &dst_ver,
                 &dest_config_json,
+                "check",
                 dest_permissions.as_ref(),
             )
         });
@@ -1823,6 +1825,12 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
 
     let mut transform_tasks = Vec::with_capacity(config.transforms.len());
     let mut transform_configs = Vec::with_capacity(config.transforms.len());
+    let source_stream_names = config
+        .source
+        .streams
+        .iter()
+        .map(|stream| stream.name.clone())
+        .collect::<Vec<_>>();
     for (index, tc) in config.transforms.iter().enumerate() {
         let wasm_path = rapidbyte_runtime::resolve_plugin_path(&tc.use_ref, PluginKind::Transform)?;
         let manifest = load_and_validate_manifest(&wasm_path, &tc.use_ref, PluginKind::Transform)?;
@@ -1838,15 +1846,19 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
         let config_val = tc.config.clone();
         let plugin_ref = tc.use_ref.clone();
         let (tc_id, tc_ver) = parse_plugin_ref(&tc.use_ref);
+        let stream_names = source_stream_names.clone();
         let handle = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
-            validate_plugin(
-                &wasm_path,
-                PluginKind::Transform,
-                &tc_id,
-                &tc_ver,
-                &config_val,
-                transform_perms.as_ref(),
-            )
+            validate_transform_for_streams(&stream_names, |stream_name| {
+                validate_plugin(
+                    &wasm_path,
+                    PluginKind::Transform,
+                    &tc_id,
+                    &tc_ver,
+                    &config_val,
+                    stream_name,
+                    transform_perms.as_ref(),
+                )
+            })
         });
         transform_tasks.push((index, plugin_ref, handle));
     }
@@ -1869,6 +1881,72 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
         destination_validation: dest_validation,
         transform_validations,
         state,
+    })
+}
+
+fn validate_transform_for_streams<F>(
+    stream_names: &[String],
+    mut validate: F,
+) -> Result<ValidationResult>
+where
+    F: FnMut(&str) -> Result<ValidationResult>,
+{
+    let mut failures = Vec::new();
+    let mut warnings = Vec::new();
+    let mut saw_warning = false;
+
+    for stream_name in stream_names {
+        let result = validate(stream_name)?;
+        match result.status {
+            ValidationStatus::Success => {}
+            ValidationStatus::Warning => {
+                saw_warning = true;
+                if !result.message.is_empty() {
+                    warnings.push(format!("stream '{stream_name}': {}", result.message));
+                }
+                warnings.extend(
+                    result
+                        .warnings
+                        .into_iter()
+                        .map(|warning| format!("stream '{stream_name}': {warning}")),
+                );
+            }
+            ValidationStatus::Failed => {
+                failures.push(if result.message.is_empty() {
+                    format!("stream '{stream_name}': validation failed")
+                } else {
+                    format!("stream '{stream_name}': {}", result.message)
+                });
+                warnings.extend(
+                    result
+                        .warnings
+                        .into_iter()
+                        .map(|warning| format!("stream '{stream_name}': {warning}")),
+                );
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        return Ok(ValidationResult {
+            status: ValidationStatus::Failed,
+            message: failures.join("; "),
+            warnings,
+        });
+    }
+
+    if saw_warning {
+        return Ok(ValidationResult {
+            status: ValidationStatus::Warning,
+            message: "Transform configuration emitted validation warnings".to_string(),
+            warnings,
+        });
+    }
+
+    Ok(ValidationResult {
+        status: ValidationStatus::Success,
+        message: "Transform configuration is valid for all source streams".to_string(),
+        warnings,
     })
 }
 
@@ -2887,5 +2965,65 @@ resources:
             .as_deref()
             .unwrap_or_default()
             .contains("Post-run finalization failed"));
+    }
+}
+
+#[cfg(test)]
+mod check_pipeline_validation_tests {
+    use super::validate_transform_for_streams;
+    use anyhow::Result;
+    use rapidbyte_types::error::{ValidationResult, ValidationStatus};
+    use std::sync::Mutex;
+
+    #[test]
+    fn transform_check_uses_actual_source_stream_names() {
+        let seen = Mutex::new(Vec::new());
+        let stream_names = vec!["users".to_string()];
+
+        let result = validate_transform_for_streams(&stream_names, |stream_name| -> Result<_> {
+            seen.lock()
+                .expect("seen lock poisoned")
+                .push(stream_name.to_string());
+            Ok(ValidationResult {
+                status: ValidationStatus::Success,
+                message: "ok".to_string(),
+                warnings: Vec::new(),
+            })
+        })
+        .expect("validation should succeed");
+
+        assert_eq!(
+            seen.lock().expect("seen lock poisoned").as_slice(),
+            ["users"]
+        );
+        assert_eq!(result.status, ValidationStatus::Success);
+    }
+
+    #[test]
+    fn transform_check_fails_when_any_source_stream_validation_fails() {
+        let stream_names = vec!["users".to_string(), "orders".to_string()];
+
+        let result = validate_transform_for_streams(&stream_names, |stream_name| -> Result<_> {
+            let status = if stream_name == "orders" {
+                ValidationStatus::Failed
+            } else {
+                ValidationStatus::Success
+            };
+            let message = if stream_name == "orders" {
+                "SQL query must reference current stream table 'orders'".to_string()
+            } else {
+                "ok".to_string()
+            };
+            Ok(ValidationResult {
+                status,
+                message,
+                warnings: Vec::new(),
+            })
+        })
+        .expect("validation should return aggregated result");
+
+        assert_eq!(result.status, ValidationStatus::Failed);
+        assert!(result.message.contains("orders"));
+        assert!(result.message.contains("current stream table 'orders'"));
     }
 }

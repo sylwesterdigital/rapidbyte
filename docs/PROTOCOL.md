@@ -231,7 +231,7 @@ The plugin must implement the same WIT exports and call the same WIT imports reg
 ## SQL Transform (`transform-sql`)
 
 Executes a SQL query against each incoming Arrow batch using Apache DataFusion.
-The incoming data is registered as a table named `input`.
+The incoming data is registered as a table named after the current stream.
 
 **Config:**
 
@@ -239,7 +239,7 @@ The incoming data is registered as a table named `input`.
 transforms:
   - use: transform-sql
     config:
-      query: "SELECT id, UPPER(name) AS name, age + 1 AS next_age FROM input WHERE active = true"
+      query: "SELECT id, UPPER(name) AS name, age + 1 AS next_age FROM users WHERE active = true"
 ```
 
 **Supported operations:** column selection, filtering (WHERE), computed columns,
@@ -250,7 +250,7 @@ DataFusion.
 Execution notes:
 
 - The transform keeps a long-lived DataFusion `SessionContext` per stream.
-- SQL is parsed once during init, then re-planned against the current `input`
+- SQL is parsed once during init, then re-planned against the current stream
   table each batch.
 - Result batches are emitted through DataFusion's streaming execution path;
   they are not fully materialized with `collect()`.
@@ -259,7 +259,8 @@ Execution notes:
 DISTINCT, window functions) still operate per-batch, not across the full
 stream.
 
-**Table name:** Always `input`. The query must reference `FROM input`.
+**Table name:** The current pipeline stream name. The query must reference that
+stream directly, for example `FROM users`.
 
 ## 11. Migration Notes
 

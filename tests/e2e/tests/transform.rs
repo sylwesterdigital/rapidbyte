@@ -19,7 +19,10 @@ async fn sql_transform_filters_and_projects_expected_rows() {
         context
             .run_transform_pipeline(
                 &schemas,
-                r#"SELECT id, UPPER(name) AS name_upper FROM input WHERE id % 2 = 1"#,
+                &format!(
+                    r#"SELECT id, UPPER(name) AS name_upper FROM "{}" WHERE id % 2 = 1"#,
+                    schemas.source_users_table
+                ),
                 &state_path,
             )
             .await
@@ -47,7 +50,7 @@ async fn sql_transform_filters_and_projects_expected_rows() {
 }
 
 #[tokio::test]
-async fn sql_transform_rejects_query_without_input_source_table() {
+async fn sql_transform_rejects_legacy_input_table_name() {
     let context = rapidbyte_e2e::harness::bootstrap()
         .await
         .expect("bootstrap must initialize test harness");
@@ -65,12 +68,12 @@ async fn sql_transform_rejects_query_without_input_source_table() {
             .expect("source seed should succeed");
 
         let run = context
-            .run_transform_pipeline(&schemas, r#"SELECT input FROM events"#, &state_path)
+            .run_transform_pipeline(&schemas, r#"SELECT * FROM input"#, &state_path)
             .await;
 
         assert!(
             run.is_err(),
-            "pipeline should fail when query does not reference input as a source table"
+            "pipeline should fail when query uses the legacy input table name"
         );
     }
     .await;
