@@ -523,7 +523,7 @@ fn gen_dest_methods(
             #run_preamble
 
             let summary = rt
-                .block_on(<#struct_name as #trait_path>::write(conn, &ctx, stream))
+                .block_on(<#struct_name as #trait_path>::write_bulk(conn, &ctx, stream))
                 .map_err(to_component_error)?;
 
             Ok(__rb_bindings::rapidbyte::plugin::types::RunSummary {
@@ -602,5 +602,23 @@ fn gen_embeds(struct_name: &Ident, trait_path: &TokenStream) -> TokenStream {
             }
             arr
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quote::quote;
+    use syn::parse_quote;
+
+    #[test]
+    fn destination_run_dispatches_through_write_bulk() {
+        let struct_name: Ident = parse_quote!(TestDestination);
+        let trait_path = quote!(::rapidbyte_sdk::plugin::Destination);
+
+        let generated = gen_dest_methods(&struct_name, &trait_path, None).to_string();
+
+        assert!(generated.contains(":: write_bulk"));
+        assert!(!generated.contains(":: write ("));
     }
 }
