@@ -25,6 +25,4 @@ pub enum ProgressEvent {
         message: String,
         delay_secs: f64,
     },
-    /// A non-fatal error occurred.
-    Error { message: String },
 }

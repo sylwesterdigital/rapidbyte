@@ -303,7 +303,7 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
                     ValidationStatus::Warning => CValidationStatus::Warning,
                 },
                 message: result.message,
-                warnings: Vec::new(),
+                warnings: result.warnings,
             }
         }
     }

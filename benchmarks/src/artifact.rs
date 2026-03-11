@@ -1,5 +1,4 @@
-#![cfg_attr(not(test), allow(dead_code))]
-
+use crate::scenario::BenchmarkKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -8,8 +7,12 @@ pub struct BenchmarkArtifact {
     pub schema_version: u32,
     pub suite_id: String,
     pub scenario_id: String,
+    #[serde(default = "default_benchmark_kind")]
+    pub benchmark_kind: BenchmarkKind,
     pub git_sha: String,
     pub hardware_class: String,
+    #[serde(default = "default_scenario_fingerprint")]
+    pub scenario_fingerprint: String,
     pub build_mode: String,
     pub execution_flags: JsonValue,
     pub canonical_metrics: JsonValue,
@@ -21,6 +24,16 @@ pub struct BenchmarkArtifact {
 pub struct ArtifactCorrectness {
     pub passed: bool,
     pub validator: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<JsonValue>,
+}
+
+fn default_benchmark_kind() -> BenchmarkKind {
+    BenchmarkKind::Pipeline
+}
+
+fn default_scenario_fingerprint() -> String {
+    "unknown".to_string()
 }
 
 #[cfg(test)]
@@ -33,8 +46,10 @@ mod tests {
             schema_version: 1,
             suite_id: "pr".to_string(),
             scenario_id: "pr_smoke_pipeline".to_string(),
+            benchmark_kind: BenchmarkKind::Pipeline,
             git_sha: "abc1234".to_string(),
             hardware_class: "ci-small".to_string(),
+            scenario_fingerprint: "fingerprint".to_string(),
             build_mode: "release".to_string(),
             execution_flags: serde_json::json!({
                 "suite": "pr",
@@ -52,6 +67,7 @@ mod tests {
             correctness: ArtifactCorrectness {
                 passed: true,
                 validator: "row_count".to_string(),
+                details: None,
             },
         };
 
@@ -62,8 +78,10 @@ mod tests {
             "schema_version",
             "suite_id",
             "scenario_id",
+            "benchmark_kind",
             "git_sha",
             "hardware_class",
+            "scenario_fingerprint",
             "build_mode",
             "execution_flags",
             "canonical_metrics",

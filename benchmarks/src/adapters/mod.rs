@@ -23,6 +23,7 @@ pub struct ResolvedScenarioAdapters {
 pub struct PreparedPipelineComponents {
     pub source: Mapping,
     pub destination: Mapping,
+    pub transforms: Vec<Mapping>,
 }
 
 pub fn resolve_scenario_adapters(scenario: &ScenarioManifest) -> Result<ResolvedScenarioAdapters> {
@@ -216,7 +217,43 @@ pub fn prepare_pipeline_components(
     Ok(PreparedPipelineComponents {
         source: source.prepare_pipeline_mapping(scenario, env)?,
         destination: destination.prepare_pipeline_mapping(scenario, env)?,
+        transforms: resolved
+            .transforms
+            .iter()
+            .enumerate()
+            .map(|(index, _)| prepare_transform_mapping(scenario, index))
+            .collect::<Result<Vec<_>>>()?,
     })
+}
+
+fn prepare_transform_mapping(scenario: &ScenarioManifest, index: usize) -> Result<Mapping> {
+    let transform_connector = scenario
+        .connectors
+        .iter()
+        .filter(|connector| connector.kind == "transform")
+        .nth(index)
+        .with_context(|| {
+            format!(
+                "scenario {} missing transform connector at index {}",
+                scenario.id, index
+            )
+        })?;
+    let options = scenario
+        .connector_options
+        .transforms
+        .get(index)
+        .cloned()
+        .unwrap_or_default();
+    let mut mapping = Mapping::new();
+    mapping.insert(
+        serde_yaml::Value::String("use".to_string()),
+        serde_yaml::Value::String(transform_connector.plugin.clone()),
+    );
+    mapping.insert(
+        serde_yaml::Value::String("config".to_string()),
+        serde_yaml::to_value(options.config).context("failed to encode transform config")?,
+    );
+    Ok(mapping)
 }
 
 pub fn resolve_real_seed_plan(
@@ -225,13 +262,27 @@ pub fn resolve_real_seed_plan(
     target_row_bytes: u64,
 ) -> Result<Option<PostgresSeedPlan>> {
     let resolved = resolve_scenario_adapters(scenario)?;
-    let source = resolved.source.with_context(|| {
-        format!(
-            "scenario {} requires a source adapter for real workload planning",
-            scenario.id
-        )
-    })?;
-    source.seed_plan(scenario, env, target_row_bytes)
+    match scenario.kind {
+        BenchmarkKind::Pipeline | BenchmarkKind::Source => {
+            let source = resolved.source.with_context(|| {
+                format!(
+                    "scenario {} requires a source adapter for real workload planning",
+                    scenario.id
+                )
+            })?;
+            source.seed_plan(scenario, env, target_row_bytes)
+        }
+        BenchmarkKind::Destination => {
+            let destination = resolved.destination.with_context(|| {
+                format!(
+                    "scenario {} requires a destination adapter for real workload planning",
+                    scenario.id
+                )
+            })?;
+            destination.seed_plan(scenario, env, target_row_bytes)
+        }
+        BenchmarkKind::Transform => Ok(None),
+    }
 }
 
 pub fn prepare_pipeline_fixtures(

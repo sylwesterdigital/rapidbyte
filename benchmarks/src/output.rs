@@ -1,5 +1,3 @@
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::io::Write;
 
 use anyhow::Result;
@@ -15,12 +13,25 @@ pub fn write_artifact_json<W: Write>(writer: &mut W, artifact: &BenchmarkArtifac
 #[cfg(test)]
 mod tests {
     use super::write_artifact_json;
-    use crate::runner::{materialize_artifact, RunResult};
+    use crate::runner::{materialize_artifact, ArtifactContext, RunResult, SyntheticRunSpec};
+    use crate::scenario::BenchmarkKind;
+
+    fn artifact_context() -> ArtifactContext {
+        ArtifactContext {
+            git_sha: "abc1234".to_string(),
+            hardware_class: "ci-small".to_string(),
+            scenario_fingerprint: "fingerprint".to_string(),
+        }
+    }
 
     #[test]
     fn missing_correctness_assertions_fail_the_run() {
-        let err = materialize_artifact(RunResult::without_assertions("pr", "pr_smoke_pipeline"))
-            .expect_err("should fail");
+        let err = materialize_artifact(RunResult::without_assertions(
+            "pr",
+            "pr_smoke_pipeline",
+            &artifact_context(),
+        ))
+        .expect_err("should fail");
 
         assert!(err.to_string().contains("correctness assertions"));
     }
@@ -30,10 +41,14 @@ mod tests {
         let artifact = materialize_artifact(RunResult::success(
             "pr",
             "pr_smoke_pipeline",
-            "debug",
-            serde_json::json!({}),
-            1_000,
-            false,
+            &artifact_context(),
+            SyntheticRunSpec {
+                benchmark_kind: BenchmarkKind::Pipeline,
+                build_mode: "debug".to_string(),
+                connector_metrics: serde_json::json!({}),
+                records_written: 1_000,
+                aot: false,
+            },
         ))
         .expect("artifact");
 

@@ -2,31 +2,14 @@
 
 #![allow(clippy::cast_precision_loss)]
 
+use rapidbyte_types::format::{format_bytes_binary, format_count as shared_format_count};
+
 pub fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
-    } else if bytes >= 1_048_576 {
-        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{bytes} B")
-    }
+    format_bytes_binary(bytes)
 }
 
 pub fn format_count(n: u64) -> String {
-    if n < 1000 {
-        return n.to_string();
-    }
-    let s = n.to_string();
-    let mut result = String::with_capacity(s.len() + s.len() / 3);
-    for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            result.push(',');
-        }
-        result.push(c);
-    }
-    result.chars().rev().collect()
+    shared_format_count(n)
 }
 
 pub fn format_rate(count: u64, duration_secs: f64) -> String {
@@ -71,8 +54,8 @@ mod tests {
     fn test_format_bytes() {
         assert_eq!(format_bytes(0), "0 B");
         assert_eq!(format_bytes(512), "512 B");
-        assert_eq!(format_bytes(1_048_576), "1.0 MB");
-        assert_eq!(format_bytes(1_073_741_824), "1.0 GB");
+        assert_eq!(format_bytes(1_048_576), "1.0 MiB");
+        assert_eq!(format_bytes(1_073_741_824), "1.0 GiB");
     }
 
     #[test]
@@ -92,9 +75,9 @@ mod tests {
 
     #[test]
     fn test_format_byte_rate() {
-        assert_eq!(format_byte_rate(1_048_576, 1.0), "1.0 MB/s");
+        assert_eq!(format_byte_rate(1_048_576, 1.0), "1.0 MiB/s");
         assert_eq!(format_byte_rate(500, 0.0), "N/A");
-        assert_eq!(format_byte_rate(1_073_741_824, 2.0), "512.0 MB/s");
+        assert_eq!(format_byte_rate(1_073_741_824, 2.0), "512.0 MiB/s");
     }
 
     #[test]

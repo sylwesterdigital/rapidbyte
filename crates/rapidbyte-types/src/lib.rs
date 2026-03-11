@@ -27,6 +27,7 @@ pub mod compression;
 pub mod cursor;
 pub mod envelope;
 pub mod error;
+pub mod format;
 pub mod manifest;
 pub mod metric;
 pub mod state;

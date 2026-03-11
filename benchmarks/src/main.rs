@@ -1,7 +1,9 @@
 mod adapters;
 mod artifact;
 mod cli;
+mod compare;
 mod environment;
+mod isolation;
 mod metrics;
 mod output;
 mod pipeline;
@@ -26,10 +28,14 @@ fn main() -> Result<()> {
             let written = runner::emit_scenario_artifacts(
                 &root,
                 &scenarios,
-                args.suite.as_deref(),
-                &args.scenarios,
-                args.env_profile.as_deref(),
-                &output_path,
+                runner::EmitArtifactsOptions {
+                    suite: args.suite.as_deref(),
+                    scenario_ids: &args.scenarios,
+                    env_profile: args.env_profile.as_deref(),
+                    hardware_class: args.hardware_class.as_deref(),
+                    rapidbyte_bin: args.rapidbyte_bin.as_deref(),
+                    output_path: &output_path,
+                },
             )?;
             println!(
                 "benchmark runner: wrote {} artifact(s) from {} discovered scenario(s) to {}",
@@ -39,11 +45,14 @@ fn main() -> Result<()> {
             );
         }
         BenchCommand::Compare(args) => {
-            println!(
-                "benchmark compare skeleton: baseline={} candidate={}",
-                args.baseline.display(),
-                args.candidate.display()
-            );
+            let rendered = compare::load_and_render_comparison(
+                &args.baseline,
+                &args.candidate,
+                args.min_samples,
+                args.throughput_drop_pct,
+                args.latency_increase_pct,
+            )?;
+            println!("{rendered}");
         }
         BenchCommand::Summary(args) => {
             let root = std::env::current_dir()?;

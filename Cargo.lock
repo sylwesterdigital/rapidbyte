@@ -3310,13 +3310,19 @@ name = "rapidbyte-benchmarks"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arrow",
+ "bytes",
  "clap",
  "postgres",
  "rapidbyte-engine",
+ "rapidbyte-runtime",
+ "rapidbyte-state",
  "rapidbyte-types",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
+ "tokio",
 ]
 
 [[package]]

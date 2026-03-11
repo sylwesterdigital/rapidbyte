@@ -122,10 +122,12 @@ impl Transform for TransformSql {
             Ok(_) => Ok(ValidationResult {
                 status: ValidationStatus::Success,
                 message: "SQL query configuration is valid".to_string(),
+                warnings: Vec::new(),
             }),
             Err(message) => Ok(ValidationResult {
                 status: ValidationStatus::Failed,
                 message,
+                warnings: Vec::new(),
             }),
         }
     }

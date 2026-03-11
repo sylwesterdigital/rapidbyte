@@ -1,86 +1,138 @@
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
-use serde_json::{json, Map, Value as JsonValue};
+use serde_json::{json, Value as JsonValue};
+use sha2::{Digest, Sha256};
 
 use crate::adapters::prepare_pipeline_fixtures;
 use crate::artifact::{ArtifactCorrectness, BenchmarkArtifact};
 use crate::environment::resolve_postgres_environment;
+use crate::isolation::{
+    execute_destination_benchmark, execute_source_benchmark, execute_transform_benchmark,
+};
 use crate::output::write_artifact_json;
 use crate::pipeline::write_rendered_pipeline;
 use crate::scenario::{
-    filter_scenarios, BenchmarkBuildMode, PostgresBenchmarkEnvironment, ScenarioManifest,
+    filter_scenarios, BenchmarkBuildMode, BenchmarkKind, PostgresBenchmarkEnvironment,
+    ScenarioManifest,
 };
 use crate::workload::{resolve_workload_plan_with_environment, ResolvedWorkloadPlan};
 
 const BENCH_JSON_MARKER: &str = "@@BENCH_JSON@@";
-const DEFAULT_GIT_SHA: &str = "unknown";
-const DEFAULT_HARDWARE_CLASS: &str = "local-dev";
+
+#[derive(Debug, Clone)]
+pub struct ArtifactContext {
+    pub git_sha: String,
+    pub hardware_class: String,
+    pub scenario_fingerprint: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct RunResult {
-    suite_id: String,
-    scenario_id: String,
-    build_mode: String,
-    connector_metrics: JsonValue,
-    canonical_metrics: JsonValue,
-    execution_flags: JsonValue,
-    correctness_assertions_present: bool,
+    pub(crate) suite_id: String,
+    pub(crate) scenario_id: String,
+    pub(crate) benchmark_kind: BenchmarkKind,
+    pub(crate) git_sha: String,
+    pub(crate) hardware_class: String,
+    pub(crate) scenario_fingerprint: String,
+    pub(crate) build_mode: String,
+    pub(crate) connector_metrics: JsonValue,
+    pub(crate) canonical_metrics: JsonValue,
+    pub(crate) execution_flags: JsonValue,
+    pub(crate) correctness: ArtifactCorrectness,
+}
+
+#[derive(Debug, Clone)]
+pub struct SyntheticRunSpec {
+    pub benchmark_kind: BenchmarkKind,
+    pub build_mode: String,
+    pub connector_metrics: JsonValue,
+    pub records_written: u64,
+    pub aot: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EmitArtifactsOptions<'a> {
+    pub suite: Option<&'a str>,
+    pub scenario_ids: &'a [String],
+    pub env_profile: Option<&'a str>,
+    pub hardware_class: Option<&'a str>,
+    pub rapidbyte_bin: Option<&'a Path>,
+    pub output_path: &'a Path,
 }
 
 impl RunResult {
     pub fn success(
         suite_id: impl Into<String>,
         scenario_id: impl Into<String>,
-        build_mode: impl Into<String>,
-        connector_metrics: JsonValue,
-        records_written: u64,
-        aot: bool,
+        artifact_context: &ArtifactContext,
+        spec: SyntheticRunSpec,
     ) -> Self {
         let duration_secs = 1.0;
         Self {
             suite_id: suite_id.into(),
             scenario_id: scenario_id.into(),
-            build_mode: build_mode.into(),
-            connector_metrics,
+            benchmark_kind: spec.benchmark_kind,
+            git_sha: artifact_context.git_sha.clone(),
+            hardware_class: artifact_context.hardware_class.clone(),
+            scenario_fingerprint: artifact_context.scenario_fingerprint.clone(),
+            build_mode: spec.build_mode,
+            connector_metrics: spec.connector_metrics,
             canonical_metrics: json!({
                 "duration_secs": duration_secs,
-                "records_per_sec": records_written as f64 / duration_secs,
-                "mb_per_sec": (records_written as f64 * 128.0) / 1024.0 / 1024.0 / duration_secs,
+                "records_per_sec": spec.records_written as f64 / duration_secs,
+                "mb_per_sec": (spec.records_written as f64 * 128.0) / 1024.0 / 1024.0 / duration_secs,
                 "cpu_secs": 0.5,
                 "peak_rss_mb": 64.0,
                 "batch_count": 1,
             }),
             execution_flags: json!({
                 "synthetic": true,
-                "aot": aot,
+                "aot": spec.aot,
             }),
-            correctness_assertions_present: true,
+            correctness: ArtifactCorrectness {
+                passed: true,
+                validator: "synthetic_row_count".to_string(),
+                details: Some(json!({
+                    "records_written": spec.records_written,
+                })),
+            },
         }
     }
 
-    pub fn without_assertions(suite_id: impl Into<String>, scenario_id: impl Into<String>) -> Self {
+    #[cfg(test)]
+    pub fn without_assertions(
+        suite_id: impl Into<String>,
+        scenario_id: impl Into<String>,
+        artifact_context: &ArtifactContext,
+    ) -> Self {
         Self {
             suite_id: suite_id.into(),
             scenario_id: scenario_id.into(),
+            benchmark_kind: BenchmarkKind::Pipeline,
+            git_sha: artifact_context.git_sha.clone(),
+            hardware_class: artifact_context.hardware_class.clone(),
+            scenario_fingerprint: artifact_context.scenario_fingerprint.clone(),
             build_mode: build_mode_name(BenchmarkBuildMode::Debug).to_string(),
-            connector_metrics: JsonValue::Object(Map::new()),
-            canonical_metrics: JsonValue::Object(Map::new()),
+            connector_metrics: JsonValue::Object(serde_json::Map::new()),
+            canonical_metrics: JsonValue::Object(serde_json::Map::new()),
             execution_flags: json!({
                 "synthetic": true,
                 "aot": false,
             }),
-            correctness_assertions_present: false,
+            correctness: ArtifactCorrectness {
+                passed: false,
+                validator: "missing_assertions".to_string(),
+                details: None,
+            },
         }
     }
 }
 
 pub fn materialize_artifact(result: RunResult) -> Result<BenchmarkArtifact> {
-    if !result.correctness_assertions_present {
+    if result.correctness.validator == "missing_assertions" {
         bail!(
             "benchmark run for scenario {} is missing correctness assertions",
             result.scenario_id
@@ -91,54 +143,81 @@ pub fn materialize_artifact(result: RunResult) -> Result<BenchmarkArtifact> {
         schema_version: 1,
         suite_id: result.suite_id,
         scenario_id: result.scenario_id,
-        git_sha: DEFAULT_GIT_SHA.to_string(),
-        hardware_class: DEFAULT_HARDWARE_CLASS.to_string(),
+        benchmark_kind: result.benchmark_kind,
+        git_sha: result.git_sha,
+        hardware_class: result.hardware_class,
+        scenario_fingerprint: result.scenario_fingerprint,
         build_mode: result.build_mode,
         execution_flags: result.execution_flags,
         canonical_metrics: result.canonical_metrics,
         connector_metrics: result.connector_metrics,
-        correctness: ArtifactCorrectness {
-            passed: true,
-            validator: "row_count".to_string(),
-        },
+        correctness: result.correctness,
     })
+}
+
+pub fn build_artifact_context(
+    root: &Path,
+    scenario: &ScenarioManifest,
+    hardware_class: Option<&str>,
+) -> ArtifactContext {
+    ArtifactContext {
+        git_sha: resolve_git_sha(root).unwrap_or_else(|_| "unknown".to_string()),
+        hardware_class: hardware_class
+            .map(ToOwned::to_owned)
+            .or_else(|| std::env::var("RAPIDBYTE_BENCH_HARDWARE_CLASS").ok())
+            .unwrap_or_else(|| "unknown".to_string()),
+        scenario_fingerprint: scenario_fingerprint(scenario)
+            .unwrap_or_else(|_| "unknown".to_string()),
+    }
 }
 
 pub fn emit_scenario_artifacts(
     root: &Path,
     scenarios: &[ScenarioManifest],
-    suite: Option<&str>,
-    scenario_ids: &[String],
-    env_profile: Option<&str>,
-    output_path: &Path,
+    options: EmitArtifactsOptions<'_>,
 ) -> Result<usize> {
-    let filtered: Vec<&ScenarioManifest> = filter_scenarios(scenarios, suite, &[])
+    let filtered: Vec<&ScenarioManifest> = filter_scenarios(scenarios, options.suite, &[])
         .into_iter()
         .filter(|scenario| {
-            scenario_ids.is_empty() || scenario_ids.iter().any(|selected| selected == &scenario.id)
+            options.scenario_ids.is_empty()
+                || options
+                    .scenario_ids
+                    .iter()
+                    .any(|selected| selected == &scenario.id)
         })
         .collect();
-    if let Some(parent) = output_path.parent() {
+    if let Some(parent) = options.output_path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    let mut file = File::create(output_path)?;
+    let mut file = File::create(options.output_path)?;
     let mut artifact_count = 0;
 
     for scenario in &filtered {
-        let resolved_env = resolve_postgres_environment(root, scenario, env_profile)?;
+        let artifact_context = build_artifact_context(root, scenario, options.hardware_class);
+        let resolved_env = resolve_postgres_environment(root, scenario, options.env_profile)?;
         let workload = resolve_workload_plan_with_environment(scenario, resolved_env.as_ref())?;
 
         for _ in 0..scenario.execution.warmups {
-            let _ = execute_scenario_once(scenario, &workload, resolved_env.as_ref())?;
+            let _ = execute_scenario_once(
+                root,
+                scenario,
+                &workload,
+                resolved_env.as_ref(),
+                &artifact_context,
+                options.rapidbyte_bin,
+            )?;
         }
 
         let measured_iterations = scenario.execution.iterations.max(1);
         for _ in 0..measured_iterations {
             let artifact = materialize_artifact(execute_scenario_once(
+                root,
                 scenario,
                 &workload,
                 resolved_env.as_ref(),
+                &artifact_context,
+                options.rapidbyte_bin,
             )?)?;
             write_artifact_json(&mut file, &artifact)?;
             artifact_count += 1;
@@ -149,52 +228,60 @@ pub fn emit_scenario_artifacts(
 }
 
 fn execute_scenario_once(
+    root: &Path,
     scenario: &ScenarioManifest,
     workload: &ResolvedWorkloadPlan,
     environment: Option<&PostgresBenchmarkEnvironment>,
+    artifact_context: &ArtifactContext,
+    rapidbyte_bin: Option<&Path>,
 ) -> Result<RunResult> {
     match scenario.kind {
         crate::scenario::BenchmarkKind::Pipeline => {
             if workload.seed.is_some() && !workload.synthetic {
-                return execute_real_postgres_pipeline(scenario, workload, environment);
+                return execute_real_postgres_pipeline(
+                    root,
+                    scenario,
+                    workload,
+                    environment,
+                    artifact_context,
+                    rapidbyte_bin,
+                );
             }
 
             Ok(RunResult::success(
                 scenario.suite.clone(),
                 scenario.id.clone(),
-                build_mode_name(scenario.benchmark.build_mode),
-                json!({
-                    "workload_family": format!("{:?}", scenario.workload.family),
-                }),
-                workload.rows,
-                scenario.benchmark.aot,
+                artifact_context,
+                SyntheticRunSpec {
+                    benchmark_kind: scenario.kind,
+                    build_mode: build_mode_name(scenario.benchmark.build_mode).to_string(),
+                    connector_metrics: json!({
+                        "workload_family": format!("{:?}", scenario.workload.family),
+                    }),
+                    records_written: workload.rows,
+                    aot: scenario.benchmark.aot,
+                },
             ))
         }
         crate::scenario::BenchmarkKind::Source => {
-            bail!(
-                "scenario {} source benchmarks are not implemented yet",
-                scenario.id
-            )
+            execute_source_benchmark(scenario, workload, environment, artifact_context)
         }
         crate::scenario::BenchmarkKind::Destination => {
-            bail!(
-                "scenario {} destination benchmarks are not implemented yet",
-                scenario.id
-            )
+            execute_destination_benchmark(scenario, workload, environment, artifact_context)
         }
         crate::scenario::BenchmarkKind::Transform => {
-            bail!(
-                "scenario {} transform benchmarks are not implemented yet",
-                scenario.id
-            )
+            execute_transform_benchmark(scenario, workload, artifact_context)
         }
     }
 }
 
 fn execute_real_postgres_pipeline(
+    root: &Path,
     scenario: &ScenarioManifest,
     workload: &ResolvedWorkloadPlan,
     environment: Option<&PostgresBenchmarkEnvironment>,
+    artifact_context: &ArtifactContext,
+    rapidbyte_bin: Option<&Path>,
 ) -> Result<RunResult> {
     let temp_root = benchmark_temp_root(&scenario.id)?;
     let env = environment.with_context(|| {
@@ -205,14 +292,27 @@ fn execute_real_postgres_pipeline(
     })?;
     prepare_pipeline_fixtures(scenario, workload, env)?;
     let rendered = write_rendered_pipeline(scenario, env, &temp_root)?;
-    let bench_json = invoke_rapidbyte_run(scenario, &rendered.path)?;
-    enforce_row_count_assertions(&scenario.id, workload, &bench_json)?;
-    run_result_from_bench_json(scenario, bench_json)
+    let bench_json = invoke_rapidbyte_run(root, scenario, &rendered.path, rapidbyte_bin)?;
+    let correctness = enforce_row_count_assertions(&scenario.id, workload, &bench_json)?;
+    run_result_from_bench_json(scenario, artifact_context, bench_json, correctness)
 }
 
-fn invoke_rapidbyte_run(scenario: &ScenarioManifest, pipeline_path: &Path) -> Result<JsonValue> {
-    let repo_root = std::env::current_dir().context("failed to determine benchmark cwd")?;
-    let output = rapidbyte_run_command(&repo_root, pipeline_path, scenario)
+fn invoke_rapidbyte_run(
+    repo_root: &Path,
+    scenario: &ScenarioManifest,
+    pipeline_path: &Path,
+    rapidbyte_bin: Option<&Path>,
+) -> Result<JsonValue> {
+    let binary_path = rapidbyte_bin
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| default_rapidbyte_binary(repo_root, scenario));
+    if !binary_path.exists() {
+        bail!(
+            "rapidbyte benchmark binary not found at {}; build it first or pass --rapidbyte-bin",
+            binary_path.display()
+        );
+    }
+    let output = rapidbyte_run_command(repo_root, pipeline_path, scenario, Some(&binary_path))
         .output()
         .context("failed to invoke rapidbyte CLI")?;
 
@@ -232,8 +332,12 @@ fn rapidbyte_run_command(
     repo_root: &Path,
     pipeline_path: &Path,
     scenario: &ScenarioManifest,
+    rapidbyte_bin: Option<&Path>,
 ) -> Command {
-    let mut command = Command::new("cargo");
+    let binary_path = rapidbyte_bin
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| default_rapidbyte_binary(repo_root, scenario));
+    let mut command = Command::new(binary_path);
     command
         .current_dir(repo_root)
         .env("RAPIDBYTE_BENCH", "1")
@@ -245,19 +349,7 @@ fn rapidbyte_run_command(
         "RAPIDBYTE_WASMTIME_AOT",
         if scenario.benchmark.aot { "1" } else { "0" },
     );
-    command.arg("run");
-    if matches!(scenario.benchmark.build_mode, BenchmarkBuildMode::Release) {
-        command.arg("--release");
-    }
-    command
-        .args([
-            "--quiet",
-            "--manifest-path",
-            "crates/rapidbyte-cli/Cargo.toml",
-            "--",
-            "run",
-        ])
-        .arg(pipeline_path);
+    command.args(["--quiet", "run"]).arg(pipeline_path);
     command
 }
 
@@ -271,7 +363,9 @@ fn parse_bench_json_from_stdout(stdout: &str) -> Result<JsonValue> {
 
 fn run_result_from_bench_json(
     scenario: &ScenarioManifest,
+    artifact_context: &ArtifactContext,
     bench_json: JsonValue,
+    correctness: ArtifactCorrectness,
 ) -> Result<RunResult> {
     let duration_secs = required_f64(&bench_json, "duration_secs")?;
     let records_written = required_u64(&bench_json, "records_written")?;
@@ -319,6 +413,10 @@ fn run_result_from_bench_json(
     Ok(RunResult {
         suite_id: scenario.suite.clone(),
         scenario_id: scenario.id.clone(),
+        benchmark_kind: scenario.kind,
+        git_sha: artifact_context.git_sha.clone(),
+        hardware_class: artifact_context.hardware_class.clone(),
+        scenario_fingerprint: artifact_context.scenario_fingerprint.clone(),
         build_mode: build_mode_name(scenario.benchmark.build_mode).to_string(),
         connector_metrics,
         canonical_metrics: json!({
@@ -333,7 +431,7 @@ fn run_result_from_bench_json(
             "synthetic": false,
             "aot": scenario.benchmark.aot,
         }),
-        correctness_assertions_present: true,
+        correctness,
     })
 }
 
@@ -348,7 +446,7 @@ fn enforce_row_count_assertions(
     scenario_id: &str,
     workload: &ResolvedWorkloadPlan,
     bench_json: &JsonValue,
-) -> Result<()> {
+) -> Result<ArtifactCorrectness> {
     let actual_read = required_u64(bench_json, "records_read")?;
     let actual_written = required_u64(bench_json, "records_written")?;
 
@@ -365,7 +463,42 @@ fn enforce_row_count_assertions(
         );
     }
 
-    Ok(())
+    Ok(ArtifactCorrectness {
+        passed: true,
+        validator: "row_count".to_string(),
+        details: Some(json!({
+            "expected_records_read": workload.expected_records_read,
+            "actual_records_read": actual_read,
+            "expected_records_written": workload.expected_records_written,
+            "actual_records_written": actual_written,
+        })),
+    })
+}
+
+fn default_rapidbyte_binary(repo_root: &Path, scenario: &ScenarioManifest) -> PathBuf {
+    repo_root
+        .join("target")
+        .join(build_mode_name(scenario.benchmark.build_mode))
+        .join("rapidbyte")
+}
+
+fn resolve_git_sha(root: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .context("failed to resolve git sha")?;
+    if !output.status.success() {
+        bail!("git rev-parse failed");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn scenario_fingerprint(scenario: &ScenarioManifest) -> Result<String> {
+    let bytes = serde_json::to_vec(scenario).context("failed to serialize scenario fingerprint")?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn benchmark_temp_root(scenario_id: &str) -> Result<PathBuf> {
@@ -426,6 +559,14 @@ mod tests {
     };
     use crate::workload::{resolve_workload_plan, WorkloadFamily};
 
+    fn artifact_context() -> ArtifactContext {
+        ArtifactContext {
+            git_sha: "abc1234".to_string(),
+            hardware_class: "local-dev".to_string(),
+            scenario_fingerprint: "fingerprint".to_string(),
+        }
+    }
+
     #[test]
     fn bench_json_maps_into_benchmark_artifact() {
         let scenario = sample_postgres_scenario("insert");
@@ -434,10 +575,19 @@ mod tests {
             sample_bench_json(1_000, 1_000)
         ))
         .expect("parse bench json");
-        let run = run_result_from_bench_json(&scenario, bench_json).expect("run result");
+        let workload = resolve_workload_plan(&scenario).expect("workload");
+        let bench_json_value: JsonValue =
+            serde_json::from_str(&sample_bench_json(1_000, 1_000)).expect("bench json");
+        let correctness = enforce_row_count_assertions(&scenario.id, &workload, &bench_json_value)
+            .expect("correctness");
+        let run =
+            run_result_from_bench_json(&scenario, &artifact_context(), bench_json, correctness)
+                .expect("run result");
         let artifact = materialize_artifact(run).expect("artifact");
 
         assert_eq!(artifact.scenario_id, "pg_dest_insert");
+        assert_eq!(artifact.benchmark_kind, BenchmarkKind::Pipeline);
+        assert_eq!(artifact.git_sha, "abc1234");
         assert_eq!(artifact.canonical_metrics["duration_secs"], 2.0);
         assert_eq!(artifact.canonical_metrics["records_per_sec"], 500.0);
         assert_eq!(artifact.canonical_metrics["batch_count"], 4);
@@ -459,8 +609,15 @@ mod tests {
     fn real_execution_path_preserves_scenario_id_and_connector_metrics() {
         let scenario = sample_postgres_scenario("copy");
         let bench_json: JsonValue = serde_json::from_str(&sample_bench_json(1_000, 1_000)).unwrap();
+        let correctness = enforce_row_count_assertions(
+            &scenario.id,
+            &resolve_workload_plan(&scenario).expect("workload"),
+            &bench_json,
+        )
+        .expect("correctness");
         let artifact = materialize_artifact(
-            run_result_from_bench_json(&scenario, bench_json).expect("run result"),
+            run_result_from_bench_json(&scenario, &artifact_context(), bench_json, correctness)
+                .expect("run result"),
         )
         .expect("artifact");
 
@@ -491,10 +648,14 @@ mod tests {
         let written = emit_scenario_artifacts(
             std::path::Path::new("."),
             &[insert, copy],
-            Some("lab"),
-            &["synthetic_copy".to_string()],
-            None,
-            &output_path,
+            EmitArtifactsOptions {
+                suite: Some("lab"),
+                scenario_ids: &["synthetic_copy".to_string()],
+                env_profile: None,
+                hardware_class: Some("local-dev"),
+                rapidbyte_bin: None,
+                output_path: &output_path,
+            },
         )
         .expect("emit artifacts");
 
@@ -520,10 +681,14 @@ mod tests {
         let err = emit_scenario_artifacts(
             std::path::Path::new("."),
             &[logical_environment_scenario("pg_dest_insert")],
-            Some("lab"),
-            &["pg_dest_insert".to_string()],
-            None,
-            &output_path,
+            EmitArtifactsOptions {
+                suite: Some("lab"),
+                scenario_ids: &["pg_dest_insert".to_string()],
+                env_profile: None,
+                hardware_class: Some("local-dev"),
+                rapidbyte_bin: None,
+                output_path: &output_path,
+            },
         )
         .expect_err("logical environment should require an env profile");
 
@@ -536,7 +701,7 @@ mod tests {
         let pipeline_path = std::path::Path::new("/tmp/rapidbyte/bench.yaml");
         let scenario = sample_postgres_scenario("insert");
 
-        let command = rapidbyte_run_command(repo_root, pipeline_path, &scenario);
+        let command = rapidbyte_run_command(repo_root, pipeline_path, &scenario, None);
         let envs = command.get_envs().collect::<Vec<_>>();
         let plugin_dir = envs
             .iter()
@@ -563,11 +728,16 @@ mod tests {
         scenario.benchmark.build_mode = BenchmarkBuildMode::Release;
         scenario.benchmark.aot = true;
 
-        let command = rapidbyte_run_command(repo_root, pipeline_path, &scenario);
+        let command = rapidbyte_run_command(repo_root, pipeline_path, &scenario, None);
         let args = command.get_args().collect::<Vec<_>>();
+        let program = command.get_program();
         let envs = command.get_envs().collect::<Vec<_>>();
 
-        assert!(args.contains(&std::ffi::OsStr::new("--release")));
+        assert_eq!(
+            program,
+            std::ffi::OsStr::new("/tmp/rapidbyte/target/release/rapidbyte")
+        );
+        assert!(args.contains(&std::ffi::OsStr::new("run")));
         let aot = envs
             .iter()
             .find_map(|(key, value)| {
@@ -593,8 +763,14 @@ mod tests {
             sample_bench_json(1_000, 1_000)
         ))
         .expect("parse bench json");
+        let workload = resolve_workload_plan(&scenario).expect("workload");
+        let bench_json_value: JsonValue =
+            serde_json::from_str(&sample_bench_json(1_000, 1_000)).expect("bench json");
+        let correctness = enforce_row_count_assertions(&scenario.id, &workload, &bench_json_value)
+            .expect("correctness");
         let artifact = materialize_artifact(
-            run_result_from_bench_json(&scenario, bench_json).expect("run result"),
+            run_result_from_bench_json(&scenario, &artifact_context(), bench_json, correctness)
+                .expect("run result"),
         )
         .expect("artifact");
 
@@ -603,7 +779,7 @@ mod tests {
     }
 
     #[test]
-    fn source_benchmark_execution_reports_not_implemented() {
+    fn source_benchmark_execution_uses_real_harness_path() {
         let mut scenario = sample_postgres_scenario("insert");
         scenario.id = "pg_source_read".to_string();
         scenario.kind = BenchmarkKind::Source;
@@ -637,17 +813,21 @@ mod tests {
 
         let workload = resolve_workload_plan(&scenario).expect("workload");
         let env = scenario.environment.postgres.as_ref();
-        let err =
-            execute_scenario_once(&scenario, &workload, env).expect_err("source not implemented");
+        let err = execute_scenario_once(
+            std::path::Path::new("."),
+            &scenario,
+            &workload,
+            env,
+            &artifact_context(),
+            None,
+        )
+        .expect_err("source not implemented");
 
-        assert!(err.to_string().contains("pg_source_read"));
-        assert!(err
-            .to_string()
-            .contains("source benchmarks are not implemented"));
+        assert!(!err.to_string().contains("not implemented"));
     }
 
     #[test]
-    fn destination_benchmark_execution_reports_not_implemented() {
+    fn destination_benchmark_execution_uses_real_harness_path() {
         let mut scenario = sample_postgres_scenario("insert");
         scenario.id = "pg_dest_write".to_string();
         scenario.kind = BenchmarkKind::Destination;
@@ -658,17 +838,21 @@ mod tests {
 
         let workload = resolve_workload_plan(&scenario).expect("workload");
         let env = scenario.environment.postgres.as_ref();
-        let err = execute_scenario_once(&scenario, &workload, env)
-            .expect_err("destination not implemented");
+        let err = execute_scenario_once(
+            std::path::Path::new("."),
+            &scenario,
+            &workload,
+            env,
+            &artifact_context(),
+            None,
+        )
+        .expect_err("destination not implemented");
 
-        assert!(err.to_string().contains("pg_dest_write"));
-        assert!(err
-            .to_string()
-            .contains("destination benchmarks are not implemented"));
+        assert!(!err.to_string().contains("not implemented"));
     }
 
     #[test]
-    fn transform_benchmark_execution_reports_not_implemented() {
+    fn transform_benchmark_execution_uses_real_harness_path() {
         let mut scenario = sample_postgres_scenario("insert");
         scenario.id = "sql_transform".to_string();
         scenario.kind = BenchmarkKind::Transform;
@@ -679,13 +863,17 @@ mod tests {
 
         let workload = resolve_workload_plan(&scenario).expect("workload");
         let env = scenario.environment.postgres.as_ref();
-        let err = execute_scenario_once(&scenario, &workload, env)
-            .expect_err("transform not implemented");
+        let err = execute_scenario_once(
+            std::path::Path::new("."),
+            &scenario,
+            &workload,
+            env,
+            &artifact_context(),
+            None,
+        )
+        .expect_err("transform not implemented");
 
-        assert!(err.to_string().contains("sql_transform"));
-        assert!(err
-            .to_string()
-            .contains("transform benchmarks are not implemented"));
+        assert!(!err.to_string().contains("not implemented"));
     }
 
     #[test]
@@ -706,10 +894,14 @@ mod tests {
         let err = emit_scenario_artifacts(
             root,
             &[scenario],
-            Some("pr"),
-            &["pr_smoke_pipeline".to_string()],
-            None,
-            &output_path,
+            EmitArtifactsOptions {
+                suite: Some("pr"),
+                scenario_ids: &["pr_smoke_pipeline".to_string()],
+                env_profile: None,
+                hardware_class: Some("ci"),
+                rapidbyte_bin: None,
+                output_path: &output_path,
+            },
         )
         .expect_err("pr smoke should require env profile");
 
@@ -776,6 +968,7 @@ mod tests {
                     write_mode: Some("append".to_string()),
                     config: Default::default(),
                 },
+                transforms: vec![],
             },
             assertions: ScenarioAssertions {
                 expected_records_read: Some(1_000),
@@ -906,6 +1099,7 @@ mod tests {
                     write_mode: Some("append".to_string()),
                     config: Default::default(),
                 },
+                transforms: vec![],
             },
             assertions: ScenarioAssertions {
                 expected_records_read: Some(100),

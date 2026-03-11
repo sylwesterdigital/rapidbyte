@@ -98,7 +98,6 @@ pub fn spawn_progress_spinner(
                     );
                     spinner.set_message(msg);
                 }
-                ProgressEvent::Error { .. } => {}
             }
         }
 
@@ -122,4 +121,47 @@ fn update_running_message(spinner: &ProgressBar, counters: &Arc<Counters>) {
         total,
     );
     spinner.set_message(msg);
+}
+
+#[cfg(test)]
+mod tests {
+    use rapidbyte_engine::progress::{Phase, ProgressEvent};
+
+    fn classify(event: &ProgressEvent) -> &'static str {
+        match event {
+            ProgressEvent::PhaseChange { .. } => "phase",
+            ProgressEvent::BatchEmitted { .. } => "batch",
+            ProgressEvent::StreamCompleted { .. } => "stream",
+            ProgressEvent::Retry { .. } => "retry",
+        }
+    }
+
+    #[test]
+    fn spinner_progress_surface_matches_emitted_engine_events() {
+        assert_eq!(
+            classify(&ProgressEvent::PhaseChange {
+                phase: Phase::Running,
+            }),
+            "phase"
+        );
+        assert_eq!(
+            classify(&ProgressEvent::BatchEmitted { bytes: 42 }),
+            "batch"
+        );
+        assert_eq!(
+            classify(&ProgressEvent::StreamCompleted {
+                stream: "users".to_string(),
+            }),
+            "stream"
+        );
+        assert_eq!(
+            classify(&ProgressEvent::Retry {
+                attempt: 1,
+                max_retries: 3,
+                message: "retry".to_string(),
+                delay_secs: 1.0,
+            }),
+            "retry"
+        );
+    }
 }

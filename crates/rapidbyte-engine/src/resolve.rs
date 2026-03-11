@@ -11,6 +11,7 @@ use rapidbyte_types::wire::{PluginKind, ProtocolVersion};
 
 use crate::config::types::{parse_byte_size, PipelineConfig, StateBackendKind};
 use crate::error::PipelineError;
+use crate::result::CheckItemResult;
 
 pub(crate) struct ResolvedPlugins {
     pub(crate) source_wasm: PathBuf,
@@ -40,15 +41,6 @@ pub(crate) fn resolve_plugins(config: &PipelineConfig) -> Result<ResolvedPlugins
         PluginKind::Destination,
     )
     .map_err(PipelineError::Infrastructure)?;
-
-    if let Some(ref sm) = source_manifest {
-        validate_config_against_schema(&config.source.use_ref, &config.source.config, sm)
-            .map_err(PipelineError::Infrastructure)?;
-    }
-    if let Some(ref dm) = dest_manifest {
-        validate_config_against_schema(&config.destination.use_ref, &config.destination.config, dm)
-            .map_err(PipelineError::Infrastructure)?;
-    }
 
     Ok(ResolvedPlugins {
         source_permissions: source_manifest.as_ref().map(|m| m.permissions.clone()),
@@ -145,15 +137,21 @@ pub(crate) fn create_state_backend(config: &PipelineConfig) -> Result<Arc<dyn St
     }
 }
 
-pub(crate) fn check_state_backend(config: &PipelineConfig) -> bool {
+pub(crate) fn check_state_backend(config: &PipelineConfig) -> CheckItemResult {
     match create_state_backend(config) {
         Ok(_) => {
             tracing::info!("State backend: OK");
-            true
+            CheckItemResult {
+                ok: true,
+                message: String::new(),
+            }
         }
         Err(e) => {
             tracing::error!("State backend: FAILED — {}", e);
-            false
+            CheckItemResult {
+                ok: false,
+                message: e.to_string(),
+            }
         }
     }
 }

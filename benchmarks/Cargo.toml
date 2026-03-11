@@ -12,6 +12,10 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 postgres.workspace = true
 rapidbyte-types = { path = "../crates/rapidbyte-types" }
-
-[dev-dependencies]
 rapidbyte-engine = { path = "../crates/rapidbyte-engine" }
+rapidbyte-runtime = { path = "../crates/rapidbyte-runtime" }
+rapidbyte-state = { path = "../crates/rapidbyte-state" }
+tokio.workspace = true
+arrow.workspace = true
+bytes = "1"
+sha2 = "0.10"

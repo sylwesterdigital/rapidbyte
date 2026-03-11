@@ -1,20 +1,31 @@
-#![cfg_attr(not(test), allow(dead_code))]
-
 #[cfg(test)]
 mod tests {
     use serde_json::Value as JsonValue;
 
-    use crate::runner::{materialize_artifact, RunResult};
+    use crate::runner::{materialize_artifact, ArtifactContext, RunResult, SyntheticRunSpec};
+    use crate::scenario::BenchmarkKind;
+
+    fn artifact_context() -> ArtifactContext {
+        ArtifactContext {
+            git_sha: "abc1234".to_string(),
+            hardware_class: "ci-small".to_string(),
+            scenario_fingerprint: "fingerprint".to_string(),
+        }
+    }
 
     #[test]
     fn canonical_metrics_are_present_in_emitted_artifacts() {
         let artifact = materialize_artifact(RunResult::success(
             "pr",
             "pr_smoke_pipeline",
-            "debug",
-            JsonValue::Null,
-            1_000,
-            false,
+            &artifact_context(),
+            SyntheticRunSpec {
+                benchmark_kind: BenchmarkKind::Pipeline,
+                build_mode: "debug".to_string(),
+                connector_metrics: JsonValue::Null,
+                records_written: 1_000,
+                aot: false,
+            },
         ))
         .expect("artifact");
 
@@ -38,14 +49,18 @@ mod tests {
         let artifact = materialize_artifact(RunResult::success(
             "pr",
             "pr_smoke_pipeline",
-            "debug",
-            serde_json::json!({
-                "destination": {
-                    "insert_statement_count": 12
-                }
-            }),
-            1_000,
-            false,
+            &artifact_context(),
+            SyntheticRunSpec {
+                benchmark_kind: BenchmarkKind::Pipeline,
+                build_mode: "debug".to_string(),
+                connector_metrics: serde_json::json!({
+                    "destination": {
+                        "insert_statement_count": 12
+                    }
+                }),
+                records_written: 1_000,
+                aot: false,
+            },
         ))
         .expect("artifact");
 

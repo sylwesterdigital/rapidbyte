@@ -169,6 +169,8 @@ pub enum ValidationStatus {
 pub struct ValidationResult {
     pub status: ValidationStatus,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Structured error from a plugin operation.

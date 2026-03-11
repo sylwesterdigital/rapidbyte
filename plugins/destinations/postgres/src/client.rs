@@ -80,5 +80,6 @@ pub(crate) async fn validate(
     Ok(ValidationResult {
         status: ValidationStatus::Success,
         message,
+        warnings: Vec::new(),
     })
 }
