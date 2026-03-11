@@ -4,9 +4,10 @@ mod config;
 mod transform;
 
 use std::collections::{BTreeSet, HashSet};
+use std::ops::ControlFlow;
 
 use datafusion::sql::parser::{DFParser, Statement as DfStatement};
-use datafusion::sql::sqlparser::ast::{Query, SetExpr, Statement, TableFactor, TableWithJoins};
+use datafusion::sql::sqlparser::ast::{ObjectName, Query, Statement, Visit, Visitor};
 use datafusion::sql::sqlparser::dialect::GenericDialect;
 use datafusion::sql::sqlparser::parser::Parser;
 use rapidbyte_sdk::prelude::*;
@@ -15,97 +16,67 @@ fn query_external_table_references(query: &str) -> Result<BTreeSet<String>, Stri
     let dialect = GenericDialect {};
     let statements = Parser::parse_sql(&dialect, query)
         .map_err(|e| format!("failed to parse SQL query: {e}"))?;
-    let mut references = BTreeSet::new();
-    let ctes = HashSet::new();
-    for statement in statements {
-        statement_external_table_references(&statement, &ctes, &mut references);
-    }
-    Ok(references)
+    Ok(ExternalTableReferenceCollector::collect(statements))
 }
 
-fn statement_external_table_references(
-    statement: &Statement,
-    ctes: &HashSet<String>,
-    references: &mut BTreeSet<String>,
-) {
-    match statement {
-        Statement::Query(query) => {
-            query_external_table_references_in_scope(query, ctes, references);
+#[derive(Default)]
+struct ExternalTableReferenceCollector {
+    cte_scopes: Vec<HashSet<String>>,
+    references: BTreeSet<String>,
+}
+
+impl ExternalTableReferenceCollector {
+    fn collect(statements: Vec<Statement>) -> BTreeSet<String> {
+        let mut collector = Self::default();
+        let _ = statements.visit(&mut collector);
+        collector.references
+    }
+
+    fn relation_is_cte_reference(&self, relation: &ObjectName) -> bool {
+        if relation.0.len() != 1 {
+            return false;
         }
-        _ => {}
+        let relation_name = relation.0[0].value.to_ascii_lowercase();
+        self.cte_scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(&relation_name))
+    }
+
+    fn normalize_relation_name(relation: &ObjectName) -> String {
+        relation
+            .0
+            .iter()
+            .map(|ident| ident.value.as_str())
+            .collect::<Vec<_>>()
+            .join(".")
     }
 }
 
-fn query_external_table_references_in_scope(
-    query: &Query,
-    parent_ctes: &HashSet<String>,
-    references: &mut BTreeSet<String>,
-) {
-    let mut ctes = parent_ctes.clone();
-    if let Some(with) = &query.with {
-        for cte in &with.cte_tables {
-            ctes.insert(cte.alias.name.value.to_ascii_lowercase());
-        }
-        for cte in &with.cte_tables {
-            query_external_table_references_in_scope(&cte.query, &ctes, references);
-        }
-    }
-    set_expr_external_table_references(&query.body, &ctes, references);
-}
+impl Visitor for ExternalTableReferenceCollector {
+    type Break = ();
 
-fn set_expr_external_table_references(
-    set_expr: &SetExpr,
-    ctes: &HashSet<String>,
-    references: &mut BTreeSet<String>,
-) {
-    match set_expr {
-        SetExpr::Select(select) => {
-            for table_with_joins in &select.from {
-                table_with_joins_external_table_references(table_with_joins, ctes, references);
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        let mut ctes = HashSet::new();
+        if let Some(with) = &query.with {
+            for cte in &with.cte_tables {
+                ctes.insert(cte.alias.name.value.to_ascii_lowercase());
             }
         }
-        SetExpr::Query(query) => query_external_table_references_in_scope(query, ctes, references),
-        SetExpr::SetOperation { left, right, .. } => {
-            set_expr_external_table_references(left, ctes, references);
-            set_expr_external_table_references(right, ctes, references);
-        }
-        _ => {}
+        self.cte_scopes.push(ctes);
+        ControlFlow::Continue(())
     }
-}
 
-fn table_with_joins_external_table_references(
-    table_with_joins: &TableWithJoins,
-    ctes: &HashSet<String>,
-    references: &mut BTreeSet<String>,
-) {
-    table_factor_external_table_references(&table_with_joins.relation, ctes, references);
-    for join in &table_with_joins.joins {
-        table_factor_external_table_references(&join.relation, ctes, references);
+    fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<Self::Break> {
+        self.cte_scopes.pop();
+        ControlFlow::Continue(())
     }
-}
 
-fn table_factor_external_table_references(
-    table_factor: &TableFactor,
-    ctes: &HashSet<String>,
-    references: &mut BTreeSet<String>,
-) {
-    match table_factor {
-        TableFactor::Table { name, .. } => {
-            if name.0.len() == 1 {
-                let table_name = &name.0[0].value;
-                if ctes.contains(&table_name.to_ascii_lowercase()) {
-                    return;
-                }
-            }
-            references.insert(name.to_string());
+    fn pre_visit_relation(&mut self, relation: &ObjectName) -> ControlFlow<Self::Break> {
+        if !self.relation_is_cte_reference(relation) {
+            self.references.insert(Self::normalize_relation_name(relation));
         }
-        TableFactor::Derived { subquery, .. } => {
-            query_external_table_references_in_scope(subquery, ctes, references);
-        }
-        TableFactor::NestedJoin {
-            table_with_joins, ..
-        } => table_with_joins_external_table_references(table_with_joins, ctes, references),
-        _ => {}
+        ControlFlow::Continue(())
     }
 }
 
@@ -301,6 +272,38 @@ mod tests {
         .expect("validate should not return plugin error");
 
         assert_eq!(validation.status, ValidationStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn validate_allows_quoted_current_stream_identifier() {
+        let ctx = Context::new("transform-sql", "users");
+        let validation = TransformSql::validate(
+            &config::Config {
+                query: r#"SELECT id FROM "users""#.to_string(),
+            },
+            &ctx,
+        )
+        .await
+        .expect("validate should not return plugin error");
+
+        assert_eq!(validation.status, ValidationStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_cross_stream_subquery_references() {
+        let ctx = Context::new("transform-sql", "users");
+        let validation = TransformSql::validate(
+            &config::Config {
+                query: "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)"
+                    .to_string(),
+            },
+            &ctx,
+        )
+        .await
+        .expect("validate should not return plugin error");
+
+        assert_eq!(validation.status, ValidationStatus::Failed);
+        assert!(validation.message.contains("orders"));
     }
 
     #[tokio::test]
