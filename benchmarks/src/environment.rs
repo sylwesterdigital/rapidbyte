@@ -529,6 +529,39 @@ bindings:
         );
     }
 
+    #[test]
+    fn docker_compose_provider_reports_cleanup_failure_after_failed_up() {
+        let executor = RecordingCommandExecutor::with_results(vec![
+            Err(anyhow::anyhow!("up failed")),
+            Err(anyhow::anyhow!("down failed")),
+        ]);
+        let err = EnvironmentSession::provision(
+            Path::new("/repo"),
+            sample_profile(Some("bench".to_string())),
+            &executor,
+        )
+        .expect_err("failed up should fail provisioning");
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("up failed"));
+        assert!(rendered.contains("down failed"));
+        assert_eq!(
+            executor.commands.borrow().as_slice(),
+            &[
+                RecordedCommand {
+                    cwd: PathBuf::from("/repo/bench"),
+                    program: "docker".to_string(),
+                    args: vec!["compose".to_string(), "up".to_string(), "-d".to_string()],
+                },
+                RecordedCommand {
+                    cwd: PathBuf::from("/repo/bench"),
+                    program: "docker".to_string(),
+                    args: vec!["compose".to_string(), "down".to_string(), "-v".to_string()],
+                }
+            ]
+        );
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct RecordedCommand {
         cwd: PathBuf,

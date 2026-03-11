@@ -851,6 +851,55 @@ mod tests {
     }
 
     #[test]
+    fn emit_scenario_artifacts_returns_teardown_error_after_successful_run() {
+        let temp_root = temp_dir("runner-teardown-error-after-success");
+        let output_path = temp_root.join("candidate.jsonl");
+        let events = Rc::new(RefCell::new(vec!["provision".to_string()]));
+        let environment = Box::new(RecordingEnvironmentHandle::with_teardown_error(
+            events.clone(),
+            "teardown failed",
+        ));
+        let scenario = synthetic_scenario("synthetic_copy");
+        let filtered = vec![&scenario];
+
+        let err = emit_scenario_artifacts_with_dependencies(
+            std::path::Path::new("."),
+            &filtered,
+            EmitArtifactsOptions {
+                suite: Some("lab"),
+                scenario_ids: &["synthetic_copy".to_string()],
+                env_profile: None,
+                hardware_class: Some("local-dev"),
+                rapidbyte_bin: None,
+                output_path: &output_path,
+            },
+            environment,
+            |_, scenario, _, _, artifact_context, _| {
+                events.borrow_mut().push("execute".to_string());
+                Ok(RunResult::success(
+                    "lab",
+                    scenario.id.clone(),
+                    artifact_context,
+                    SyntheticRunSpec {
+                        benchmark_kind: BenchmarkKind::Pipeline,
+                        build_mode: "debug".to_string(),
+                        connector_metrics: json!({}),
+                        records_written: 100,
+                        aot: false,
+                    },
+                ))
+            },
+        )
+        .expect_err("teardown failure should bubble up after success");
+
+        assert!(err.to_string().contains("teardown failed"));
+        assert_eq!(
+            events.borrow().as_slice(),
+            &["provision", "execute", "teardown"]
+        );
+    }
+
+    #[test]
     fn emit_scenario_artifacts_tears_down_environment_after_execution_failure() {
         let temp_root = temp_dir("runner-teardown-failure");
         let output_path = temp_root.join("candidate.jsonl");
