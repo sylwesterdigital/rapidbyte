@@ -49,12 +49,24 @@ pub fn compare_artifact_sets(
     latency_increase_pct: f64,
 ) -> ComparisonReport {
     let baseline_groups = group_artifacts(baseline_rows);
+    let baseline_legacy_groups = group_artifacts_by_legacy_identity(baseline_rows);
     let candidate_groups = group_artifacts(candidate_rows);
     let mut comparisons = Vec::new();
 
     for (identity, candidates) in candidate_groups {
         let scenario_id = candidates[0].scenario_id.clone();
-        let Some(baselines) = baseline_groups.get(&identity) else {
+        let baselines = baseline_groups.get(&identity).cloned().or_else(|| {
+            baseline_legacy_groups
+                .get(&compare_legacy_identity_key(candidates[0]))
+                .map(|rows| {
+                    rows.iter()
+                        .copied()
+                        .filter(|row| scenario_fingerprint_compatible(row, candidates[0]))
+                        .collect::<Vec<_>>()
+                })
+                .filter(|rows| !rows.is_empty())
+        });
+        let Some(baselines) = baselines else {
             comparisons.push(ScenarioComparison {
                 scenario_id,
                 status: "missing_baseline".to_string(),
@@ -80,16 +92,16 @@ pub fn compare_artifact_sets(
                 )],
                 baseline_samples: baselines.len(),
                 candidate_samples: candidates.len(),
-                baseline_throughput: median_metric(baselines, "records_per_sec"),
+                baseline_throughput: median_metric(&baselines, "records_per_sec"),
                 candidate_throughput: median_metric(&candidates, "records_per_sec"),
-                baseline_latency: median_metric(baselines, "duration_secs"),
+                baseline_latency: median_metric(&baselines, "duration_secs"),
                 candidate_latency: median_metric(&candidates, "duration_secs"),
             });
             continue;
         }
 
         comparisons.push(compare_group(
-            baselines,
+            &baselines,
             &candidates,
             throughput_drop_pct,
             latency_increase_pct,
@@ -111,6 +123,19 @@ fn group_artifacts(rows: &[BenchmarkArtifact]) -> BTreeMap<String, Vec<&Benchmar
     grouped
 }
 
+fn group_artifacts_by_legacy_identity(
+    rows: &[BenchmarkArtifact],
+) -> BTreeMap<String, Vec<&BenchmarkArtifact>> {
+    let mut grouped = BTreeMap::<String, Vec<&BenchmarkArtifact>>::new();
+    for row in rows {
+        grouped
+            .entry(compare_legacy_identity_key(row))
+            .or_default()
+            .push(row);
+    }
+    grouped
+}
+
 fn compare_identity_key(artifact: &BenchmarkArtifact) -> String {
     format!(
         "{}|{}|{:?}|{}|{}|{}|{}",
@@ -122,6 +147,27 @@ fn compare_identity_key(artifact: &BenchmarkArtifact) -> String {
         serde_json::to_string(&artifact.execution_flags).unwrap_or_default(),
         artifact.scenario_fingerprint,
     )
+}
+
+fn compare_legacy_identity_key(artifact: &BenchmarkArtifact) -> String {
+    format!(
+        "{}|{}|{:?}|{}|{}|{}",
+        artifact.scenario_id,
+        artifact.suite_id,
+        artifact.benchmark_kind,
+        artifact.hardware_class,
+        artifact.build_mode,
+        serde_json::to_string(&artifact.execution_flags).unwrap_or_default(),
+    )
+}
+
+fn scenario_fingerprint_compatible(
+    baseline: &BenchmarkArtifact,
+    candidate: &BenchmarkArtifact,
+) -> bool {
+    baseline.scenario_fingerprint == candidate.scenario_fingerprint
+        || baseline.scenario_fingerprint == "unknown"
+        || candidate.scenario_fingerprint == "unknown"
 }
 
 fn compare_group(
@@ -293,5 +339,20 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason.contains("correctness failed")));
+    }
+
+    #[test]
+    fn compare_matches_old_unknown_fingerprint_baseline() {
+        let mut baseline_artifact = artifact("smoke", "base111", 100.0, 1.0, true);
+        baseline_artifact.scenario_fingerprint = "unknown".to_string();
+        let candidate = vec![artifact("smoke", "cand222", 80.0, 1.3, true)];
+
+        let report = compare_artifact_sets(&[baseline_artifact], &candidate, 1, 10.0, 15.0);
+
+        assert_eq!(report.comparisons[0].status, "regressed");
+        assert!(report.comparisons[0]
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("throughput dropped")));
     }
 }

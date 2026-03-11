@@ -164,7 +164,7 @@ pub fn execute_destination_benchmark(
     let state = Arc::new(SqliteStateBackend::in_memory()?);
     let stats = Arc::new(Mutex::new(RunStats::default()));
     let dlq_records = Arc::new(Mutex::new(Vec::new()));
-    let (sender, receiver) = mpsc::sync_channel(64);
+    let (sender, receiver) = mpsc::sync_channel(destination_input_channel_capacity(batches.len()));
     send_input_batches(sender, &batches)?;
     let result = run_destination_stream(
         &module,
@@ -514,6 +514,10 @@ fn send_input_batches(sender: mpsc::SyncSender<Frame>, batches: &[RecordBatch]) 
     Ok(())
 }
 
+fn destination_input_channel_capacity(batch_count: usize) -> usize {
+    batch_count.saturating_add(1).max(8)
+}
+
 fn first_batch_schema_hint(batches: &[RecordBatch]) -> Result<SchemaHint> {
     let first = batches
         .first()
@@ -559,5 +563,24 @@ impl Drop for AotEnvGuard {
         } else {
             std::env::remove_var("RAPIDBYTE_WASMTIME_AOT");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{destination_input_channel_capacity, generate_input_batches};
+
+    #[test]
+    fn destination_input_channel_capacity_scales_with_batch_count() {
+        let batches = generate_input_batches(6_500_000).expect("batches");
+
+        assert!(
+            batches.len() > 64,
+            "test must exceed old fixed channel size"
+        );
+        assert!(
+            destination_input_channel_capacity(batches.len()) > batches.len(),
+            "capacity must hold all batches plus end-of-stream"
+        );
     }
 }
