@@ -7,7 +7,11 @@ use std::collections::{BTreeSet, HashSet};
 use std::ops::ControlFlow;
 
 use datafusion::sql::parser::{DFParser, Statement as DfStatement};
-use datafusion::sql::sqlparser::ast::{ObjectName, Query, Statement, Visit, Visitor};
+use datafusion::sql::sqlparser::ast::{
+    Expr, FunctionArg, FunctionArgExpr, GroupByExpr, JoinConstraint, JoinOperator,
+    NamedWindowExpr, ObjectName, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
+    TableWithJoins, Visit, Visitor, WindowType,
+};
 use datafusion::sql::sqlparser::dialect::GenericDialect;
 use datafusion::sql::sqlparser::parser::Parser;
 use rapidbyte_sdk::prelude::*;
@@ -16,68 +20,407 @@ fn query_external_table_references(query: &str) -> Result<BTreeSet<String>, Stri
     let dialect = GenericDialect {};
     let statements = Parser::parse_sql(&dialect, query)
         .map_err(|e| format!("failed to parse SQL query: {e}"))?;
-    Ok(ExternalTableReferenceCollector::collect(statements))
-}
-
-#[derive(Default)]
-struct ExternalTableReferenceCollector {
-    cte_scopes: Vec<HashSet<String>>,
-    references: BTreeSet<String>,
-}
-
-impl ExternalTableReferenceCollector {
-    fn collect(statements: Vec<Statement>) -> BTreeSet<String> {
-        let mut collector = Self::default();
-        let _ = statements.visit(&mut collector);
-        collector.references
+    let mut references = BTreeSet::new();
+    let scope = HashSet::new();
+    for statement in &statements {
+        collect_statement_external_table_references(statement, &scope, &mut references);
     }
+    Ok(references)
+}
 
-    fn relation_is_cte_reference(&self, relation: &ObjectName) -> bool {
-        if relation.0.len() != 1 {
-            return false;
+fn collect_statement_external_table_references(
+    statement: &Statement,
+    scope: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
+    if let Statement::Query(query) = statement {
+        collect_query_external_table_references(query, scope, references);
+    }
+}
+
+fn collect_query_external_table_references(
+    query: &Query,
+    parent_scope: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
+    let mut scope = parent_scope.clone();
+    if let Some(with) = &query.with {
+        for cte in &with.cte_tables {
+            collect_query_external_table_references(&cte.query, &scope, references);
+            scope.insert(cte.alias.name.value.to_ascii_lowercase());
         }
-        let relation_name = relation.0[0].value.to_ascii_lowercase();
-        self.cte_scopes
-            .iter()
-            .rev()
-            .any(|scope| scope.contains(&relation_name))
     }
-
-    fn normalize_relation_name(relation: &ObjectName) -> String {
-        relation
-            .0
-            .iter()
-            .map(|ident| ident.value.as_str())
-            .collect::<Vec<_>>()
-            .join(".")
+    collect_set_expr_external_table_references(&query.body, &scope, references);
+    if let Some(order_by) = &query.order_by {
+        for expr in &order_by.exprs {
+            collect_expr_external_table_references(&expr.expr, &scope, references);
+            if let Some(with_fill) = &expr.with_fill {
+                if let Some(from) = &with_fill.from {
+                    collect_expr_external_table_references(from, &scope, references);
+                }
+                if let Some(to) = &with_fill.to {
+                    collect_expr_external_table_references(to, &scope, references);
+                }
+                if let Some(step) = &with_fill.step {
+                    collect_expr_external_table_references(step, &scope, references);
+                }
+            }
+        }
+        if let Some(interpolate) = &order_by.interpolate {
+            if let Some(exprs) = &interpolate.exprs {
+                for expr in exprs {
+                    collect_interpolate_expr_external_table_references(expr, &scope, references);
+                }
+            }
+        }
+    }
+    if let Some(limit) = &query.limit {
+        collect_expr_external_table_references(limit, &scope, references);
+    }
+    for expr in &query.limit_by {
+        collect_expr_external_table_references(expr, &scope, references);
+    }
+    if let Some(offset) = &query.offset {
+        collect_expr_external_table_references(&offset.value, &scope, references);
+    }
+    if let Some(fetch) = &query.fetch {
+        if let Some(quantity) = &fetch.quantity {
+            collect_expr_external_table_references(quantity, &scope, references);
+        }
     }
 }
 
-impl Visitor for ExternalTableReferenceCollector {
+fn collect_set_expr_external_table_references(
+    set_expr: &SetExpr,
+    scope: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
+    match set_expr {
+        SetExpr::Select(select) => collect_select_external_table_references(select, scope, references),
+        SetExpr::Query(query) => collect_query_external_table_references(query, scope, references),
+        SetExpr::SetOperation { left, right, .. } => {
+            collect_set_expr_external_table_references(left, scope, references);
+            collect_set_expr_external_table_references(right, scope, references);
+        }
+        SetExpr::Values(values) => {
+            for row in &values.rows {
+                for expr in row {
+                    collect_expr_external_table_references(expr, scope, references);
+                }
+            }
+        }
+        SetExpr::Table(table) => {
+            if let Some(table_name) = &table.table_name {
+                let relation = if let Some(schema_name) = &table.schema_name {
+                    format!("{schema_name}.{table_name}")
+                } else {
+                    table_name.clone()
+                };
+                collect_relation_name_external_reference(&relation, scope, references);
+            }
+        }
+        SetExpr::Insert(_) | SetExpr::Update(_) => {}
+    }
+}
+
+fn collect_select_external_table_references(
+    select: &Select,
+    scope: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
+    for item in &select.projection {
+        collect_select_item_external_table_references(item, scope, references);
+    }
+    for table_with_joins in &select.from {
+        collect_table_with_joins_external_table_references(table_with_joins, scope, references);
+    }
+    for lateral_view in &select.lateral_views {
+        collect_expr_external_table_references(&lateral_view.lateral_view, scope, references);
+    }
+    if let Some(prewhere) = &select.prewhere {
+        collect_expr_external_table_references(prewhere, scope, references);
+    }
+    if let Some(selection) = &select.selection {
+        collect_expr_external_table_references(selection, scope, references);
+    }
+    if let GroupByExpr::Expressions(exprs, _) = &select.group_by {
+        for expr in exprs {
+            collect_expr_external_table_references(expr, scope, references);
+        }
+    }
+    for expr in &select.cluster_by {
+        collect_expr_external_table_references(expr, scope, references);
+    }
+    for expr in &select.distribute_by {
+        collect_expr_external_table_references(expr, scope, references);
+    }
+    for expr in &select.sort_by {
+        collect_expr_external_table_references(expr, scope, references);
+    }
+    if let Some(having) = &select.having {
+        collect_expr_external_table_references(having, scope, references);
+    }
+    if let Some(qualify) = &select.qualify {
+        collect_expr_external_table_references(qualify, scope, references);
+    }
+    if let Some(connect_by) = &select.connect_by {
+        collect_expr_external_table_references(&connect_by.condition, scope, references);
+    }
+    for named_window in &select.named_window {
+        collect_named_window_external_table_references(&named_window.1, scope, references);
+    }
+}
+
+fn collect_select_item_external_table_references(
+    item: &SelectItem,
+    scope: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
+    match item {
+        SelectItem::UnnamedExpr(expr) => {
+            collect_expr_external_table_references(expr, scope, references);
+        }
+        SelectItem::ExprWithAlias { expr, .. } => {
+            collect_expr_external_table_references(expr, scope, references);
+        }
+        SelectItem::QualifiedWildcard(_, additional_options)
+        | SelectItem::Wildcard(additional_options) => {
+            if let Some(replace) = &additional_options.opt_replace {
+                for item in &replace.items {
+                    collect_expr_external_table_references(&item.expr, scope, references);
+                }
+            }
+        }
+    }
+}
+
+fn collect_table_with_joins_external_table_references(
+    table_with_joins: &TableWithJoins,
+    scope: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
+    collect_table_factor_external_table_references(&table_with_joins.relation, scope, references);
+    for join in &table_with_joins.joins {
+        collect_table_factor_external_table_references(&join.relation, scope, references);
+        collect_join_operator_external_table_references(&join.join_operator, scope, references);
+    }
+}
+
+fn collect_join_operator_external_table_references(
+    join_operator: &JoinOperator,
+    scope: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
+    match join_operator {
+        JoinOperator::Inner(constraint)
+        | JoinOperator::LeftOuter(constraint)
+        | JoinOperator::RightOuter(constraint)
+        | JoinOperator::FullOuter(constraint)
+        | JoinOperator::LeftSemi(constraint)
+        | JoinOperator::RightSemi(constraint)
+        | JoinOperator::LeftAnti(constraint)
+        | JoinOperator::RightAnti(constraint) => {
+            collect_join_constraint_external_table_references(constraint, scope, references);
+        }
+        JoinOperator::AsOf {
+            match_condition,
+            constraint,
+        } => {
+            collect_expr_external_table_references(match_condition, scope, references);
+            collect_join_constraint_external_table_references(constraint, scope, references);
+        }
+        JoinOperator::CrossJoin | JoinOperator::CrossApply | JoinOperator::OuterApply => {}
+    }
+}
+
+fn collect_join_constraint_external_table_references(
+    constraint: &JoinConstraint,
+    scope: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
+    if let JoinConstraint::On(expr) = constraint {
+        collect_expr_external_table_references(expr, scope, references);
+    }
+}
+
+fn collect_table_factor_external_table_references(
+    table_factor: &TableFactor,
+    scope: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
+    match table_factor {
+        TableFactor::Table {
+            name,
+            args,
+            with_hints,
+            ..
+        } => {
+            let relation = normalize_relation_name(name);
+            collect_relation_name_external_reference(&relation, scope, references);
+            if let Some(args) = args {
+                for arg in &args.args {
+                    collect_function_arg_external_table_references(arg, scope, references);
+                }
+            }
+            for expr in with_hints {
+                collect_expr_external_table_references(expr, scope, references);
+            }
+        }
+        TableFactor::Derived { subquery, .. } => {
+            collect_query_external_table_references(subquery, scope, references);
+        }
+        TableFactor::TableFunction { expr, .. } => {
+            collect_expr_external_table_references(expr, scope, references);
+        }
+        TableFactor::Function { args, .. } => {
+            for arg in args {
+                collect_function_arg_external_table_references(arg, scope, references);
+            }
+        }
+        TableFactor::UNNEST { array_exprs, .. } => {
+            for expr in array_exprs {
+                collect_expr_external_table_references(expr, scope, references);
+            }
+        }
+        TableFactor::JsonTable { json_expr, .. } => {
+            collect_expr_external_table_references(json_expr, scope, references);
+        }
+        TableFactor::NestedJoin {
+            table_with_joins, ..
+        } => collect_table_with_joins_external_table_references(table_with_joins, scope, references),
+        TableFactor::Pivot { table, .. } => {
+            collect_table_factor_external_table_references(table, scope, references);
+        }
+        TableFactor::Unpivot { table, .. } => {
+            collect_table_factor_external_table_references(table, scope, references);
+        }
+        TableFactor::MatchRecognize {
+            table,
+            partition_by,
+            order_by,
+            measures,
+            ..
+        } => {
+            collect_table_factor_external_table_references(table, scope, references);
+            for expr in partition_by {
+                collect_expr_external_table_references(expr, scope, references);
+            }
+            for expr in order_by {
+                collect_expr_external_table_references(&expr.expr, scope, references);
+            }
+            for measure in measures {
+                collect_expr_external_table_references(&measure.expr, scope, references);
+            }
+        }
+    }
+}
+
+fn collect_function_arg_external_table_references(
+    arg: &FunctionArg,
+    scope: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
+    match arg {
+        FunctionArg::Named { arg, .. } | FunctionArg::Unnamed(arg) => {
+            collect_function_arg_expr_external_table_references(arg, scope, references);
+        }
+    }
+}
+
+fn collect_function_arg_expr_external_table_references(
+    arg: &FunctionArgExpr,
+    scope: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
+    if let FunctionArgExpr::Expr(expr) = arg {
+        collect_expr_external_table_references(expr, scope, references);
+    }
+}
+
+fn collect_named_window_external_table_references(
+    window: &NamedWindowExpr,
+    scope: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
+    if let NamedWindowExpr::WindowSpec(window) = window {
+        collect_named_window_type_external_table_references(
+            &WindowType::WindowSpec(window.clone()),
+            scope,
+            references,
+        );
+    }
+}
+
+fn collect_named_window_type_external_table_references(
+    window: &WindowType,
+    scope: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
+    if let WindowType::WindowSpec(spec) = window {
+        for expr in &spec.partition_by {
+            collect_expr_external_table_references(expr, scope, references);
+        }
+        for expr in &spec.order_by {
+            collect_expr_external_table_references(&expr.expr, scope, references);
+        }
+    }
+}
+
+fn collect_expr_external_table_references(
+    expr: &Expr,
+    scope: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
+    let mut collector = ExpressionQueryCollector { scope, references };
+    let _ = expr.visit(&mut collector);
+}
+
+struct ExpressionQueryCollector<'a> {
+    scope: &'a HashSet<String>,
+    references: &'a mut BTreeSet<String>,
+}
+
+impl Visitor for ExpressionQueryCollector<'_> {
     type Break = ();
 
     fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
-        let mut ctes = HashSet::new();
-        if let Some(with) = &query.with {
-            for cte in &with.cte_tables {
-                ctes.insert(cte.alias.name.value.to_ascii_lowercase());
-            }
-        }
-        self.cte_scopes.push(ctes);
+        collect_query_external_table_references(query, self.scope, self.references);
         ControlFlow::Continue(())
     }
+}
 
-    fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<Self::Break> {
-        self.cte_scopes.pop();
-        ControlFlow::Continue(())
+fn collect_interpolate_expr_external_table_references(
+    expr: &datafusion::sql::sqlparser::ast::InterpolateExpr,
+    scope: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
+    if let Some(expr) = &expr.expr {
+        collect_expr_external_table_references(expr, scope, references);
     }
+}
 
-    fn pre_visit_relation(&mut self, relation: &ObjectName) -> ControlFlow<Self::Break> {
-        if !self.relation_is_cte_reference(relation) {
-            self.references.insert(Self::normalize_relation_name(relation));
-        }
-        ControlFlow::Continue(())
+fn collect_relation_name_external_reference(
+    relation: &str,
+    scope: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
+    if is_cte_reference_name(relation, scope) {
+        return;
     }
+    references.insert(relation.to_string());
+}
+
+fn is_cte_reference_name(relation: &str, scope: &HashSet<String>) -> bool {
+    !relation.contains('.') && scope.contains(&relation.to_ascii_lowercase())
+}
+
+fn normalize_relation_name(relation: &ObjectName) -> String {
+    relation
+        .0
+        .iter()
+        .map(|ident| ident.value.as_str())
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 fn normalize_and_parse_query(config: &config::Config) -> Result<String, String> {
@@ -272,6 +615,22 @@ mod tests {
         .expect("validate should not return plugin error");
 
         assert_eq!(validation.status, ValidationStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_cte_aliases_that_shadow_disallowed_tables() {
+        let ctx = Context::new("transform-sql", "users");
+        let validation = TransformSql::validate(
+            &config::Config {
+                query: "WITH orders AS (SELECT * FROM orders) SELECT * FROM users".to_string(),
+            },
+            &ctx,
+        )
+        .await
+        .expect("validate should not return plugin error");
+
+        assert_eq!(validation.status, ValidationStatus::Failed);
+        assert!(validation.message.contains("orders"));
     }
 
     #[tokio::test]
