@@ -6,6 +6,7 @@ use rapidbyte_engine::execution::{ExecutionOptions, PipelineOutcome};
 use rapidbyte_engine::progress::ProgressEvent;
 use rapidbyte_engine::{orchestrator, PipelineError};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 /// Result of executing a task on the agent.
 pub struct TaskExecutionResult {
@@ -54,7 +55,17 @@ pub async fn execute_task(
     dry_run: bool,
     limit: Option<u64>,
     progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
+    cancel_token: CancellationToken,
 ) -> TaskExecutionResult {
+    // Check for early cancellation before doing any work
+    if cancel_token.is_cancelled() {
+        return TaskExecutionResult {
+            outcome: TaskOutcomeKind::Cancelled,
+            metrics: TaskMetrics::zero(),
+            dry_run_result: None,
+        };
+    }
+
     let yaml_str = match std::str::from_utf8(pipeline_yaml) {
         Ok(s) => s,
         Err(e) => {
@@ -106,7 +117,25 @@ pub async fn execute_task(
     let options = ExecutionOptions { dry_run, limit };
     let start = std::time::Instant::now();
 
-    match orchestrator::run_pipeline(&config, &options, progress_tx).await {
+    // Race pipeline execution against cancellation
+    let pipeline_result = tokio::select! {
+        result = orchestrator::run_pipeline(&config, &options, progress_tx) => result,
+        () = cancel_token.cancelled() => {
+            let elapsed = start.elapsed().as_secs_f64();
+            return TaskExecutionResult {
+                outcome: TaskOutcomeKind::Cancelled,
+                metrics: TaskMetrics {
+                    records_processed: 0,
+                    bytes_processed: 0,
+                    elapsed_seconds: elapsed,
+                    cursors_advanced: 0,
+                },
+                dry_run_result: None,
+            };
+        }
+    };
+
+    match pipeline_result {
         Ok(outcome) => {
             let elapsed = start.elapsed().as_secs_f64();
             match outcome {
@@ -173,7 +202,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_utf8_returns_failed() {
-        let result = execute_task(&[0xFF, 0xFE], false, None, None).await;
+        let result = execute_task(&[0xFF, 0xFE], false, None, None, CancellationToken::new()).await;
         assert!(matches!(result.outcome, TaskOutcomeKind::Failed(_)));
         if let TaskOutcomeKind::Failed(info) = &result.outcome {
             assert_eq!(info.code, "INVALID_YAML");
@@ -183,7 +212,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_yaml_returns_failed() {
-        let result = execute_task(b"not: [valid: yaml", false, None, None).await;
+        let result = execute_task(
+            b"not: [valid: yaml",
+            false,
+            None,
+            None,
+            CancellationToken::new(),
+        )
+        .await;
         assert!(matches!(result.outcome, TaskOutcomeKind::Failed(_)));
         if let TaskOutcomeKind::Failed(info) = &result.outcome {
             assert_eq!(info.code, "PARSE_FAILED");
@@ -192,9 +228,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_zero_metrics_on_early_failure() {
-        let result = execute_task(&[0xFF], false, None, None).await;
+        let result = execute_task(&[0xFF], false, None, None, CancellationToken::new()).await;
         assert_eq!(result.metrics.records_processed, 0);
         assert_eq!(result.metrics.bytes_processed, 0);
         assert_eq!(result.metrics.elapsed_seconds, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_pre_cancelled_token_returns_cancelled() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let result = execute_task(b"pipeline: test\n", false, None, None, token).await;
+        assert!(matches!(result.outcome, TaskOutcomeKind::Cancelled));
     }
 }

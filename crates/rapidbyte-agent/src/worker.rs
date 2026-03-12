@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, RwLock};
+use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use tracing::{error, info, warn};
 
@@ -36,7 +37,8 @@ impl Default for AgentConfig {
 }
 
 /// Shared state for tracking active leases across worker and heartbeat.
-type ActiveLeaseMap = Arc<RwLock<HashMap<String, u64>>>; // task_id -> lease_epoch
+/// Maps task_id -> (lease_epoch, cancellation_token).
+type ActiveLeaseMap = Arc<RwLock<HashMap<String, (u64, CancellationToken)>>>;
 
 /// Run the agent worker loop.
 pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
@@ -101,11 +103,12 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
             "Received task"
         );
 
-        // Track active lease
-        active_leases
-            .write()
-            .await
-            .insert(task.task_id.clone(), task.lease_epoch);
+        // Track active lease with cancellation token
+        let cancel_token = CancellationToken::new();
+        active_leases.write().await.insert(
+            task.task_id.clone(),
+            (task.lease_epoch, cancel_token.clone()),
+        );
 
         let exec_opts = task.execution.as_ref();
         let dry_run = exec_opts.map_or(false, |e| e.dry_run);
@@ -122,10 +125,15 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
             task.lease_epoch,
         ));
 
-        // Execute
-        let result =
-            executor::execute_task(&task.pipeline_yaml_utf8, dry_run, limit, Some(progress_tx))
-                .await;
+        // Execute (with cancellation token)
+        let result = executor::execute_task(
+            &task.pipeline_yaml_utf8,
+            dry_run,
+            limit,
+            Some(progress_tx),
+            cancel_token,
+        )
+        .await;
 
         // Wait for progress forwarding to finish
         let _ = progress_handle.await;
@@ -198,7 +206,7 @@ async fn heartbeat_loop(
             .read()
             .await
             .iter()
-            .map(|(task_id, epoch)| ActiveLease {
+            .map(|(task_id, (epoch, _))| ActiveLease {
                 task_id: task_id.clone(),
                 lease_epoch: *epoch,
             })
@@ -219,10 +227,12 @@ async fn heartbeat_loop(
                     if let Some(agent_directive::Directive::CancelTask(cancel)) =
                         directive.directive
                     {
-                        warn!(
-                            task_id = cancel.task_id,
-                            "Received cancel directive (not yet implemented)"
-                        );
+                        warn!(task_id = cancel.task_id, "Received cancel directive");
+                        // Signal the executor to cancel via the token
+                        let leases = active_leases.read().await;
+                        if let Some((_, token)) = leases.get(&cancel.task_id) {
+                            token.cancel();
+                        }
                     }
                 }
             }
