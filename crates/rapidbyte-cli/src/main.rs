@@ -100,6 +100,9 @@ enum Commands {
         /// gRPC listen address
         #[arg(long, default_value = "[::]:9090")]
         listen: String,
+        /// Shared signing key for preview tickets (hex or raw string)
+        #[arg(long, env = "RAPIDBYTE_SIGNING_KEY")]
+        signing_key: Option<String>,
     },
     /// Start an agent worker (long-running)
     Agent {
@@ -115,6 +118,9 @@ enum Commands {
         /// Maximum concurrent tasks
         #[arg(long, default_value = "1")]
         max_tasks: u32,
+        /// Shared signing key for preview tickets (must match controller)
+        #[arg(long, env = "RAPIDBYTE_SIGNING_KEY")]
+        signing_key: Option<String>,
     },
 }
 
@@ -163,15 +169,25 @@ async fn main() -> ExitCode {
         Commands::Plugins => commands::plugins::execute(verbosity),
         Commands::Scaffold { name, output } => commands::scaffold::run(&name, output.as_deref()),
         Commands::Dev => commands::dev::execute().await,
-        Commands::Controller { listen } => commands::controller::execute(&listen).await,
+        Commands::Controller {
+            listen,
+            signing_key,
+        } => commands::controller::execute(&listen, signing_key.as_deref()).await,
         Commands::Agent {
             controller,
             flight_listen,
             flight_advertise,
             max_tasks,
+            signing_key,
         } => {
-            commands::agent::execute(&controller, &flight_listen, &flight_advertise, max_tasks)
-                .await
+            commands::agent::execute(
+                &controller,
+                &flight_listen,
+                &flight_advertise,
+                max_tasks,
+                signing_key.as_deref(),
+            )
+            .await
         }
     };
 

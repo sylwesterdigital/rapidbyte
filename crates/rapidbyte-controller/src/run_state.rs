@@ -49,6 +49,11 @@ pub struct RunRecord {
     pub error_message: Option<String>,
     pub attempt: u32,
     pub idempotency_key: Option<String>,
+    /// Terminal completion metrics (populated when a run completes successfully).
+    pub total_records: u64,
+    pub total_bytes: u64,
+    pub elapsed_seconds: f64,
+    pub cursors_advanced: u64,
 }
 
 /// In-memory store for run records with idempotency dedup.
@@ -95,6 +100,10 @@ impl RunStore {
             error_message: None,
             attempt: 1,
             idempotency_key: idempotency_key.clone(),
+            total_records: 0,
+            total_bytes: 0,
+            elapsed_seconds: 0.0,
+            cursors_advanced: 0,
         };
 
         self.runs.insert(run_id.clone(), record);

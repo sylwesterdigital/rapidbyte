@@ -85,6 +85,14 @@ impl AgentService for AgentServiceImpl {
                 .map_err(|e| Status::not_found(e.to_string()))?;
         }
 
+        // Renew leases for active tasks reported by the agent
+        if !req.active_leases.is_empty() {
+            let mut tasks = self.state.tasks.write().await;
+            for active_lease in &req.active_leases {
+                tasks.renew_lease(&active_lease.task_id, active_lease.lease_epoch, LEASE_TTL);
+            }
+        }
+
         // Check for cancel directives — look up active leases and see if any
         // of their runs are in Cancelling state
         let mut directives = Vec::new();
@@ -174,9 +182,18 @@ impl AgentService for AgentServiceImpl {
         };
         // tasks lock dropped here before acquiring runs/watchers
 
+        // Read-check first: only take the write lock if actually Assigned
         {
-            let mut runs = self.state.runs.write().await;
-            runs.ensure_running(&run_id);
+            let needs_transition = self
+                .state
+                .runs
+                .read()
+                .await
+                .get_run(&run_id)
+                .is_some_and(|r| r.state == InternalRunState::Assigned);
+            if needs_transition {
+                self.state.runs.write().await.ensure_running(&run_id);
+            }
         }
 
         if let Some(progress) = req.progress {
@@ -201,28 +218,22 @@ impl AgentService for AgentServiceImpl {
 
         let outcome = TaskOutcome::try_from(req.outcome).unwrap_or(TaskOutcome::Unspecified);
 
-        // Complete the task in the scheduler (validates lease epoch)
+        // Complete the task in the scheduler (validates lease epoch).
+        // Returns run_id and attempt alongside acknowledgement to avoid a second lock.
         let succeeded = outcome == TaskOutcome::Completed;
-        let acknowledged = {
+        let (run_id, attempt) = {
             let mut tasks = self.state.tasks.write().await;
-            tasks
+            match tasks
                 .complete(&req.task_id, req.lease_epoch, succeeded)
                 .map_err(|e| Status::not_found(e.to_string()))?
-        };
-
-        if !acknowledged {
-            return Ok(Response::new(CompleteTaskResponse {
-                acknowledged: false,
-            }));
-        }
-
-        // Extract run_id and attempt (always needed)
-        let (run_id, attempt) = {
-            let tasks = self.state.tasks.read().await;
-            let task = tasks
-                .get(&req.task_id)
-                .ok_or_else(|| Status::not_found("Task not found"))?;
-            (task.run_id.clone(), task.attempt)
+            {
+                Some(info) => info,
+                None => {
+                    return Ok(Response::new(CompleteTaskResponse {
+                        acknowledged: false,
+                    }));
+                }
+            }
         };
 
         // Transition run state and publish events
@@ -232,16 +243,36 @@ impl AgentService for AgentServiceImpl {
                     let mut runs = self.state.runs.write().await;
                     runs.ensure_running(&run_id);
                     let _ = runs.transition(&run_id, InternalRunState::Completed);
+                    if let Some(record) = runs.get_run_mut(&run_id) {
+                        let metrics = req.metrics.as_ref();
+                        record.total_records = metrics.map_or(0, |m| m.records_processed);
+                        record.total_bytes = metrics.map_or(0, |m| m.bytes_processed);
+                        record.elapsed_seconds = metrics.map_or(0.0, |m| m.elapsed_seconds);
+                        record.cursors_advanced = metrics.map_or(0, |m| m.cursors_advanced);
+                    }
                 }
 
-                // Store preview if provided (runs lock dropped first)
+                // Store preview if provided (runs lock dropped first).
+                // Controller signs the ticket — agent sends flight_endpoint only.
                 if let Some(preview) = &req.preview {
+                    let ticket_payload = crate::preview::TicketPayload {
+                        run_id: run_id.clone(),
+                        task_id: req.task_id.clone(),
+                        lease_epoch: req.lease_epoch,
+                        expires_at_unix: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs()
+                            + 300,
+                    };
+                    let signed_ticket = self.state.ticket_signer.sign(&ticket_payload);
+
                     let mut previews = self.state.previews.write().await;
                     previews.store(crate::preview::PreviewEntry {
                         run_id: run_id.clone(),
                         task_id: req.task_id.clone(),
                         flight_endpoint: preview.flight_endpoint.clone(),
-                        ticket: bytes::Bytes::from(preview.ticket.clone()),
+                        ticket: signed_ticket,
                         created_at: std::time::Instant::now(),
                         ttl: Duration::from_secs(300),
                     });

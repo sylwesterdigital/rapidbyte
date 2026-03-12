@@ -1,7 +1,5 @@
 //! Agent worker subcommand.
 
-use std::time::Duration;
-
 use anyhow::Result;
 
 pub async fn execute(
@@ -9,16 +7,15 @@ pub async fn execute(
     flight_listen: &str,
     flight_advertise: &str,
     max_tasks: u32,
+    signing_key: Option<&str>,
 ) -> Result<()> {
     let config = rapidbyte_agent::AgentConfig {
         controller_url: controller.into(),
         flight_listen: flight_listen.into(),
         flight_advertise: flight_advertise.into(),
         max_tasks,
-        heartbeat_interval: Duration::from_secs(10),
-        poll_wait_seconds: 30,
-        signing_key: Vec::new(), // TODO: shared signing key from config
-        preview_ttl: Duration::from_secs(300),
+        signing_key: signing_key.map_or_else(Vec::new, |k| k.as_bytes().to_vec()),
+        ..Default::default()
     };
     rapidbyte_agent::run(config).await
 }

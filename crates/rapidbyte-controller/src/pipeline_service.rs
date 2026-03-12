@@ -7,10 +7,10 @@ use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
 
 use crate::proto::rapidbyte::v1::{
-    pipeline_service_server::PipelineService, CancelRunRequest, CancelRunResponse, GetRunRequest,
-    GetRunResponse, ListRunsRequest, ListRunsResponse, PreviewAccess, PreviewState, RunEvent,
-    RunState, RunSummary, SubmitPipelineRequest, SubmitPipelineResponse, TaskError,
-    WatchRunRequest,
+    pipeline_service_server::PipelineService, run_event, CancelRunRequest, CancelRunResponse,
+    GetRunRequest, GetRunResponse, ListRunsRequest, ListRunsResponse, PreviewAccess, PreviewState,
+    RunCancelled, RunCompleted, RunEvent, RunFailed, RunState, RunSummary, SubmitPipelineRequest,
+    SubmitPipelineResponse, TaskError, WatchRunRequest,
 };
 use crate::run_state::RunState as InternalRunState;
 use crate::state::ControllerState;
@@ -40,6 +40,35 @@ fn from_proto_state(v: i32) -> Option<InternalRunState> {
         Ok(RunState::Failed) => Some(InternalRunState::Failed),
         Ok(RunState::Cancelled) => Some(InternalRunState::Cancelled),
         _ => None,
+    }
+}
+
+/// Build a terminal `RunEvent` for a run that is already in a terminal state,
+/// using real data from the run record instead of placeholder values.
+fn terminal_event_for_run(record: &crate::run_state::RunRecord) -> RunEvent {
+    let event = match record.state {
+        InternalRunState::Completed => run_event::Event::Completed(RunCompleted {
+            total_records: record.total_records,
+            total_bytes: record.total_bytes,
+            elapsed_seconds: record.elapsed_seconds,
+            cursors_advanced: record.cursors_advanced,
+        }),
+        InternalRunState::Cancelled => run_event::Event::Cancelled(RunCancelled {}),
+        // Failed and TimedOut both map to Failed
+        _ => run_event::Event::Failed(RunFailed {
+            error: record.error_message.as_ref().map(|msg| TaskError {
+                code: String::new(),
+                message: msg.clone(),
+                retryable: false,
+                safe_to_retry: false,
+                commit_state: String::new(),
+            }),
+            attempt: record.attempt,
+        }),
+    };
+    RunEvent {
+        run_id: record.run_id.clone(),
+        event: Some(event),
     }
 }
 
@@ -134,12 +163,28 @@ impl PipelineService for PipelineServiceImpl {
         request: Request<GetRunRequest>,
     ) -> Result<Response<GetRunResponse>, Status> {
         let run_id = request.into_inner().run_id;
-        let runs = self.state.runs.read().await;
-        let record = runs
-            .get_run(&run_id)
-            .ok_or_else(|| Status::not_found(format!("Run {run_id} not found")))?;
 
-        // Check for preview access
+        // Extract run data and drop the runs lock before touching previews
+        let (run_id_out, state, pipeline_name, last_error) = {
+            let runs = self.state.runs.read().await;
+            let record = runs
+                .get_run(&run_id)
+                .ok_or_else(|| Status::not_found(format!("Run {run_id} not found")))?;
+            (
+                record.run_id.clone(),
+                to_proto_state(record.state),
+                record.pipeline_name.clone(),
+                record.error_message.as_ref().map(|msg| TaskError {
+                    code: String::new(),
+                    message: msg.clone(),
+                    retryable: false,
+                    safe_to_retry: false,
+                    commit_state: String::new(),
+                }),
+            )
+        };
+
+        // Preview lookup with runs lock already released
         let preview = {
             let previews = self.state.previews.read().await;
             previews.get(&run_id).map(|p| PreviewAccess {
@@ -151,18 +196,10 @@ impl PipelineService for PipelineServiceImpl {
             })
         };
 
-        let last_error = record.error_message.as_ref().map(|msg| TaskError {
-            code: String::new(),
-            message: msg.clone(),
-            retryable: false,
-            safe_to_retry: false,
-            commit_state: String::new(),
-        });
-
         Ok(Response::new(GetRunResponse {
-            run_id: record.run_id.clone(),
-            state: to_proto_state(record.state),
-            pipeline_name: record.pipeline_name.clone(),
+            run_id: run_id_out,
+            state,
+            pipeline_name,
             submitted_at: None,
             started_at: None,
             completed_at: None,
@@ -178,12 +215,27 @@ impl PipelineService for PipelineServiceImpl {
     ) -> Result<Response<Self::WatchRunStream>, Status> {
         let run_id = request.into_inner().run_id;
 
-        // Verify the run exists
-        {
+        // Verify the run exists and check if already terminal.
+        // If terminal, build the event while we still hold the read lock so we
+        // can use the real outcome data from the run record.
+        let terminal_event = {
             let runs = self.state.runs.read().await;
-            if runs.get_run(&run_id).is_none() {
-                return Err(Status::not_found(format!("Run {run_id} not found")));
+            let record = runs
+                .get_run(&run_id)
+                .ok_or_else(|| Status::not_found(format!("Run {run_id} not found")))?;
+            if record.state.is_terminal() {
+                Some(terminal_event_for_run(record))
+            } else {
+                None
             }
+        };
+
+        // If the run is already terminal, return a single-event stream immediately.
+        // The broadcast channel may already be removed by publish_terminal, so
+        // subscribing would create an empty channel that never yields events.
+        if let Some(event) = terminal_event {
+            let stream = tokio_stream::once(Ok(event));
+            return Ok(Response::new(Box::pin(stream)));
         }
 
         let rx = {
@@ -204,25 +256,33 @@ impl PipelineService for PipelineServiceImpl {
         request: Request<CancelRunRequest>,
     ) -> Result<Response<CancelRunResponse>, Status> {
         let run_id = request.into_inner().run_id;
-        let mut runs = self.state.runs.write().await;
 
-        let record = runs
-            .get_run(&run_id)
-            .ok_or_else(|| Status::not_found(format!("Run {run_id} not found")))?;
-
-        let current_state = record.state;
+        // Read the current state and transition under a short-lived lock.
+        // IMPORTANT: drop runs lock before acquiring tasks lock to maintain
+        // consistent lock ordering (tasks → runs) with poll_task/lease-expiry.
+        let current_state = {
+            let runs = self.state.runs.read().await;
+            let record = runs
+                .get_run(&run_id)
+                .ok_or_else(|| Status::not_found(format!("Run {run_id} not found")))?;
+            record.state
+        };
 
         match current_state {
             InternalRunState::Pending => {
-                // Cancel directly — also remove from task queue
-                runs.transition(&run_id, InternalRunState::Cancelled)
-                    .map_err(|e| Status::internal(e.to_string()))?;
-
-                // Find and cancel the task in the queue
-                let mut tasks = self.state.tasks.write().await;
-                if let Some(task) = tasks.find_by_run_id(&run_id) {
-                    let task_id = task.task_id.clone();
-                    let _ = tasks.cancel(&task_id);
+                // Transition run to Cancelled, then cancel the task in the queue
+                {
+                    let mut runs = self.state.runs.write().await;
+                    runs.transition(&run_id, InternalRunState::Cancelled)
+                        .map_err(|e| Status::internal(e.to_string()))?;
+                }
+                // runs lock dropped — now safe to acquire tasks lock
+                {
+                    let mut tasks = self.state.tasks.write().await;
+                    if let Some(task) = tasks.find_by_run_id(&run_id) {
+                        let task_id = task.task_id.clone();
+                        let _ = tasks.cancel(&task_id);
+                    }
                 }
 
                 Ok(Response::new(CancelRunResponse {
@@ -232,6 +292,7 @@ impl PipelineService for PipelineServiceImpl {
             }
             InternalRunState::Assigned | InternalRunState::Running => {
                 // Set to Cancelling — delivered via heartbeat
+                let mut runs = self.state.runs.write().await;
                 runs.transition(&run_id, InternalRunState::Cancelling)
                     .map_err(|e| Status::internal(e.to_string()))?;
 

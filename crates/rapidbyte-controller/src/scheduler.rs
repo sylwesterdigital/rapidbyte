@@ -163,7 +163,7 @@ impl TaskQueue {
     }
 
     /// Complete a task. Validates the lease epoch.
-    /// Returns `true` if acknowledged (epoch valid), `false` if stale.
+    /// Returns `Ok(Some((run_id, attempt)))` if acknowledged, `Ok(None)` if stale.
     ///
     /// # Errors
     ///
@@ -173,7 +173,7 @@ impl TaskQueue {
         task_id: &str,
         lease_epoch: u64,
         succeeded: bool,
-    ) -> Result<bool, SchedulerError> {
+    ) -> Result<Option<(String, u32)>, SchedulerError> {
         let record = self
             .tasks
             .get_mut(task_id)
@@ -182,7 +182,7 @@ impl TaskQueue {
         // Check lease validity
         if let Some(lease) = &record.lease {
             if !lease.is_valid(lease_epoch) {
-                return Ok(false); // stale epoch — not acknowledged
+                return Ok(None); // stale epoch — not acknowledged
             }
         }
 
@@ -192,7 +192,7 @@ impl TaskQueue {
             TaskState::Failed
         };
         record.lease = None;
-        Ok(true)
+        Ok(Some((record.run_id.clone(), record.attempt)))
     }
 
     /// Cancel a task.
@@ -245,6 +245,23 @@ impl TaskQueue {
         }
 
         expired
+    }
+
+    /// Renew the lease for a task if the epoch matches. Returns `true` if renewed.
+    pub fn renew_lease(&mut self, task_id: &str, lease_epoch: u64, ttl: Duration) -> bool {
+        let Some(record) = self.tasks.get_mut(task_id) else {
+            return false;
+        };
+        if !matches!(record.state, TaskState::Assigned | TaskState::Running) {
+            return false;
+        }
+        if let Some(lease) = &mut record.lease {
+            if lease.epoch == lease_epoch && !lease.is_expired() {
+                lease.renew(ttl);
+                return true;
+            }
+        }
+        false
     }
 
     /// Get a task record by ID.
@@ -305,7 +322,7 @@ mod tests {
         let ack = q
             .complete(&assignment.task_id, assignment.lease_epoch, true)
             .unwrap();
-        assert!(ack);
+        assert!(ack.is_some());
         assert_eq!(
             q.get(&assignment.task_id).unwrap().state,
             TaskState::Completed
@@ -313,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_with_stale_epoch_returns_false() {
+    fn complete_with_stale_epoch_returns_none() {
         let (mut q, gen) = make_queue_and_gen();
         q.enqueue("r1".into(), b"yaml".to_vec(), false, None, 1);
         let assignment = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
@@ -322,7 +339,7 @@ mod tests {
         let ack = q
             .complete(&assignment.task_id, assignment.lease_epoch + 999, true)
             .unwrap();
-        assert!(!ack);
+        assert!(ack.is_none());
     }
 
     #[test]
@@ -366,6 +383,58 @@ mod tests {
             q.get(&assignment.task_id).unwrap().state,
             TaskState::Cancelled
         );
+    }
+
+    #[test]
+    fn renew_lease_extends_expiry() {
+        let (mut q, gen) = make_queue_and_gen();
+        q.enqueue("r1".into(), b"yaml".to_vec(), false, None, 1);
+        // Assign with a short TTL (not yet expired)
+        let assignment = q.poll("agent-1", Duration::from_secs(5), &gen).unwrap();
+
+        // Renew with a long TTL
+        assert!(q.renew_lease(
+            &assignment.task_id,
+            assignment.lease_epoch,
+            Duration::from_secs(60)
+        ));
+
+        // Should not be expired now
+        let expired = q.expire_leases();
+        assert!(expired.is_empty());
+    }
+
+    #[test]
+    fn renew_lease_rejects_stale_epoch() {
+        let (mut q, gen) = make_queue_and_gen();
+        q.enqueue("r1".into(), b"yaml".to_vec(), false, None, 1);
+        let assignment = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
+
+        assert!(!q.renew_lease(
+            &assignment.task_id,
+            assignment.lease_epoch + 999,
+            Duration::from_secs(60)
+        ));
+    }
+
+    #[test]
+    fn renew_lease_rejects_expired_lease() {
+        let (mut q, gen) = make_queue_and_gen();
+        q.enqueue("r1".into(), b"yaml".to_vec(), false, None, 1);
+        // Assign with 0 TTL so it expires immediately
+        let assignment = q.poll("agent-1", Duration::from_secs(0), &gen).unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+
+        // Correct epoch but expired — should refuse
+        assert!(!q.renew_lease(
+            &assignment.task_id,
+            assignment.lease_epoch,
+            Duration::from_secs(60)
+        ));
+
+        // Verify the task still expires
+        let expired = q.expire_leases();
+        assert_eq!(expired.len(), 1);
     }
 
     #[test]
