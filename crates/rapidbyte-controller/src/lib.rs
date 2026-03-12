@@ -22,6 +22,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod lease;
+pub mod pipeline_service;
 pub mod preview;
 pub mod proto;
 pub mod registry;
