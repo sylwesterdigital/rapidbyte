@@ -30,7 +30,7 @@ pub mod error;
 pub mod execution;
 pub mod orchestrator;
 pub mod progress;
-pub(crate) mod resolve;
+pub mod resolve;
 pub mod result;
 pub mod runner;
 
