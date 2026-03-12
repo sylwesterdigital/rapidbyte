@@ -18,6 +18,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod executor;
+pub mod flight;
 pub mod progress;
 pub mod proto;
 pub mod spool;

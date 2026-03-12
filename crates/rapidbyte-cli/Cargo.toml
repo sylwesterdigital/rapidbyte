@@ -24,6 +24,8 @@ tonic = { workspace = true }
 uuid = { workspace = true }
 serde_yaml = { workspace = true }
 arrow = { version = "53", features = ["prettyprint"] }
+arrow-flight = { workspace = true }
+tokio-stream = { workspace = true }
 libc = "0.2"
 indicatif = { workspace = true }
 console = { workspace = true }

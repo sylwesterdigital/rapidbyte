@@ -17,6 +17,8 @@ pub async fn execute(
         max_tasks,
         heartbeat_interval: Duration::from_secs(10),
         poll_wait_seconds: 30,
+        signing_key: Vec::new(), // TODO: shared signing key from config
+        preview_ttl: Duration::from_secs(300),
     };
     rapidbyte_agent::run(config).await
 }

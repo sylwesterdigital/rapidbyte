@@ -10,8 +10,11 @@ use tonic::transport::Channel;
 use tracing::{error, info, warn};
 
 use crate::executor::{self, TaskOutcomeKind};
+use crate::flight::PreviewFlightService;
 use crate::proto::rapidbyte::v1::agent_service_client::AgentServiceClient;
 use crate::proto::rapidbyte::v1::*;
+use crate::spool::PreviewSpool;
+use crate::ticket::TicketVerifier;
 
 /// Configuration for the agent worker.
 pub struct AgentConfig {
@@ -21,6 +24,8 @@ pub struct AgentConfig {
     pub max_tasks: u32,
     pub heartbeat_interval: Duration,
     pub poll_wait_seconds: u32,
+    pub signing_key: Vec<u8>,
+    pub preview_ttl: Duration,
 }
 
 impl Default for AgentConfig {
@@ -32,6 +37,8 @@ impl Default for AgentConfig {
             max_tasks: 1,
             heartbeat_interval: Duration::from_secs(10),
             poll_wait_seconds: 30,
+            signing_key: Vec::new(),
+            preview_ttl: Duration::from_secs(300),
         }
     }
 }
@@ -46,6 +53,23 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
         .connect()
         .await?;
     let mut client = AgentServiceClient::new(channel.clone());
+
+    // Set up preview spool and Flight server
+    let spool = Arc::new(RwLock::new(PreviewSpool::new(config.preview_ttl)));
+    let verifier = Arc::new(TicketVerifier::new(&config.signing_key));
+    let flight_svc = PreviewFlightService::new(spool.clone(), verifier);
+
+    let flight_addr: std::net::SocketAddr = config.flight_listen.parse()?;
+    info!(addr = %flight_addr, "Starting Flight server");
+    tokio::spawn(async move {
+        if let Err(e) = tonic::transport::Server::builder()
+            .add_service(flight_svc.into_server())
+            .serve(flight_addr)
+            .await
+        {
+            error!(error = %e, "Flight server failed");
+        }
+    });
 
     // Register with controller
     let resp = client
@@ -154,6 +178,20 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
             TaskOutcomeKind::Cancelled => (TaskOutcome::Cancelled as i32, None),
         };
 
+        // Store dry-run preview in spool and build PreviewAccess
+        let preview = if let Some(dr) = result.dry_run_result {
+            spool.write().await.store(task.task_id.clone(), dr);
+            Some(PreviewAccess {
+                state: PreviewState::Ready.into(),
+                flight_endpoint: config.flight_advertise.clone(),
+                ticket: Vec::new(), // Controller signs the ticket
+                expires_at: None,
+                streams: vec![],
+            })
+        } else {
+            None
+        };
+
         let complete_resp = client
             .complete_task(CompleteTaskRequest {
                 agent_id: agent_id.clone(),
@@ -167,7 +205,7 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
                     elapsed_seconds: result.metrics.elapsed_seconds,
                     cursors_advanced: result.metrics.cursors_advanced,
                 }),
-                preview: None, // Phase 4 adds preview
+                preview,
                 backend_run_id: 0,
             })
             .await;

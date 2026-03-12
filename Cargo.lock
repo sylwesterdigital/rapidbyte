@@ -3569,6 +3569,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tonic",
  "tonic-build",
@@ -3602,6 +3603,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arrow",
+ "arrow-flight",
  "clap",
  "console",
  "indicatif",
@@ -3617,6 +3619,7 @@ dependencies = [
  "syn",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tracing",
  "tracing-subscriber",

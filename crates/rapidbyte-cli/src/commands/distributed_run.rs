@@ -3,6 +3,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use arrow_flight::flight_service_client::FlightServiceClient;
+use arrow_flight::Ticket;
 use tonic::transport::Channel;
 
 use crate::Verbosity;
@@ -67,6 +69,18 @@ pub async fn execute(
                             c.total_records, c.total_bytes, c.elapsed_seconds,
                         );
                     }
+
+                    // If dry-run, fetch preview via Flight
+                    if dry_run {
+                        if let Err(e) =
+                            fetch_and_display_preview(&mut client, &run_id, verbosity).await
+                        {
+                            if verbosity != Verbosity::Quiet {
+                                eprintln!("Preview fetch failed: {e:#}");
+                            }
+                        }
+                    }
+
                     return Ok(());
                 }
                 run_event::Event::Failed(f) => {
@@ -78,6 +92,76 @@ pub async fn execute(
                 }
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Fetch preview data from the agent's Flight endpoint and display it.
+async fn fetch_and_display_preview(
+    client: &mut PipelineServiceClient<Channel>,
+    run_id: &str,
+    verbosity: Verbosity,
+) -> Result<()> {
+    use arrow::util::pretty::pretty_format_batches;
+
+    // Get run details to find preview access
+    let resp = client
+        .get_run(GetRunRequest {
+            run_id: run_id.to_string(),
+        })
+        .await?
+        .into_inner();
+
+    let preview = match resp.preview {
+        Some(p) if !p.flight_endpoint.is_empty() => p,
+        _ => {
+            if verbosity == Verbosity::Diagnostic {
+                eprintln!("No preview available for this run");
+            }
+            return Ok(());
+        }
+    };
+
+    // Connect to agent's Flight endpoint
+    let flight_url = if preview.flight_endpoint.starts_with("http") {
+        preview.flight_endpoint.clone()
+    } else {
+        format!("http://{}", preview.flight_endpoint)
+    };
+
+    let flight_channel = Channel::from_shared(flight_url)?
+        .connect()
+        .await
+        .context("Failed to connect to agent Flight endpoint")?;
+
+    let mut flight_client = FlightServiceClient::new(flight_channel);
+
+    // DoGet with the ticket
+    let ticket = Ticket {
+        ticket: preview.ticket.into(),
+    };
+    let mut stream = flight_client.do_get(ticket).await?.into_inner();
+
+    // Collect all FlightData messages
+    let mut flight_data_vec = Vec::new();
+    while let Some(flight_data) = stream.message().await? {
+        flight_data_vec.push(flight_data);
+    }
+
+    // Decode all FlightData into RecordBatches
+    let batches = arrow_flight::utils::flight_data_to_batches(&flight_data_vec)
+        .context("Failed to decode Flight preview data")?;
+
+    if batches.is_empty() {
+        eprintln!("(no preview data)");
+        return Ok(());
+    }
+
+    // Display using pretty_format_batches
+    match pretty_format_batches(&batches) {
+        Ok(table) => eprintln!("{table}"),
+        Err(e) => eprintln!("(display error: {e})"),
     }
 
     Ok(())
