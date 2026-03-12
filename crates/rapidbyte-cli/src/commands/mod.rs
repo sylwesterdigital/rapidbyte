@@ -7,9 +7,12 @@ use anyhow::{Context, Result};
 use rapidbyte_engine::config::types::PipelineConfig;
 use rapidbyte_engine::config::{parser, validator};
 
+pub mod agent;
 pub mod check;
+pub mod controller;
 pub mod dev;
 pub mod discover;
+pub mod distributed_run;
 pub mod plugins;
 pub mod run;
 pub mod scaffold;

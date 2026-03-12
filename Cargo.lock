@@ -3606,16 +3606,21 @@ dependencies = [
  "console",
  "indicatif",
  "libc",
+ "rapidbyte-agent",
+ "rapidbyte-controller",
  "rapidbyte-dev",
  "rapidbyte-engine",
  "rapidbyte-runtime",
  "rapidbyte-types",
  "serde_json",
+ "serde_yaml",
  "syn",
  "tempfile",
  "tokio",
+ "tonic",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

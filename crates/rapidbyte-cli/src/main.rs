@@ -43,6 +43,10 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
+    /// Controller gRPC endpoint (enables distributed mode)
+    #[arg(long, global = true, env = "RAPIDBYTE_CONTROLLER")]
+    controller: Option<String>,
+
     /// Log level (error, warn, info, debug, trace)
     #[arg(long, default_value = "info", global = true)]
     log_level: String,
@@ -91,6 +95,49 @@ enum Commands {
     },
     /// Launch interactive dev shell
     Dev,
+    /// Start the controller server (long-running)
+    Controller {
+        /// gRPC listen address
+        #[arg(long, default_value = "[::]:9090")]
+        listen: String,
+    },
+    /// Start an agent worker (long-running)
+    Agent {
+        /// Controller endpoint to connect to
+        #[arg(long)]
+        controller: String,
+        /// Flight server bind address (data plane)
+        #[arg(long, default_value = "[::]:9091")]
+        flight_listen: String,
+        /// Flight endpoint advertised to clients (must be reachable)
+        #[arg(long)]
+        flight_advertise: String,
+        /// Maximum concurrent tasks
+        #[arg(long, default_value = "1")]
+        max_tasks: u32,
+    },
+}
+
+fn resolve_controller_url(cli_flag: Option<&str>) -> Option<String> {
+    if let Some(url) = cli_flag {
+        return Some(url.to_string());
+    }
+    // clap handles env var via `env = "RAPIDBYTE_CONTROLLER"`
+    // Fallback: config file
+    let home = std::env::var("HOME").ok()?;
+    let config_path = std::path::PathBuf::from(home)
+        .join(".rapidbyte")
+        .join("config.yaml");
+    if config_path.exists() {
+        let contents = std::fs::read_to_string(&config_path).ok()?;
+        let val: serde_yaml::Value = serde_yaml::from_str(&contents).ok()?;
+        val.get("controller")?
+            .get("url")?
+            .as_str()
+            .map(String::from)
+    } else {
+        None
+    }
 }
 
 #[tokio::main]
@@ -101,17 +148,38 @@ async fn main() -> ExitCode {
 
     logging::init(&cli.log_level);
 
+    let controller_url = resolve_controller_url(cli.controller.as_deref());
+
     let result = match cli.command {
         Commands::Run {
             pipeline,
             dry_run,
             limit,
-        } => commands::run::execute(&pipeline, dry_run, limit, verbosity).await,
+        } => {
+            commands::run::execute(
+                &pipeline,
+                dry_run,
+                limit,
+                verbosity,
+                controller_url.as_deref(),
+            )
+            .await
+        }
         Commands::Check { pipeline } => commands::check::execute(&pipeline, verbosity).await,
         Commands::Discover { pipeline } => commands::discover::execute(&pipeline, verbosity).await,
         Commands::Plugins => commands::plugins::execute(verbosity),
         Commands::Scaffold { name, output } => commands::scaffold::run(&name, output.as_deref()),
         Commands::Dev => commands::dev::execute().await,
+        Commands::Controller { listen } => commands::controller::execute(&listen).await,
+        Commands::Agent {
+            controller,
+            flight_listen,
+            flight_advertise,
+            max_tasks,
+        } => {
+            commands::agent::execute(&controller, &flight_listen, &flight_advertise, max_tasks)
+                .await
+        }
     };
 
     match result {

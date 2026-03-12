@@ -8,6 +8,8 @@ name = "rapidbyte"
 path = "src/main.rs"
 
 [dependencies]
+rapidbyte-agent = { path = "../rapidbyte-agent" }
+rapidbyte-controller = { path = "../rapidbyte-controller" }
 rapidbyte-dev = { path = "../rapidbyte-dev" }
 rapidbyte-engine = { path = "../rapidbyte-engine" }
 rapidbyte-runtime = { path = "../rapidbyte-runtime" }
@@ -18,6 +20,9 @@ anyhow = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tonic = { workspace = true }
+uuid = { workspace = true }
+serde_yaml = { workspace = true }
 arrow = { version = "53", features = ["prettyprint"] }
 libc = "0.2"
 indicatif = { workspace = true }
