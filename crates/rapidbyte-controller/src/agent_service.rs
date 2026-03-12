@@ -409,11 +409,19 @@ impl AgentService for AgentServiceImpl {
                 let safe_to_retry = error.is_some_and(|e| e.safe_to_retry);
                 let retryable = error.is_some_and(|e| e.retryable);
                 let commit_state = error.map_or("before_commit", |e| e.commit_state.as_str());
+                let is_cancelling = self
+                    .state
+                    .runs
+                    .read()
+                    .await
+                    .get_run(&run_id)
+                    .is_some_and(|run| run.state == InternalRunState::Cancelling);
 
                 // Retry safety policy: only auto-requeue if safe_to_retry AND retryable
                 // AND not after any commit state
                 let should_retry = safe_to_retry
                     && retryable
+                    && !is_cancelling
                     && commit_state != "after_commit_unknown"
                     && commit_state != "after_commit_confirmed";
 
@@ -1833,5 +1841,82 @@ mod tests {
         let record = runs.get_run(&run_id).unwrap();
         assert_eq!(record.state, InternalRunState::Failed);
         assert_eq!(record.error_message.as_deref(), Some("PLUGIN: boom"));
+    }
+
+    #[tokio::test]
+    async fn test_complete_task_retryable_failure_from_cancelling_does_not_requeue() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(t)) => t,
+            _ => panic!("Expected task"),
+        };
+
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Running).unwrap();
+            runs.transition(&run_id, InternalRunState::Cancelling)
+                .unwrap();
+        }
+
+        let resp = svc
+            .complete_task(Request::new(CompleteTaskRequest {
+                agent_id,
+                task_id: task.task_id.clone(),
+                lease_epoch: task.lease_epoch,
+                outcome: TaskOutcome::Failed.into(),
+                metrics: None,
+                error: Some(TaskError {
+                    code: "RETRY".into(),
+                    message: "try again".into(),
+                    retryable: true,
+                    safe_to_retry: true,
+                    commit_state: "before_commit".into(),
+                }),
+                preview: None,
+                backend_run_id: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(resp.acknowledged);
+
+        let runs = state.runs.read().await;
+        let record = runs.get_run(&run_id).unwrap();
+        assert_eq!(record.state, InternalRunState::Failed);
+        assert_eq!(record.error_message.as_deref(), Some("RETRY: try again"));
+        drop(runs);
+
+        let tasks = state.tasks.read().await;
+        let latest = tasks.find_by_run_id(&run_id).unwrap();
+        assert_eq!(latest.task_id, task.task_id);
+        assert_eq!(latest.attempt, 1);
+        assert_eq!(latest.state, TaskState::Failed);
     }
 }

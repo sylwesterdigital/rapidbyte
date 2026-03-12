@@ -414,7 +414,7 @@ async fn process_task(
                 completion_client
                     .complete_task(
                         request_with_bearer(req, auth_token.as_deref())
-                            .map_err(|_| tonic::Status::invalid_argument("Invalid bearer token"))?,
+                            .map_err(|_| tonic::Status::unauthenticated("Invalid bearer token"))?,
                     )
                     .await
                     .map(tonic::Response::into_inner)
@@ -541,9 +541,7 @@ where
     fn is_non_retryable_auth_error(code: tonic::Code) -> bool {
         matches!(
             code,
-            tonic::Code::InvalidArgument
-                | tonic::Code::Unauthenticated
-                | tonic::Code::PermissionDenied
+            tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
         )
     }
 
@@ -721,11 +719,7 @@ mod tests {
 
     #[tokio::test]
     async fn completion_retries_stop_on_auth_failures() {
-        for code in [
-            tonic::Code::Unauthenticated,
-            tonic::Code::PermissionDenied,
-            tonic::Code::InvalidArgument,
-        ] {
+        for code in [tonic::Code::Unauthenticated, tonic::Code::PermissionDenied] {
             let active_leases: ActiveLeaseMap = Arc::new(RwLock::new(HashMap::new()));
             active_leases
                 .write()
@@ -768,6 +762,65 @@ mod tests {
             assert_eq!(attempts.load(Ordering::SeqCst), 1);
             assert!(active_leases.read().await.contains_key("task-1"));
         }
+    }
+
+    #[tokio::test]
+    async fn completion_invalid_argument_retries_until_shutdown() {
+        let active_leases: ActiveLeaseMap = Arc::new(RwLock::new(HashMap::new()));
+        active_leases
+            .write()
+            .await
+            .insert("task-1".into(), (42, CancellationToken::new()));
+        let shutdown = CancellationToken::new();
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_closure = attempts.clone();
+        let completion = tokio::spawn({
+            let active_leases = active_leases.clone();
+            let shutdown = shutdown.clone();
+            async move {
+                report_completion_until_terminal(
+                    &active_leases,
+                    CompleteTaskRequest {
+                        agent_id: "agent-1".into(),
+                        task_id: "task-1".into(),
+                        lease_epoch: 42,
+                        outcome: TaskOutcome::Completed.into(),
+                        error: None,
+                        metrics: Some(TaskMetrics {
+                            records_processed: 1,
+                            bytes_processed: 1,
+                            elapsed_seconds: 0.1,
+                            cursors_advanced: 0,
+                        }),
+                        preview: None,
+                        backend_run_id: 0,
+                    },
+                    Duration::from_millis(1),
+                    move |_req| {
+                        let attempts = attempts_for_closure.clone();
+                        async move {
+                            attempts.fetch_add(1, Ordering::SeqCst);
+                            Err(tonic::Status::invalid_argument("non-auth validation error"))
+                        }
+                    },
+                    shutdown,
+                )
+                .await
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        shutdown.cancel();
+
+        let acknowledged = tokio::time::timeout(Duration::from_secs(1), completion)
+            .await
+            .expect("completion retry loop should stop on shutdown")
+            .unwrap();
+
+        assert!(!acknowledged);
+        assert!(attempts.load(Ordering::SeqCst) > 1);
+        assert!(active_leases.read().await.contains_key("task-1"));
     }
 
     #[tokio::test]
