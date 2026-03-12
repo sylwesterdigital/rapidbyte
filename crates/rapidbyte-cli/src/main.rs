@@ -134,6 +134,9 @@ enum Commands {
         /// Shared signing key for preview tickets (hex or raw string)
         #[arg(long, env = "RAPIDBYTE_SIGNING_KEY")]
         signing_key: Option<String>,
+        /// Explicitly disable controller auth for local development only
+        #[arg(long)]
+        allow_unauthenticated: bool,
         /// PEM certificate for TLS server mode
         #[arg(long)]
         tls_cert: Option<PathBuf>,
@@ -254,6 +257,7 @@ async fn main() -> ExitCode {
         Commands::Controller {
             listen,
             signing_key,
+            allow_unauthenticated,
             tls_cert,
             tls_key,
         } => {
@@ -261,6 +265,7 @@ async fn main() -> ExitCode {
                 &listen,
                 signing_key.as_deref(),
                 cli.auth_token.as_deref(),
+                allow_unauthenticated,
                 tls_cert.as_deref(),
                 tls_key.as_deref(),
             )

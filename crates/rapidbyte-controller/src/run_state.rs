@@ -237,7 +237,10 @@ fn is_valid_transition(from: RunState, to: RunState) -> bool {
     matches!(
         (from, to),
         (RunState::Pending, RunState::Assigned | RunState::Cancelled)
-            | (RunState::Assigned, RunState::Running | RunState::Failed)
+            | (
+                RunState::Assigned,
+                RunState::Running | RunState::Failed | RunState::Cancelled
+            )
             | (
                 RunState::Running | RunState::PreviewReady,
                 RunState::Completed
@@ -288,6 +291,14 @@ mod tests {
         store.create_run("r1".into(), "pipe".into(), None);
         store.transition("r1", RunState::Assigned).unwrap();
         assert!(store.transition("r1", RunState::Running).is_ok());
+    }
+
+    #[test]
+    fn valid_transition_assigned_to_cancelled() {
+        let mut store = RunStore::new();
+        store.create_run("r1".into(), "pipe".into(), None);
+        store.transition("r1", RunState::Assigned).unwrap();
+        assert!(store.transition("r1", RunState::Cancelled).is_ok());
     }
 
     #[test]

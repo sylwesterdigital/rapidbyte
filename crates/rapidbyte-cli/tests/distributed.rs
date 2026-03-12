@@ -51,6 +51,7 @@ async fn distributed_submit_and_complete() {
             agent_reap_interval: Duration::from_secs(60),
             agent_reap_timeout: Duration::from_secs(120),
             lease_check_interval: Duration::from_secs(60),
+            allow_unauthenticated: true,
             ..Default::default()
         };
         let _ = rapidbyte_controller::run(config).await;

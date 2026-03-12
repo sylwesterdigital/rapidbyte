@@ -141,72 +141,9 @@ impl PipelineServiceImpl {
         snapshot_state: InternalRunState,
     ) -> Result<CancelRunResponse, Status> {
         match snapshot_state {
-            InternalRunState::Pending => {
-                {
-                    let mut runs = self.state.runs.write().await;
-                    if let Err(err) = runs.transition(run_id, InternalRunState::Cancelled) {
-                        let actual_state = runs
-                            .get_run(run_id)
-                            .ok_or_else(|| Status::not_found(format!("Run {run_id} not found")))?
-                            .state;
-                        drop(runs);
-                        if actual_state != snapshot_state {
-                            return Box::pin(self.cancel_run_for_state(run_id, actual_state)).await;
-                        }
-                        return Err(Status::internal(err.to_string()));
-                    }
-                }
-
-                {
-                    let mut tasks = self.state.tasks.write().await;
-                    if let Some(task) = tasks.find_by_run_id(run_id) {
-                        let task_id = task.task_id.clone();
-                        let _ = tasks.cancel(&task_id);
-                    }
-                }
-
-                self.state.watchers.write().await.publish_terminal(
-                    run_id,
-                    RunEvent {
-                        run_id: run_id.to_string(),
-                        event: Some(run_event::Event::Cancelled(RunCancelled {})),
-                    },
-                );
-
-                Ok(CancelRunResponse {
-                    accepted: true,
-                    message: "Queued run cancelled".into(),
-                })
-            }
-            InternalRunState::Assigned | InternalRunState::Running => {
-                let actual_state = {
-                    let mut runs = self.state.runs.write().await;
-                    match runs.transition(run_id, InternalRunState::Cancelling) {
-                        Ok(()) => None,
-                        Err(_) => Some(
-                            runs.get_run(run_id)
-                                .ok_or_else(|| {
-                                    Status::not_found(format!("Run {run_id} not found"))
-                                })?
-                                .state,
-                        ),
-                    }
-                };
-
-                if let Some(actual_state) = actual_state {
-                    if actual_state != snapshot_state {
-                        return Box::pin(self.cancel_run_for_state(run_id, actual_state)).await;
-                    }
-                    return Err(Status::internal(format!(
-                        "failed to transition run {run_id} from {snapshot_state:?} to Cancelling"
-                    )));
-                }
-
-                Ok(CancelRunResponse {
-                    accepted: true,
-                    message: "Running — cancel will be delivered via heartbeat".into(),
-                })
-            }
+            InternalRunState::Pending => self.cancel_queued_run(run_id, snapshot_state).await,
+            InternalRunState::Assigned => self.cancel_assigned_run(run_id, snapshot_state).await,
+            InternalRunState::Running => self.cancel_running_run(run_id, snapshot_state).await,
             InternalRunState::Cancelling => Ok(CancelRunResponse {
                 accepted: true,
                 message: "Run is already being cancelled".into(),
@@ -220,6 +157,110 @@ impl PipelineServiceImpl {
                 message: format!("Cannot cancel run in state: {snapshot_state:?}"),
             }),
         }
+    }
+
+    async fn cancel_queued_run(
+        &self,
+        run_id: &str,
+        snapshot_state: InternalRunState,
+    ) -> Result<CancelRunResponse, Status> {
+        if let Some(response) = self
+            .transition_or_retry(run_id, snapshot_state, InternalRunState::Cancelled)
+            .await?
+        {
+            return Ok(response);
+        }
+        self.cancel_latest_task(run_id).await;
+        self.publish_cancelled(run_id).await;
+        Ok(CancelRunResponse {
+            accepted: true,
+            message: "Queued run cancelled".into(),
+        })
+    }
+
+    async fn cancel_assigned_run(
+        &self,
+        run_id: &str,
+        snapshot_state: InternalRunState,
+    ) -> Result<CancelRunResponse, Status> {
+        if let Some(response) = self
+            .transition_or_retry(run_id, snapshot_state, InternalRunState::Cancelled)
+            .await?
+        {
+            return Ok(response);
+        }
+        self.cancel_latest_task(run_id).await;
+        self.publish_cancelled(run_id).await;
+        Ok(CancelRunResponse {
+            accepted: true,
+            message: "Assigned run cancelled".into(),
+        })
+    }
+
+    async fn cancel_running_run(
+        &self,
+        run_id: &str,
+        snapshot_state: InternalRunState,
+    ) -> Result<CancelRunResponse, Status> {
+        if let Some(response) = self
+            .transition_or_retry(run_id, snapshot_state, InternalRunState::Cancelling)
+            .await?
+        {
+            return Ok(response);
+        }
+        Ok(CancelRunResponse {
+            accepted: true,
+            message: "Running — cancel will be delivered via heartbeat".into(),
+        })
+    }
+
+    async fn transition_or_retry(
+        &self,
+        run_id: &str,
+        snapshot_state: InternalRunState,
+        target_state: InternalRunState,
+    ) -> Result<Option<CancelRunResponse>, Status> {
+        let actual_state = {
+            let mut runs = self.state.runs.write().await;
+            match runs.transition(run_id, target_state) {
+                Ok(()) => return Ok(None),
+                Err(err) => {
+                    let actual_state = runs
+                        .get_run(run_id)
+                        .ok_or_else(|| Status::not_found(format!("Run {run_id} not found")))?
+                        .state;
+                    if actual_state == snapshot_state {
+                        return Err(Status::internal(err.to_string()));
+                    }
+                    Some(actual_state)
+                }
+            }
+        };
+
+        let Some(actual_state) = actual_state else {
+            unreachable!("transition_or_retry only falls through with a refreshed run state");
+        };
+        Ok(Some(
+            Box::pin(self.cancel_run_for_state(run_id, actual_state)).await?,
+        ))
+    }
+
+    async fn cancel_latest_task(&self, run_id: &str) {
+        let mut tasks = self.state.tasks.write().await;
+        if let Some(task) = tasks.find_by_run_id(run_id) {
+            let task_id = task.task_id.clone();
+            let _ = tasks.cancel(&task_id);
+        }
+    }
+
+    async fn publish_cancelled(&self, run_id: &str) {
+        self.state.watchers.write().await.publish_terminal(
+            run_id,
+            RunEvent {
+                run_id: run_id.to_string(),
+                event: Some(run_event::Event::Cancelled(RunCancelled {})),
+            },
+        );
     }
 }
 
@@ -739,6 +780,68 @@ mod tests {
             .into_inner();
 
         assert!(!resp.accepted);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_assigned_run_returns_cancelled() {
+        let state = test_state();
+        let svc = PipelineServiceImpl::new(state.clone());
+
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+        let run_id = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+
+        let task_id = {
+            let task = state.tasks.write().await.poll(
+                "agent-1",
+                std::time::Duration::from_secs(60),
+                &state.epoch_gen,
+            );
+            let task = task.expect("expected assigned task");
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.set_current_task(
+                &run_id,
+                task.task_id.clone(),
+                "agent-1".into(),
+                task.attempt,
+                task.lease_epoch,
+            );
+            task.task_id
+        };
+
+        let resp = svc
+            .cancel_run(Request::new(CancelRunRequest {
+                run_id: run_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(resp.accepted);
+        assert!(resp.message.contains("cancelled"));
+
+        let runs = state.runs.read().await;
+        assert_eq!(
+            runs.get_run(&run_id).unwrap().state,
+            InternalRunState::Cancelled
+        );
+        drop(runs);
+
+        let tasks = state.tasks.read().await;
+        assert_eq!(
+            tasks.get(&task_id).unwrap().state,
+            crate::scheduler::TaskState::Cancelled
+        );
     }
 
     #[tokio::test]
