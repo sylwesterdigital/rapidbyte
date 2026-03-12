@@ -9,6 +9,7 @@ pub struct EpochGenerator {
 }
 
 impl EpochGenerator {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             counter: AtomicU64::new(0),
@@ -35,6 +36,7 @@ pub struct Lease {
 }
 
 impl Lease {
+    #[must_use]
     pub fn new(epoch: u64, ttl: Duration) -> Self {
         Self {
             epoch,
@@ -43,11 +45,13 @@ impl Lease {
     }
 
     /// Check if this lease is valid for the given epoch and has not expired.
+    #[must_use]
     pub fn is_valid(&self, epoch: u64) -> bool {
         self.epoch == epoch && Instant::now() < self.expires_at
     }
 
     /// Check if this lease has expired.
+    #[must_use]
     pub fn is_expired(&self) -> bool {
         Instant::now() >= self.expires_at
     }

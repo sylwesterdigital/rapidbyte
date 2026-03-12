@@ -1,11 +1,16 @@
-//! AgentService gRPC handler implementations.
+//! `AgentService` gRPC handler implementations.
 
 use std::time::Duration;
 
 use tonic::{Request, Response, Status};
 
-use crate::proto::rapidbyte::v1::agent_service_server::AgentService;
-use crate::proto::rapidbyte::v1::*;
+use crate::proto::rapidbyte::v1::{
+    agent_directive, agent_service_server::AgentService, poll_task_response, run_event,
+    AgentDirective, CancelTask, CompleteTaskRequest, CompleteTaskResponse, ExecutionOptions,
+    HeartbeatRequest, HeartbeatResponse, NoTask, PollTaskRequest, PollTaskResponse,
+    RegisterAgentRequest, RegisterAgentResponse, ReportProgressRequest, ReportProgressResponse,
+    RunCancelled, RunCompleted, RunEvent, RunFailed, TaskAssignment, TaskOutcome,
+};
 use crate::run_state::RunState as InternalRunState;
 use crate::state::ControllerState;
 
@@ -17,12 +22,14 @@ pub struct AgentServiceImpl {
 }
 
 impl AgentServiceImpl {
+    #[must_use]
     pub fn new(state: ControllerState) -> Self {
         Self { state }
     }
 }
 
 #[tonic::async_trait]
+#[allow(clippy::too_many_lines)]
 impl AgentService for AgentServiceImpl {
     async fn register_agent(
         &self,
@@ -262,8 +269,8 @@ impl AgentService for AgentServiceImpl {
             }
             TaskOutcome::Failed => {
                 let error = req.error.as_ref();
-                let safe_to_retry = error.map_or(false, |e| e.safe_to_retry);
-                let retryable = error.map_or(false, |e| e.retryable);
+                let safe_to_retry = error.is_some_and(|e| e.safe_to_retry);
+                let retryable = error.is_some_and(|e| e.retryable);
                 let commit_state = error.map_or("before_commit", |e| e.commit_state.as_str());
 
                 // Retry safety policy: only auto-requeue if safe_to_retry AND retryable
@@ -345,7 +352,7 @@ impl AgentService for AgentServiceImpl {
                     },
                 );
             }
-            _ => {}
+            TaskOutcome::Unspecified => {}
         }
 
         Ok(Response::new(CompleteTaskResponse { acknowledged: true }))
@@ -377,7 +384,10 @@ fn test_state() -> ControllerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineService as _;
+    use crate::proto::rapidbyte::v1::{
+        pipeline_service_server::PipelineService as _, ActiveLease, SubmitPipelineRequest,
+        TaskError,
+    };
 
     /// Helper to submit a pipeline and return the run_id.
     async fn submit_pipeline(state: &ControllerState) -> String {

@@ -80,12 +80,24 @@ pub struct TicketVerifier {
 }
 
 impl TicketVerifier {
+    #[must_use]
     pub fn new(key: &[u8]) -> Self {
         Self { key: key.to_vec() }
     }
 
     /// Verify a ticket and extract the payload.
     /// Checks both HMAC integrity and expiration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TicketError::TooShort`] if the ticket is smaller than the HMAC length,
+    /// [`TicketError::InvalidSignature`] if the HMAC does not match,
+    /// [`TicketError::Expired`] if the ticket has expired, or
+    /// [`TicketError::MalformedPayload`] if the payload bytes cannot be decoded.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the system clock is before the Unix epoch.
     pub fn verify(&self, ticket: &[u8]) -> Result<TicketPayload, TicketError> {
         if ticket.len() < HMAC_LEN {
             return Err(TicketError::TooShort);

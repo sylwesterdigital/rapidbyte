@@ -16,6 +16,7 @@ pub struct BearerAuthInterceptor {
 }
 
 impl BearerAuthInterceptor {
+    #[must_use]
     pub fn new(tokens: Vec<String>) -> Self {
         Self {
             valid_tokens: tokens,
@@ -23,6 +24,12 @@ impl BearerAuthInterceptor {
     }
 
     /// Check a request for valid bearer token authentication.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Status::unauthenticated` if auth is configured and the request
+    /// lacks a valid `Authorization: Bearer <token>` header.
+    #[allow(clippy::result_large_err)]
     pub fn check<T>(&self, request: &Request<T>) -> Result<(), Status> {
         // No tokens configured = auth disabled
         if self.valid_tokens.is_empty() {

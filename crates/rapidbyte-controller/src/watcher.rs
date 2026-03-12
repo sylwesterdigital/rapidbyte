@@ -1,4 +1,4 @@
-//! Broadcast channels for WatchRun streaming.
+//! Broadcast channels for `WatchRun` streaming.
 
 use std::collections::HashMap;
 
@@ -14,6 +14,7 @@ pub struct RunWatchers {
 }
 
 impl RunWatchers {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             channels: HashMap::new(),

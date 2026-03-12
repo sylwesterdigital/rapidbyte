@@ -22,6 +22,12 @@ pub struct ResolvedPlugins {
     pub dest_permissions: Option<Permissions>,
 }
 
+/// Resolve source and destination plugin paths, load manifests, and extract permissions.
+///
+/// # Errors
+///
+/// Returns `PipelineError::Infrastructure` if plugin paths cannot be resolved
+/// or manifests fail validation.
 pub fn resolve_plugins(config: &PipelineConfig) -> Result<ResolvedPlugins, PipelineError> {
     let source_wasm =
         rapidbyte_runtime::resolve_plugin_path(&config.source.use_ref, PluginKind::Source)
@@ -52,6 +58,12 @@ pub fn resolve_plugins(config: &PipelineConfig) -> Result<ResolvedPlugins, Pipel
     })
 }
 
+/// Load a plugin manifest from the WASM binary and validate kind/protocol version.
+///
+/// # Errors
+///
+/// Returns an error if the manifest cannot be loaded, the plugin kind does not match
+/// `expected_kind`, or the protocol version is incompatible.
 pub fn load_and_validate_manifest(
     wasm_path: &Path,
     plugin_ref: &str,
@@ -83,6 +95,12 @@ pub fn load_and_validate_manifest(
     Ok(manifest)
 }
 
+/// Validate plugin configuration against the JSON Schema declared in its manifest.
+///
+/// # Errors
+///
+/// Returns an error if the manifest's JSON Schema is invalid or the configuration
+/// does not conform to the schema.
 pub fn validate_config_against_schema(
     plugin_ref: &str,
     config: &serde_json::Value,
@@ -112,6 +130,11 @@ pub fn validate_config_against_schema(
     Ok(())
 }
 
+/// Create and open the state backend (`SQLite` or Postgres) based on pipeline config.
+///
+/// # Errors
+///
+/// Returns an error if the database cannot be opened or connected to.
 pub fn create_state_backend(config: &PipelineConfig) -> Result<Arc<dyn StateBackend>> {
     match config.state.backend {
         StateBackendKind::Sqlite => {
@@ -158,6 +181,7 @@ pub fn check_state_backend(config: &PipelineConfig) -> CheckItemResult {
 
 /// Build `SandboxOverrides` from pipeline permissions/limits and manifest resource limits.
 /// Returns `None` if no overrides are specified from either side.
+#[must_use]
 pub fn build_sandbox_overrides(
     pipeline_perms: Option<&crate::config::types::PipelinePermissions>,
     pipeline_limits: Option<&crate::config::types::PipelineLimits>,

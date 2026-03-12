@@ -46,10 +46,8 @@ impl TicketPayload {
     /// Deserialize from bytes.
     fn from_bytes(data: &[u8]) -> Result<Self, TicketError> {
         let mut cursor = 0;
-        let run_id =
-            read_string(data, &mut cursor).map_err(|e| TicketError::MalformedPayload(e))?;
-        let task_id =
-            read_string(data, &mut cursor).map_err(|e| TicketError::MalformedPayload(e))?;
+        let run_id = read_string(data, &mut cursor).map_err(TicketError::MalformedPayload)?;
+        let task_id = read_string(data, &mut cursor).map_err(TicketError::MalformedPayload)?;
 
         if cursor + 16 > data.len() {
             return Err(TicketError::MalformedPayload(
@@ -70,7 +68,7 @@ impl TicketPayload {
 }
 
 fn write_string(buf: &mut Vec<u8>, s: &str) {
-    let len = s.len() as u32;
+    let len = u32::try_from(s.len()).expect("string length exceeds u32::MAX");
     buf.extend_from_slice(&len.to_le_bytes());
     buf.extend_from_slice(s.as_bytes());
 }
@@ -79,7 +77,7 @@ fn read_string(data: &[u8], cursor: &mut usize) -> Result<String, String> {
     if *cursor + 4 > data.len() {
         return Err("not enough bytes for string length".into());
     }
-    let len = u32::from_le_bytes(data[*cursor..*cursor + 4].try_into().unwrap()) as usize;
+    let len = u32::from_le_bytes(data[*cursor..*cursor + 4].try_into().unwrap()) as usize; // u32 -> usize never truncates
     *cursor += 4;
     if *cursor + len > data.len() {
         return Err("not enough bytes for string data".into());
@@ -96,11 +94,18 @@ pub struct TicketSigner {
 }
 
 impl TicketSigner {
+    #[must_use]
     pub fn new(key: &[u8]) -> Self {
         Self { key: key.to_vec() }
     }
 
     /// Sign a payload, returning `payload_bytes || hmac_32bytes`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if HMAC initialization fails (should never happen as HMAC accepts
+    /// any key size).
+    #[must_use]
     pub fn sign(&self, payload: &TicketPayload) -> bytes::Bytes {
         let payload_bytes = payload.to_bytes();
         let mut mac = HmacSha256::new_from_slice(&self.key).expect("HMAC can take key of any size");
@@ -114,6 +119,16 @@ impl TicketSigner {
 
     /// Verify a ticket and extract the payload.
     /// Checks both HMAC integrity and expiration.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TicketError` if the ticket is too short, has an invalid
+    /// HMAC signature, contains a malformed payload, or has expired.
+    ///
+    /// # Panics
+    ///
+    /// Panics if HMAC initialization fails (should never happen as HMAC accepts
+    /// any key size).
     pub fn verify(&self, ticket: &[u8]) -> Result<TicketPayload, TicketError> {
         if ticket.len() < HMAC_LEN {
             return Err(TicketError::TooShort);
@@ -156,12 +171,13 @@ pub struct PreviewEntry {
     pub ttl: Duration,
 }
 
-/// Stores preview metadata indexed by run_id.
+/// Stores preview metadata indexed by `run_id`.
 pub struct PreviewStore {
     entries: HashMap<String, PreviewEntry>,
 }
 
 impl PreviewStore {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
@@ -172,6 +188,7 @@ impl PreviewStore {
         self.entries.insert(entry.run_id.clone(), entry);
     }
 
+    #[must_use]
     pub fn get(&self, run_id: &str) -> Option<&PreviewEntry> {
         let entry = self.entries.get(run_id)?;
         if entry.created_at.elapsed() < entry.ttl {

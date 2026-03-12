@@ -27,6 +27,7 @@ pub struct ControllerState {
 }
 
 impl ControllerState {
+    #[must_use]
     pub fn new(signing_key: &[u8]) -> Self {
         Self {
             runs: Arc::new(RwLock::new(RunStore::new())),

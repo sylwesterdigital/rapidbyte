@@ -61,6 +61,7 @@ pub struct TaskQueue {
 }
 
 impl TaskQueue {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             pending: VecDeque::new(),
@@ -69,7 +70,7 @@ impl TaskQueue {
         }
     }
 
-    /// Enqueue a new task. Returns the task_id.
+    /// Enqueue a new task. Returns the `task_id`.
     pub fn enqueue(
         &mut self,
         run_id: String,
@@ -126,6 +127,11 @@ impl TaskQueue {
     }
 
     /// Mark a task as running. Validates the lease epoch.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SchedulerError` if the task is unknown, not in `Assigned` state,
+    /// or the provided lease epoch is stale.
     pub fn report_running(
         &mut self,
         task_id: &str,
@@ -158,6 +164,10 @@ impl TaskQueue {
 
     /// Complete a task. Validates the lease epoch.
     /// Returns `true` if acknowledged (epoch valid), `false` if stale.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SchedulerError::UnknownTask` if the task does not exist.
     pub fn complete(
         &mut self,
         task_id: &str,
@@ -187,6 +197,11 @@ impl TaskQueue {
 
     /// Cancel a task.
     /// If pending, removes it from the queue. If running/assigned, marks it cancelled.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SchedulerError` if the task is unknown or already in a terminal
+    /// state (`Completed`, `Failed`, `Cancelled`, `TimedOut`).
     pub fn cancel(&mut self, task_id: &str) -> Result<(), SchedulerError> {
         let record = self
             .tasks
@@ -233,11 +248,13 @@ impl TaskQueue {
     }
 
     /// Get a task record by ID.
+    #[must_use]
     pub fn get(&self, task_id: &str) -> Option<&TaskRecord> {
         self.tasks.get(task_id)
     }
 
-    /// Find the task for a given run_id (most recent attempt).
+    /// Find the task for a given `run_id` (most recent attempt).
+    #[must_use]
     pub fn find_by_run_id(&self, run_id: &str) -> Option<&TaskRecord> {
         self.tasks
             .values()

@@ -10,7 +10,9 @@ use tonic::transport::Channel;
 use crate::Verbosity;
 
 use rapidbyte_controller::proto::rapidbyte::v1::pipeline_service_client::PipelineServiceClient;
-use rapidbyte_controller::proto::rapidbyte::v1::*;
+use rapidbyte_controller::proto::rapidbyte::v1::{
+    run_event, ExecutionOptions, GetRunRequest, SubmitPipelineRequest, WatchRunRequest,
+};
 
 pub async fn execute(
     controller_url: &str,

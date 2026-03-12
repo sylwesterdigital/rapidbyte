@@ -1,4 +1,4 @@
-//! ProgressEvent → ReportProgress gRPC forwarding.
+//! `ProgressEvent` to `ReportProgress` gRPC forwarding.
 
 use rapidbyte_engine::progress::ProgressEvent;
 use tokio::sync::mpsc;

@@ -30,13 +30,14 @@ pub struct AgentRegistry {
 }
 
 impl AgentRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             agents: HashMap::new(),
         }
     }
 
-    /// Register a new agent. Returns the agent_id.
+    /// Register a new agent. Returns the `agent_id`.
     pub fn register(
         &mut self,
         agent_id: String,
@@ -61,6 +62,10 @@ impl AgentRegistry {
     }
 
     /// Update heartbeat timestamp for an agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RegistryError::UnknownAgent` if the agent is not registered.
     pub fn heartbeat(
         &mut self,
         agent_id: &str,
@@ -76,6 +81,7 @@ impl AgentRegistry {
     }
 
     /// Get an agent record.
+    #[must_use]
     pub fn get(&self, agent_id: &str) -> Option<&AgentRecord> {
         self.agents.get(agent_id)
     }
@@ -102,6 +108,7 @@ impl AgentRegistry {
     }
 
     /// List all registered agents.
+    #[must_use]
     pub fn list(&self) -> Vec<&AgentRecord> {
         self.agents.values().collect()
     }

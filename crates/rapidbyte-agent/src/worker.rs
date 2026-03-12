@@ -12,7 +12,11 @@ use tracing::{error, info, warn};
 use crate::executor::{self, TaskOutcomeKind};
 use crate::flight::PreviewFlightService;
 use crate::proto::rapidbyte::v1::agent_service_client::AgentServiceClient;
-use crate::proto::rapidbyte::v1::*;
+use crate::proto::rapidbyte::v1::{
+    agent_directive, poll_task_response, ActiveLease, CompleteTaskRequest, HeartbeatRequest,
+    PollTaskRequest, PreviewAccess, PreviewState, RegisterAgentRequest, TaskError, TaskMetrics,
+    TaskOutcome,
+};
 use crate::spool::PreviewSpool;
 use crate::ticket::TicketVerifier;
 
@@ -44,10 +48,16 @@ impl Default for AgentConfig {
 }
 
 /// Shared state for tracking active leases across worker and heartbeat.
-/// Maps task_id -> (lease_epoch, cancellation_token).
+/// Maps `task_id` to (`lease_epoch`, `cancellation_token`).
 type ActiveLeaseMap = Arc<RwLock<HashMap<String, (u64, CancellationToken)>>>;
 
 /// Run the agent worker loop.
+///
+/// # Errors
+///
+/// Returns an error if the controller connection fails, agent registration
+/// is rejected, or the Flight server address cannot be parsed.
+#[allow(clippy::too_many_lines)]
 pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
     let channel = Channel::from_shared(config.controller_url.clone())?
         .connect()
@@ -135,7 +145,7 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
         );
 
         let exec_opts = task.execution.as_ref();
-        let dry_run = exec_opts.map_or(false, |e| e.dry_run);
+        let dry_run = exec_opts.is_some_and(|e| e.dry_run);
         let limit = exec_opts.and_then(|e| e.limit);
 
         // Set up progress forwarding
@@ -199,7 +209,7 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
                 lease_epoch: task.lease_epoch,
                 outcome,
                 error: task_error,
-                metrics: Some(crate::proto::rapidbyte::v1::TaskMetrics {
+                metrics: Some(TaskMetrics {
                     records_processed: result.metrics.records_processed,
                     bytes_processed: result.metrics.bytes_processed,
                     elapsed_seconds: result.metrics.elapsed_seconds,
@@ -249,7 +259,7 @@ async fn heartbeat_loop(
                 lease_epoch: *epoch,
             })
             .collect();
-        let active_count = leases.len() as u32;
+        let active_count = u32::try_from(leases.len()).unwrap_or(u32::MAX);
         let resp = client
             .heartbeat(HeartbeatRequest {
                 agent_id: agent_id.clone(),

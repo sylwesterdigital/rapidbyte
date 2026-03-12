@@ -1,4 +1,4 @@
-//! Task execution wrapper around engine::run_pipeline.
+//! Task execution wrapper around `engine::run_pipeline`.
 
 use rapidbyte_engine::config::parser;
 use rapidbyte_engine::config::validator;
@@ -50,6 +50,7 @@ impl TaskMetrics {
 /// Execute a pipeline task.
 ///
 /// Parses the YAML, runs the pipeline, and returns structured results.
+#[allow(clippy::too_many_lines)]
 pub async fn execute_task(
     pipeline_yaml: &[u8],
     dry_run: bool,
@@ -169,10 +170,10 @@ pub async fn execute_task(
                     message: pe.message.clone(),
                     retryable: pe.retryable,
                     safe_to_retry: pe.safe_to_retry,
-                    commit_state: pe
-                        .commit_state
-                        .map(|cs| format!("{cs:?}").to_lowercase())
-                        .unwrap_or_else(|| "before_commit".into()),
+                    commit_state: pe.commit_state.map_or_else(
+                        || "before_commit".into(),
+                        |cs| format!("{cs:?}").to_lowercase(),
+                    ),
                 },
                 PipelineError::Infrastructure(e) => TaskErrorInfo {
                     code: "INFRASTRUCTURE".into(),

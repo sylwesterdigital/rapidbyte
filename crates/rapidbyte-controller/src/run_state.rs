@@ -21,6 +21,7 @@ pub enum RunState {
 
 impl RunState {
     /// Whether this state is terminal (no further transitions allowed except internal).
+    #[must_use]
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
@@ -57,6 +58,7 @@ pub struct RunStore {
 }
 
 impl RunStore {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             runs: HashMap::new(),
@@ -65,7 +67,7 @@ impl RunStore {
     }
 
     /// Create a new run. If an idempotency key is provided and already exists,
-    /// returns the existing run_id instead.
+    /// returns the existing `run_id` instead.
     pub fn create_run(
         &mut self,
         run_id: String,
@@ -99,6 +101,7 @@ impl RunStore {
         run_id
     }
 
+    #[must_use]
     pub fn get_run(&self, run_id: &str) -> Option<&RunRecord> {
         self.runs.get(run_id)
     }
@@ -108,6 +111,11 @@ impl RunStore {
     }
 
     /// Transition a run to a new state. Returns error if the transition is invalid.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidTransition` if the requested state change violates the
+    /// run lifecycle (e.g. `Completed -> Running`) or the run does not exist.
     pub fn transition(&mut self, run_id: &str, to: RunState) -> Result<(), InvalidTransition> {
         let record = self.runs.get_mut(run_id).ok_or(InvalidTransition {
             from: RunState::Pending,
@@ -127,14 +135,16 @@ impl RunStore {
     }
 
     /// List runs, optionally filtered by state.
+    #[must_use]
     pub fn list_runs(&self, state_filter: Option<RunState>) -> Vec<&RunRecord> {
         self.runs
             .values()
-            .filter(|r| state_filter.map_or(true, |s| r.state == s))
+            .filter(|r| state_filter.is_none_or(|s| r.state == s))
             .collect()
     }
 
     /// Find a run by idempotency key.
+    #[must_use]
     pub fn find_by_idempotency_key(&self, key: &str) -> Option<&RunRecord> {
         let run_id = self.idempotency_index.get(key)?;
         self.runs.get(run_id)
@@ -151,16 +161,20 @@ impl Default for RunStore {
 fn is_valid_transition(from: RunState, to: RunState) -> bool {
     matches!(
         (from, to),
-        (RunState::Pending, RunState::Assigned)
-            | (RunState::Pending, RunState::Cancelled)
+        (RunState::Pending, RunState::Assigned | RunState::Cancelled)
             | (RunState::Assigned, RunState::Running)
-            | (RunState::Running, RunState::Completed)
-            | (RunState::Running, RunState::Failed)
-            | (RunState::Running, RunState::Cancelled)
-            | (RunState::Running, RunState::TimedOut)
-            | (RunState::Running, RunState::PreviewReady)
-            | (RunState::Running, RunState::Cancelling)
-            | (RunState::PreviewReady, RunState::Completed)
+            | (
+                RunState::Running | RunState::PreviewReady,
+                RunState::Completed
+            )
+            | (
+                RunState::Running,
+                RunState::Failed
+                    | RunState::Cancelled
+                    | RunState::TimedOut
+                    | RunState::PreviewReady
+                    | RunState::Cancelling,
+            )
             | (RunState::Cancelling, RunState::Cancelled)
     )
 }

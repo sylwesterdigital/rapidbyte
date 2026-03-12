@@ -1,6 +1,6 @@
 //! Arrow Flight server for dry-run preview replay.
 //!
-//! Validates signed tickets and streams RecordBatches from the preview spool.
+//! Validates signed tickets and streams `RecordBatches` from the preview spool.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -27,6 +27,7 @@ impl PreviewFlightService {
         Self { spool, verifier }
     }
 
+    #[must_use]
     pub fn into_server(self) -> FlightServiceServer<Self> {
         FlightServiceServer::new(self)
     }
@@ -74,9 +75,7 @@ impl FlightService for PreviewFlightService {
 
         // Convert schema to FlightData
         let options = IpcWriteOptions::default();
-        let schema_flight_data: FlightData = SchemaAsIpc::new(&schema, &options)
-            .try_into()
-            .map_err(|e| Status::internal(format!("Failed to encode schema as FlightData: {e}")))?;
+        let schema_flight_data: FlightData = SchemaAsIpc::new(&schema, &options).into();
 
         let mut flight_data_vec = vec![schema_flight_data];
         let data_gen = IpcDataGenerator::default();
@@ -118,8 +117,8 @@ impl FlightService for PreviewFlightService {
         let total_bytes: u64 = dry_run.streams.iter().map(|s| s.total_bytes).sum();
 
         let info = FlightInfo::new()
-            .with_total_records(total_records as i64)
-            .with_total_bytes(total_bytes as i64);
+            .with_total_records(total_records.cast_signed())
+            .with_total_bytes(total_bytes.cast_signed());
 
         Ok(Response::new(info))
     }

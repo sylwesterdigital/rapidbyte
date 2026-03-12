@@ -17,6 +17,7 @@ struct SpoolEntry {
 }
 
 impl PreviewSpool {
+    #[must_use]
     pub fn new(default_ttl: Duration) -> Self {
         Self {
             entries: HashMap::new(),
@@ -35,6 +36,7 @@ impl PreviewSpool {
         );
     }
 
+    #[must_use]
     pub fn get(&self, task_id: &str) -> Option<&DryRunResult> {
         let entry = self.entries.get(task_id)?;
         if entry.created_at.elapsed() < entry.ttl {

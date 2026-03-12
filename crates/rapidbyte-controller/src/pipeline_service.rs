@@ -1,4 +1,4 @@
-//! PipelineService gRPC handler implementations.
+//! `PipelineService` gRPC handler implementations.
 
 use std::pin::Pin;
 
@@ -6,12 +6,17 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
 
-use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineService;
-use crate::proto::rapidbyte::v1::*;
+use crate::proto::rapidbyte::v1::{
+    pipeline_service_server::PipelineService, CancelRunRequest, CancelRunResponse, GetRunRequest,
+    GetRunResponse, ListRunsRequest, ListRunsResponse, PreviewAccess, PreviewState, RunEvent,
+    RunState, RunSummary, SubmitPipelineRequest, SubmitPipelineResponse, TaskError,
+    WatchRunRequest,
+};
 use crate::run_state::RunState as InternalRunState;
 use crate::state::ControllerState;
 
 /// Maps internal `RunState` to proto `RunState` enum value.
+#[must_use]
 pub fn to_proto_state(s: InternalRunState) -> i32 {
     match s {
         InternalRunState::Pending => RunState::Pending.into(),
@@ -43,6 +48,7 @@ pub struct PipelineServiceImpl {
 }
 
 impl PipelineServiceImpl {
+    #[must_use]
     pub fn new(state: ControllerState) -> Self {
         Self { state }
     }
@@ -104,11 +110,11 @@ impl PipelineService for PipelineServiceImpl {
         let is_new = {
             let runs = self.state.runs.read().await;
             let record = runs.get_run(&actual_run_id);
-            record.map_or(false, |r| r.state == InternalRunState::Pending)
+            record.is_some_and(|r| r.state == InternalRunState::Pending)
         };
 
         if is_new {
-            let dry_run = req.execution.as_ref().map_or(false, |e| e.dry_run);
+            let dry_run = req.execution.as_ref().is_some_and(|e| e.dry_run);
             let limit = req.execution.as_ref().and_then(|e| e.limit);
             let task_id = {
                 let mut tasks = self.state.tasks.write().await;
@@ -262,8 +268,9 @@ impl PipelineService for PipelineServiceImpl {
         let runs = self.state.runs.read().await;
         let mut records = runs.list_runs(state_filter);
 
+        // Clamp limit to a positive value; default to 20 if unset or zero
         let limit = if req.limit > 0 {
-            req.limit as usize
+            req.limit.unsigned_abs() as usize
         } else {
             20
         };
@@ -292,6 +299,7 @@ fn test_state() -> ControllerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::rapidbyte::v1::ExecutionOptions;
 
     #[tokio::test]
     async fn test_submit_pipeline_returns_run_id() {

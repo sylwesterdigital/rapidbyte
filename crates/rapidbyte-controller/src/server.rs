@@ -39,6 +39,11 @@ impl Default for ControllerConfig {
 }
 
 /// Start the controller gRPC server.
+///
+/// # Errors
+///
+/// Returns an error if the gRPC server fails to bind or encounters a
+/// transport-level failure.
 pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
     let state = ControllerState::new(&config.signing_key);
 
