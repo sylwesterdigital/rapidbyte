@@ -45,12 +45,22 @@ pub enum BenchmarkBuildMode {
     Release,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchmarkExecutionMode {
+    #[default]
+    Local,
+    Distributed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BenchmarkExecutionProfile {
     #[serde(default)]
     pub build_mode: BenchmarkBuildMode,
     #[serde(default)]
     pub aot: bool,
+    #[serde(default)]
+    pub execution_mode: BenchmarkExecutionMode,
 }
 
 impl Default for BenchmarkExecutionProfile {
@@ -58,6 +68,7 @@ impl Default for BenchmarkExecutionProfile {
         Self {
             build_mode: BenchmarkBuildMode::Debug,
             aot: false,
+            execution_mode: BenchmarkExecutionMode::Local,
         }
     }
 }
@@ -168,6 +179,12 @@ impl ScenarioManifest {
         if parsed.suite.trim().is_empty() {
             bail!("scenario {} has empty suite", path.display());
         }
+        validate_benchmark_execution(&parsed).with_context(|| {
+            format!(
+                "scenario {} has invalid benchmark execution",
+                path.display()
+            )
+        })?;
         validate_scenario_adapters(&parsed)
             .with_context(|| format!("scenario {} failed adapter validation", path.display()))?;
 
@@ -200,6 +217,16 @@ pub fn filter_scenarios<'a>(
                 .all(|tag| scenario.tags.iter().any(|entry| entry == tag))
         })
         .collect()
+}
+
+fn validate_benchmark_execution(scenario: &ScenarioManifest) -> Result<()> {
+    if scenario.benchmark.execution_mode == BenchmarkExecutionMode::Distributed
+        && scenario.kind != BenchmarkKind::Pipeline
+    {
+        bail!("distributed execution is only supported for pipeline benchmarks");
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -530,6 +557,83 @@ environment:
         let defaulted = ScenarioManifest::from_path(&default_path).expect("parse default");
         assert_eq!(defaulted.benchmark.build_mode, BenchmarkBuildMode::Debug);
         assert!(!defaulted.benchmark.aot);
+        assert_eq!(
+            defaulted.benchmark.execution_mode,
+            BenchmarkExecutionMode::Local
+        );
+    }
+
+    #[test]
+    fn parses_distributed_benchmark_execution_mode() {
+        let root = temp_dir("distributed-benchmark-execution");
+        let scenario_path = root.join("distributed.yaml");
+        fs::write(
+            &scenario_path,
+            r#"
+id: pg_dest_copy_release_distributed
+name: Postgres destination via copy release distributed
+suite: lab
+kind: pipeline
+tags: [lab, postgres, copy, distributed]
+connectors:
+  - kind: source
+    plugin: postgres
+  - kind: destination
+    plugin: postgres
+workload:
+  family: narrow_append
+  rows: 1000000
+execution:
+  iterations: 3
+  warmups: 1
+benchmark:
+  build_mode: release
+  aot: true
+  execution_mode: distributed
+environment:
+  ref: local-bench-distributed-postgres
+  stream_name: bench_events
+"#,
+        )
+        .expect("write distributed scenario");
+
+        let scenario = ScenarioManifest::from_path(&scenario_path).expect("parse distributed");
+        assert_eq!(
+            scenario.benchmark.execution_mode,
+            BenchmarkExecutionMode::Distributed
+        );
+    }
+
+    #[test]
+    fn rejects_distributed_execution_mode_for_non_pipeline_benchmarks() {
+        let root = temp_dir("distributed-invalid-kind");
+        let scenario_path = root.join("invalid.yaml");
+        fs::write(
+            &scenario_path,
+            r#"
+id: pg_source_distributed
+name: Postgres source distributed
+suite: lab
+kind: source
+tags: [lab, postgres, distributed]
+connectors:
+  - kind: source
+    plugin: postgres
+workload:
+  family: narrow_append
+  rows: 1000000
+execution:
+  iterations: 1
+benchmark:
+  execution_mode: distributed
+"#,
+        )
+        .expect("write invalid distributed scenario");
+
+        let err = ScenarioManifest::from_path(&scenario_path).expect_err("should reject invalid");
+        let message = format!("{err:#}");
+        assert!(message.contains("has invalid benchmark execution"));
+        assert!(message.contains("distributed execution is only supported for pipeline benchmarks"));
     }
 
     #[test]
