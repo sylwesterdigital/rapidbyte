@@ -12,7 +12,7 @@ use crate::run_state::RunState as InternalRunState;
 use crate::state::ControllerState;
 
 /// Maps internal `RunState` to proto `RunState` enum value.
-fn to_proto_state(s: InternalRunState) -> i32 {
+pub fn to_proto_state(s: InternalRunState) -> i32 {
     match s {
         InternalRunState::Pending => RunState::Pending.into(),
         InternalRunState::Assigned => RunState::Assigned.into(),

@@ -1,0 +1,708 @@
+//! AgentService gRPC handler implementations.
+
+use std::time::Duration;
+
+use tonic::{Request, Response, Status};
+
+use crate::proto::rapidbyte::v1::agent_service_server::AgentService;
+use crate::proto::rapidbyte::v1::*;
+use crate::run_state::RunState as InternalRunState;
+use crate::state::ControllerState;
+
+/// Default lease TTL for assigned tasks.
+const LEASE_TTL: Duration = Duration::from_secs(300);
+
+pub struct AgentServiceImpl {
+    state: ControllerState,
+}
+
+impl AgentServiceImpl {
+    pub fn new(state: ControllerState) -> Self {
+        Self { state }
+    }
+}
+
+#[tonic::async_trait]
+impl AgentService for AgentServiceImpl {
+    async fn register_agent(
+        &self,
+        request: Request<RegisterAgentRequest>,
+    ) -> Result<Response<RegisterAgentResponse>, Status> {
+        let req = request.into_inner();
+        let agent_id = uuid::Uuid::new_v4().to_string();
+
+        let mut registry = self.state.registry.write().await;
+        registry.register(
+            agent_id.clone(),
+            req.max_tasks,
+            req.flight_advertise_endpoint,
+            req.plugin_bundle_hash,
+            req.available_plugins,
+            req.memory_bytes,
+        );
+
+        tracing::info!(agent_id, "Agent registered");
+        Ok(Response::new(RegisterAgentResponse { agent_id }))
+    }
+
+    async fn heartbeat(
+        &self,
+        request: Request<HeartbeatRequest>,
+    ) -> Result<Response<HeartbeatResponse>, Status> {
+        let req = request.into_inner();
+
+        // Update heartbeat in registry
+        {
+            let mut registry = self.state.registry.write().await;
+            registry
+                .heartbeat(&req.agent_id, req.active_tasks)
+                .map_err(|e| Status::not_found(e.to_string()))?;
+        }
+
+        // Check for cancel directives — look up active leases and see if any
+        // of their runs are in Cancelling state
+        let mut directives = Vec::new();
+        {
+            let runs = self.state.runs.read().await;
+            let tasks = self.state.tasks.read().await;
+
+            for active_lease in &req.active_leases {
+                if let Some(task) = tasks.get(&active_lease.task_id) {
+                    if let Some(run) = runs.get_run(&task.run_id) {
+                        if run.state == InternalRunState::Cancelling {
+                            directives.push(AgentDirective {
+                                directive: Some(agent_directive::Directive::CancelTask(
+                                    CancelTask {
+                                        task_id: active_lease.task_id.clone(),
+                                        lease_epoch: active_lease.lease_epoch,
+                                    },
+                                )),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(Response::new(HeartbeatResponse { directives }))
+    }
+
+    async fn poll_task(
+        &self,
+        request: Request<PollTaskRequest>,
+    ) -> Result<Response<PollTaskResponse>, Status> {
+        let req = request.into_inner();
+        let wait = Duration::from_secs(u64::from(req.wait_seconds).min(60));
+
+        // Try immediate poll
+        {
+            let mut tasks = self.state.tasks.write().await;
+            if let Some(assignment) = tasks.poll(&req.agent_id, LEASE_TTL, &self.state.epoch_gen) {
+                // Transition run to Assigned
+                let mut runs = self.state.runs.write().await;
+                let _ = runs.transition(&assignment.run_id, InternalRunState::Assigned);
+
+                return Ok(Response::new(make_task_response(assignment)));
+            }
+        }
+
+        // Long-poll: wait for notification or timeout
+        let notified = self.state.task_notify.notified();
+        tokio::select! {
+            () = notified => {},
+            () = tokio::time::sleep(wait) => {},
+        }
+
+        // Try again after wakeup
+        let mut tasks = self.state.tasks.write().await;
+        if let Some(assignment) = tasks.poll(&req.agent_id, LEASE_TTL, &self.state.epoch_gen) {
+            let mut runs = self.state.runs.write().await;
+            let _ = runs.transition(&assignment.run_id, InternalRunState::Assigned);
+
+            return Ok(Response::new(make_task_response(assignment)));
+        }
+
+        Ok(Response::new(PollTaskResponse {
+            result: Some(poll_task_response::Result::NoTask(NoTask {})),
+        }))
+    }
+
+    async fn report_progress(
+        &self,
+        request: Request<ReportProgressRequest>,
+    ) -> Result<Response<ReportProgressResponse>, Status> {
+        let req = request.into_inner();
+
+        // Validate the lease is still valid
+        {
+            let tasks = self.state.tasks.read().await;
+            if let Some(task) = tasks.get(&req.task_id) {
+                if let Some(lease) = &task.lease {
+                    if !lease.is_valid(req.lease_epoch) {
+                        return Err(Status::failed_precondition("Stale lease epoch"));
+                    }
+                }
+
+                // Transition run to Running if still Assigned
+                let mut runs = self.state.runs.write().await;
+                if let Some(run) = runs.get_run(&task.run_id) {
+                    if run.state == InternalRunState::Assigned {
+                        let _ = runs.transition(&task.run_id, InternalRunState::Running);
+                    }
+                }
+
+                // Forward progress to watchers
+                if let Some(progress) = req.progress {
+                    let watchers = self.state.watchers.read().await;
+                    watchers.publish(
+                        &task.run_id,
+                        RunEvent {
+                            run_id: task.run_id.clone(),
+                            event: Some(run_event::Event::Progress(progress)),
+                        },
+                    );
+                }
+            }
+        }
+
+        Ok(Response::new(ReportProgressResponse {}))
+    }
+
+    async fn complete_task(
+        &self,
+        request: Request<CompleteTaskRequest>,
+    ) -> Result<Response<CompleteTaskResponse>, Status> {
+        let req = request.into_inner();
+
+        let outcome = TaskOutcome::try_from(req.outcome).unwrap_or(TaskOutcome::Unspecified);
+
+        // Complete the task in the scheduler (validates lease epoch)
+        let succeeded = outcome == TaskOutcome::Completed;
+        let acknowledged = {
+            let mut tasks = self.state.tasks.write().await;
+            tasks
+                .complete(&req.task_id, req.lease_epoch, succeeded)
+                .map_err(|e| Status::not_found(e.to_string()))?
+        };
+
+        if !acknowledged {
+            return Ok(Response::new(CompleteTaskResponse {
+                acknowledged: false,
+            }));
+        }
+
+        // Get the run_id from the task
+        let (run_id, _attempt) = {
+            let tasks = self.state.tasks.read().await;
+            let task = tasks
+                .get(&req.task_id)
+                .ok_or_else(|| Status::not_found("Task not found"))?;
+            (task.run_id.clone(), task.attempt)
+        };
+
+        // Transition run state and publish events
+        match outcome {
+            TaskOutcome::Completed => {
+                let mut runs = self.state.runs.write().await;
+                // Ensure run is in Running state first
+                if let Some(run) = runs.get_run(&run_id) {
+                    if run.state == InternalRunState::Assigned {
+                        let _ = runs.transition(&run_id, InternalRunState::Running);
+                    }
+                }
+                let _ = runs.transition(&run_id, InternalRunState::Completed);
+
+                // Store preview if provided
+                if let Some(preview) = &req.preview {
+                    let mut previews = self.state.previews.write().await;
+                    previews.store(crate::preview::PreviewEntry {
+                        run_id: run_id.clone(),
+                        task_id: req.task_id.clone(),
+                        flight_endpoint: preview.flight_endpoint.clone(),
+                        ticket: bytes::Bytes::from(preview.ticket.clone()),
+                        created_at: std::time::Instant::now(),
+                        ttl: Duration::from_secs(300),
+                    });
+                }
+
+                // Publish completion event
+                let metrics = req.metrics.as_ref();
+                let watchers = self.state.watchers.read().await;
+                watchers.publish(
+                    &run_id,
+                    RunEvent {
+                        run_id: run_id.clone(),
+                        event: Some(run_event::Event::Completed(RunCompleted {
+                            total_records: metrics.map_or(0, |m| m.records_processed),
+                            total_bytes: metrics.map_or(0, |m| m.bytes_processed),
+                            elapsed_seconds: metrics.map_or(0.0, |m| m.elapsed_seconds),
+                            cursors_advanced: metrics.map_or(0, |m| m.cursors_advanced),
+                        })),
+                    },
+                );
+            }
+            TaskOutcome::Failed => {
+                let error = req.error.as_ref();
+                let safe_to_retry = error.map_or(false, |e| e.safe_to_retry);
+                let retryable = error.map_or(false, |e| e.retryable);
+                let commit_state = error.map_or("before_commit", |e| e.commit_state.as_str());
+
+                // Retry safety policy: only auto-requeue if safe_to_retry AND retryable
+                // AND not after any commit state
+                let should_retry = safe_to_retry
+                    && retryable
+                    && commit_state != "after_commit_unknown"
+                    && commit_state != "after_commit_confirmed";
+
+                if should_retry {
+                    // Re-enqueue with incremented attempt
+                    let (yaml, dry_run, limit, attempt) = {
+                        let tasks = self.state.tasks.read().await;
+                        let task = tasks.get(&req.task_id).unwrap();
+                        (
+                            task.pipeline_yaml.clone(),
+                            task.dry_run,
+                            task.limit,
+                            task.attempt,
+                        )
+                    };
+
+                    let mut runs = self.state.runs.write().await;
+                    // Reset run to Pending for retry
+                    // Note: Running -> Failed is valid, then we create a new task
+                    let _ = runs.transition(&run_id, InternalRunState::Failed);
+
+                    // For retry, we create a new run entry or update attempt count
+                    if let Some(record) = runs.get_run_mut(&run_id) {
+                        record.attempt += 1;
+                        record.state = InternalRunState::Pending;
+                    }
+
+                    let mut tasks = self.state.tasks.write().await;
+                    tasks.enqueue(run_id.clone(), yaml, dry_run, limit, attempt + 1);
+                    self.state.task_notify.notify_waiters();
+
+                    tracing::info!(run_id, attempt = attempt + 1, "Auto-requeued failed task");
+                } else {
+                    // No retry — mark as failed
+                    let mut runs = self.state.runs.write().await;
+                    if let Some(run) = runs.get_run(&run_id) {
+                        if run.state == InternalRunState::Assigned {
+                            let _ = runs.transition(&run_id, InternalRunState::Running);
+                        }
+                    }
+                    let _ = runs.transition(&run_id, InternalRunState::Failed);
+                    if let Some(record) = runs.get_run_mut(&run_id) {
+                        record.error_message = error.map(|e| format!("{}: {}", e.code, e.message));
+                    }
+
+                    // Publish failure event
+                    let watchers = self.state.watchers.read().await;
+                    watchers.publish(
+                        &run_id,
+                        RunEvent {
+                            run_id: run_id.clone(),
+                            event: Some(run_event::Event::Failed(RunFailed {
+                                error: req.error,
+                                attempt: {
+                                    let tasks = self.state.tasks.read().await;
+                                    tasks.get(&req.task_id).map_or(1, |t| t.attempt)
+                                },
+                            })),
+                        },
+                    );
+                }
+            }
+            TaskOutcome::Cancelled => {
+                let mut runs = self.state.runs.write().await;
+                let _ = runs.transition(&run_id, InternalRunState::Cancelled);
+
+                let watchers = self.state.watchers.read().await;
+                watchers.publish(
+                    &run_id,
+                    RunEvent {
+                        run_id: run_id.clone(),
+                        event: Some(run_event::Event::Cancelled(RunCancelled {})),
+                    },
+                );
+            }
+            _ => {}
+        }
+
+        Ok(Response::new(CompleteTaskResponse { acknowledged: true }))
+    }
+}
+
+fn make_task_response(assignment: crate::scheduler::TaskAssignment) -> PollTaskResponse {
+    PollTaskResponse {
+        result: Some(poll_task_response::Result::Task(TaskAssignment {
+            task_id: assignment.task_id,
+            run_id: assignment.run_id,
+            attempt: assignment.attempt,
+            lease_epoch: assignment.lease_epoch,
+            lease_expires_at: None,
+            pipeline_yaml_utf8: assignment.pipeline_yaml,
+            execution: Some(ExecutionOptions {
+                dry_run: assignment.dry_run,
+                limit: assignment.limit,
+            }),
+        })),
+    }
+}
+
+#[cfg(test)]
+fn test_state() -> ControllerState {
+    ControllerState::new(b"test-key-for-agent-service!!!!")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineService as _;
+
+    /// Helper to submit a pipeline and return the run_id.
+    async fn submit_pipeline(state: &ControllerState) -> String {
+        let svc = crate::pipeline_service::PipelineServiceImpl::new(state.clone());
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+        svc.submit_pipeline(Request::new(SubmitPipelineRequest {
+            pipeline_yaml_utf8: yaml.to_vec(),
+            execution: Some(ExecutionOptions {
+                dry_run: false,
+                limit: None,
+            }),
+            idempotency_key: String::new(),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .run_id
+    }
+
+    #[tokio::test]
+    async fn test_register_agent_returns_uuid() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state);
+
+        let resp = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 2,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: "hash".into(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!resp.agent_id.is_empty());
+        // Should be a valid UUID
+        assert!(uuid::Uuid::parse_str(&resp.agent_id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_poll_task_returns_pending_task() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+
+        // Register agent
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        // Submit a pipeline
+        let _run_id = submit_pipeline(&state).await;
+
+        // Poll — should get the task immediately (wait_seconds=0)
+        let resp = svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id,
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        match resp.result {
+            Some(poll_task_response::Result::Task(t)) => {
+                assert!(!t.task_id.is_empty());
+                assert!(t.lease_epoch > 0);
+            }
+            _ => panic!("Expected a task assignment"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_complete_task_with_stale_epoch_returns_unacknowledged() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+
+        // Register + submit + poll
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        submit_pipeline(&state).await;
+
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(t)) => t,
+            _ => panic!("Expected task"),
+        };
+
+        // Complete with wrong epoch
+        let resp = svc
+            .complete_task(Request::new(CompleteTaskRequest {
+                agent_id,
+                task_id: task.task_id,
+                lease_epoch: task.lease_epoch + 999,
+                outcome: TaskOutcome::Completed.into(),
+                error: None,
+                metrics: None,
+                preview: None,
+                backend_run_id: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!resp.acknowledged);
+    }
+
+    #[tokio::test]
+    async fn test_complete_task_safe_to_retry_requeues() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(t)) => t,
+            _ => panic!("Expected task"),
+        };
+
+        // Complete with retryable + safe_to_retry
+        svc.complete_task(Request::new(CompleteTaskRequest {
+            agent_id: agent_id.clone(),
+            task_id: task.task_id,
+            lease_epoch: task.lease_epoch,
+            outcome: TaskOutcome::Failed.into(),
+            error: Some(TaskError {
+                code: "CONN_RESET".into(),
+                message: "connection reset".into(),
+                retryable: true,
+                safe_to_retry: true,
+                commit_state: "before_commit".into(),
+            }),
+            metrics: None,
+            preview: None,
+            backend_run_id: 0,
+        }))
+        .await
+        .unwrap();
+
+        // Should be requeued — poll again
+        let resp = svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id,
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        match resp.result {
+            Some(poll_task_response::Result::Task(t)) => {
+                assert_eq!(t.run_id, run_id);
+                assert_eq!(t.attempt, 2);
+            }
+            _ => panic!("Expected requeued task"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_complete_task_unsafe_does_not_requeue() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        submit_pipeline(&state).await;
+
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(t)) => t,
+            _ => panic!("Expected task"),
+        };
+
+        // Complete with safe_to_retry=false
+        svc.complete_task(Request::new(CompleteTaskRequest {
+            agent_id: agent_id.clone(),
+            task_id: task.task_id,
+            lease_epoch: task.lease_epoch,
+            outcome: TaskOutcome::Failed.into(),
+            error: Some(TaskError {
+                code: "DATA_ERROR".into(),
+                message: "schema mismatch".into(),
+                retryable: true,
+                safe_to_retry: false,
+                commit_state: "after_commit_unknown".into(),
+            }),
+            metrics: None,
+            preview: None,
+            backend_run_id: 0,
+        }))
+        .await
+        .unwrap();
+
+        // Should NOT be requeued — poll returns empty
+        let resp = svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id,
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        match resp.result {
+            Some(poll_task_response::Result::NoTask(_)) => {} // expected
+            None => {}                                        // also fine
+            _ => panic!("Expected no task"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_returns_cancel_directive_for_cancelling_run() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(t)) => t,
+            _ => panic!("Expected task"),
+        };
+
+        // Transition to Running then Cancelling
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Running).unwrap();
+            runs.transition(&run_id, InternalRunState::Cancelling)
+                .unwrap();
+        }
+
+        // Heartbeat should return a cancel directive
+        let resp = svc
+            .heartbeat(Request::new(HeartbeatRequest {
+                agent_id,
+                active_leases: vec![ActiveLease {
+                    task_id: task.task_id.clone(),
+                    lease_epoch: task.lease_epoch,
+                }],
+                active_tasks: 1,
+                cpu_usage: 0.0,
+                memory_used_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.directives.len(), 1);
+        match &resp.directives[0].directive {
+            Some(agent_directive::Directive::CancelTask(ct)) => {
+                assert_eq!(ct.task_id, task.task_id);
+            }
+            _ => panic!("Expected CancelTask directive"),
+        }
+    }
+}
