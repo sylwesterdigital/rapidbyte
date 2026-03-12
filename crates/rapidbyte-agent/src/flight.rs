@@ -55,16 +55,18 @@ impl FlightService for PreviewFlightService {
             .verify(&ticket_bytes)
             .map_err(|e| Status::unauthenticated(format!("Invalid ticket: {e}")))?;
 
-        let spool = self.spool.read().await;
-        let dry_run = spool
-            .get(&payload.task_id)
-            .ok_or_else(|| Status::not_found("Preview not found or expired"))?;
-
-        // Collect all batches across all streams
-        let mut all_batches = Vec::new();
-        for stream in &dry_run.streams {
-            all_batches.extend(stream.batches.iter().cloned());
-        }
+        // Clone batches under the spool lock, then release it before IPC encoding
+        let all_batches = {
+            let spool = self.spool.read().await;
+            let dry_run = spool
+                .get(&payload.task_id)
+                .ok_or_else(|| Status::not_found("Preview not found or expired"))?;
+            let mut batches = Vec::new();
+            for stream in &dry_run.streams {
+                batches.extend(stream.batches.iter().cloned());
+            }
+            batches
+        };
 
         if all_batches.is_empty() {
             let stream = tokio_stream::empty();
@@ -73,7 +75,7 @@ impl FlightService for PreviewFlightService {
 
         let schema = all_batches[0].schema();
 
-        // Convert schema to FlightData
+        // IPC encoding happens outside the spool lock
         let options = IpcWriteOptions::default();
         let schema_flight_data: FlightData = SchemaAsIpc::new(&schema, &options).into();
 

@@ -118,26 +118,19 @@ enum Commands {
     },
 }
 
-fn resolve_controller_url(cli_flag: Option<&str>) -> Option<String> {
-    if let Some(url) = cli_flag {
-        return Some(url.to_string());
-    }
-    // clap handles env var via `env = "RAPIDBYTE_CONTROLLER"`
-    // Fallback: config file
+/// Resolve controller URL from config file (`~/.rapidbyte/config.yaml`).
+/// CLI flag and env var are already handled by clap's `env` attribute.
+fn controller_url_from_config() -> Option<String> {
     let home = std::env::var("HOME").ok()?;
     let config_path = std::path::PathBuf::from(home)
         .join(".rapidbyte")
         .join("config.yaml");
-    if config_path.exists() {
-        let contents = std::fs::read_to_string(&config_path).ok()?;
-        let val: serde_yaml::Value = serde_yaml::from_str(&contents).ok()?;
-        val.get("controller")?
-            .get("url")?
-            .as_str()
-            .map(String::from)
-    } else {
-        None
-    }
+    let contents = std::fs::read_to_string(config_path).ok()?;
+    let val: serde_yaml::Value = serde_yaml::from_str(&contents).ok()?;
+    val.get("controller")?
+        .get("url")?
+        .as_str()
+        .map(String::from)
 }
 
 #[tokio::main]
@@ -148,7 +141,7 @@ async fn main() -> ExitCode {
 
     logging::init(&cli.log_level);
 
-    let controller_url = resolve_controller_url(cli.controller.as_deref());
+    let controller_url = cli.controller.or_else(controller_url_from_config);
 
     let result = match cli.command {
         Commands::Run {

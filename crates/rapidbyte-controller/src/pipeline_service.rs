@@ -101,16 +101,9 @@ impl PipelineService for PipelineServiceImpl {
 
         let run_id = uuid::Uuid::new_v4().to_string();
 
-        let actual_run_id = {
+        let (actual_run_id, is_new) = {
             let mut runs = self.state.runs.write().await;
             runs.create_run(run_id, pipeline_name, idempotency_key)
-        };
-
-        // Check if this was a dedup (idempotency hit) — if so, don't enqueue again
-        let is_new = {
-            let runs = self.state.runs.read().await;
-            let record = runs.get_run(&actual_run_id);
-            record.is_some_and(|r| r.state == InternalRunState::Pending)
         };
 
         if is_new {

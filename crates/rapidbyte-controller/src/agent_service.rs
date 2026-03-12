@@ -159,36 +159,35 @@ impl AgentService for AgentServiceImpl {
     ) -> Result<Response<ReportProgressResponse>, Status> {
         let req = request.into_inner();
 
-        // Validate the lease is still valid
-        {
+        // Validate lease and extract run_id (short lock scope)
+        let run_id = {
             let tasks = self.state.tasks.read().await;
-            if let Some(task) = tasks.get(&req.task_id) {
-                if let Some(lease) = &task.lease {
-                    if !lease.is_valid(req.lease_epoch) {
-                        return Err(Status::failed_precondition("Stale lease epoch"));
-                    }
-                }
-
-                // Transition run to Running if still Assigned
-                let mut runs = self.state.runs.write().await;
-                if let Some(run) = runs.get_run(&task.run_id) {
-                    if run.state == InternalRunState::Assigned {
-                        let _ = runs.transition(&task.run_id, InternalRunState::Running);
-                    }
-                }
-
-                // Forward progress to watchers
-                if let Some(progress) = req.progress {
-                    let watchers = self.state.watchers.read().await;
-                    watchers.publish(
-                        &task.run_id,
-                        RunEvent {
-                            run_id: task.run_id.clone(),
-                            event: Some(run_event::Event::Progress(progress)),
-                        },
-                    );
+            let Some(task) = tasks.get(&req.task_id) else {
+                return Ok(Response::new(ReportProgressResponse {}));
+            };
+            if let Some(lease) = &task.lease {
+                if !lease.is_valid(req.lease_epoch) {
+                    return Err(Status::failed_precondition("Stale lease epoch"));
                 }
             }
+            task.run_id.clone()
+        };
+        // tasks lock dropped here before acquiring runs/watchers
+
+        {
+            let mut runs = self.state.runs.write().await;
+            ensure_running(&mut runs, &run_id);
+        }
+
+        if let Some(progress) = req.progress {
+            let watchers = self.state.watchers.read().await;
+            watchers.publish(
+                &run_id,
+                RunEvent {
+                    run_id: run_id.clone(),
+                    event: Some(run_event::Event::Progress(progress)),
+                },
+            );
         }
 
         Ok(Response::new(ReportProgressResponse {}))
@@ -217,25 +216,23 @@ impl AgentService for AgentServiceImpl {
             }));
         }
 
-        // Get the run_id from the task
-        let (run_id, _attempt) = {
-            let tasks = self.state.tasks.read().await;
-            let task = tasks
-                .get(&req.task_id)
-                .ok_or_else(|| Status::not_found("Task not found"))?;
-            (task.run_id.clone(), task.attempt)
-        };
+        // Extract task data upfront (single lock acquisition avoids nested locks later)
+        let tasks = self.state.tasks.read().await;
+        let task_record = tasks
+            .get(&req.task_id)
+            .ok_or_else(|| Status::not_found("Task not found"))?;
+        let run_id = task_record.run_id.clone();
+        let attempt = task_record.attempt;
+        let task_yaml = task_record.pipeline_yaml.clone();
+        let task_dry_run = task_record.dry_run;
+        let task_limit = task_record.limit;
+        drop(tasks);
 
         // Transition run state and publish events
         match outcome {
             TaskOutcome::Completed => {
                 let mut runs = self.state.runs.write().await;
-                // Ensure run is in Running state first
-                if let Some(run) = runs.get_run(&run_id) {
-                    if run.state == InternalRunState::Assigned {
-                        let _ = runs.transition(&run_id, InternalRunState::Running);
-                    }
-                }
+                ensure_running(&mut runs, &run_id);
                 let _ = runs.transition(&run_id, InternalRunState::Completed);
 
                 // Store preview if provided
@@ -251,21 +248,24 @@ impl AgentService for AgentServiceImpl {
                     });
                 }
 
-                // Publish completion event
+                // Publish completion event, then clean up watcher channel
                 let metrics = req.metrics.as_ref();
-                let watchers = self.state.watchers.read().await;
-                watchers.publish(
-                    &run_id,
-                    RunEvent {
-                        run_id: run_id.clone(),
-                        event: Some(run_event::Event::Completed(RunCompleted {
-                            total_records: metrics.map_or(0, |m| m.records_processed),
-                            total_bytes: metrics.map_or(0, |m| m.bytes_processed),
-                            elapsed_seconds: metrics.map_or(0.0, |m| m.elapsed_seconds),
-                            cursors_advanced: metrics.map_or(0, |m| m.cursors_advanced),
-                        })),
-                    },
-                );
+                {
+                    let watchers = self.state.watchers.read().await;
+                    watchers.publish(
+                        &run_id,
+                        RunEvent {
+                            run_id: run_id.clone(),
+                            event: Some(run_event::Event::Completed(RunCompleted {
+                                total_records: metrics.map_or(0, |m| m.records_processed),
+                                total_bytes: metrics.map_or(0, |m| m.bytes_processed),
+                                elapsed_seconds: metrics.map_or(0.0, |m| m.elapsed_seconds),
+                                cursors_advanced: metrics.map_or(0, |m| m.cursors_advanced),
+                            })),
+                        },
+                    );
+                }
+                self.state.watchers.write().await.remove(&run_id);
             }
             TaskOutcome::Failed => {
                 let error = req.error.as_ref();
@@ -281,81 +281,87 @@ impl AgentService for AgentServiceImpl {
                     && commit_state != "after_commit_confirmed";
 
                 if should_retry {
-                    // Re-enqueue with incremented attempt
-                    let (yaml, dry_run, limit, attempt) = {
-                        let tasks = self.state.tasks.read().await;
-                        let task = tasks.get(&req.task_id).unwrap();
-                        (
-                            task.pipeline_yaml.clone(),
-                            task.dry_run,
-                            task.limit,
-                            task.attempt,
-                        )
-                    };
-
-                    let mut runs = self.state.runs.write().await;
-                    // Reset run to Pending for retry
-                    // Note: Running -> Failed is valid, then we create a new task
-                    let _ = runs.transition(&run_id, InternalRunState::Failed);
-
-                    // For retry, we create a new run entry or update attempt count
-                    if let Some(record) = runs.get_run_mut(&run_id) {
-                        record.attempt += 1;
-                        record.state = InternalRunState::Pending;
+                    // Re-enqueue with incremented attempt (using pre-extracted task data)
+                    {
+                        let mut runs = self.state.runs.write().await;
+                        let _ = runs.transition(&run_id, InternalRunState::Failed);
+                        if let Some(record) = runs.get_run_mut(&run_id) {
+                            record.attempt += 1;
+                            record.state = InternalRunState::Pending;
+                        }
                     }
 
-                    let mut tasks = self.state.tasks.write().await;
-                    tasks.enqueue(run_id.clone(), yaml, dry_run, limit, attempt + 1);
+                    {
+                        let mut tasks = self.state.tasks.write().await;
+                        tasks.enqueue(
+                            run_id.clone(),
+                            task_yaml,
+                            task_dry_run,
+                            task_limit,
+                            attempt + 1,
+                        );
+                    }
                     self.state.task_notify.notify_waiters();
 
                     tracing::info!(run_id, attempt = attempt + 1, "Auto-requeued failed task");
                 } else {
                     // No retry — mark as failed
-                    let mut runs = self.state.runs.write().await;
-                    if let Some(run) = runs.get_run(&run_id) {
-                        if run.state == InternalRunState::Assigned {
-                            let _ = runs.transition(&run_id, InternalRunState::Running);
+                    {
+                        let mut runs = self.state.runs.write().await;
+                        ensure_running(&mut runs, &run_id);
+                        let _ = runs.transition(&run_id, InternalRunState::Failed);
+                        if let Some(record) = runs.get_run_mut(&run_id) {
+                            record.error_message =
+                                error.map(|e| format!("{}: {}", e.code, e.message));
                         }
                     }
-                    let _ = runs.transition(&run_id, InternalRunState::Failed);
-                    if let Some(record) = runs.get_run_mut(&run_id) {
-                        record.error_message = error.map(|e| format!("{}: {}", e.code, e.message));
-                    }
 
-                    // Publish failure event
-                    let watchers = self.state.watchers.read().await;
-                    watchers.publish(
-                        &run_id,
-                        RunEvent {
-                            run_id: run_id.clone(),
-                            event: Some(run_event::Event::Failed(RunFailed {
-                                error: req.error,
-                                attempt: {
-                                    let tasks = self.state.tasks.read().await;
-                                    tasks.get(&req.task_id).map_or(1, |t| t.attempt)
-                                },
-                            })),
-                        },
-                    );
+                    // Publish failure event (attempt extracted upfront, no nested lock)
+                    {
+                        let watchers = self.state.watchers.read().await;
+                        watchers.publish(
+                            &run_id,
+                            RunEvent {
+                                run_id: run_id.clone(),
+                                event: Some(run_event::Event::Failed(RunFailed {
+                                    error: req.error,
+                                    attempt,
+                                })),
+                            },
+                        );
+                    }
+                    self.state.watchers.write().await.remove(&run_id);
                 }
             }
             TaskOutcome::Cancelled => {
                 let mut runs = self.state.runs.write().await;
                 let _ = runs.transition(&run_id, InternalRunState::Cancelled);
 
-                let watchers = self.state.watchers.read().await;
-                watchers.publish(
-                    &run_id,
-                    RunEvent {
-                        run_id: run_id.clone(),
-                        event: Some(run_event::Event::Cancelled(RunCancelled {})),
-                    },
-                );
+                {
+                    let watchers = self.state.watchers.read().await;
+                    watchers.publish(
+                        &run_id,
+                        RunEvent {
+                            run_id: run_id.clone(),
+                            event: Some(run_event::Event::Cancelled(RunCancelled {})),
+                        },
+                    );
+                }
+                self.state.watchers.write().await.remove(&run_id);
             }
             TaskOutcome::Unspecified => {}
         }
 
         Ok(Response::new(CompleteTaskResponse { acknowledged: true }))
+    }
+}
+
+/// Idempotent transition from Assigned to Running (no-op if already Running or later).
+fn ensure_running(runs: &mut crate::run_state::RunStore, run_id: &str) {
+    if let Some(run) = runs.get_run(run_id) {
+        if run.state == InternalRunState::Assigned {
+            let _ = runs.transition(run_id, InternalRunState::Running);
+        }
     }
 }
 

@@ -68,16 +68,19 @@ impl RunStore {
 
     /// Create a new run. If an idempotency key is provided and already exists,
     /// returns the existing `run_id` instead.
+    ///
+    /// Returns `(run_id, is_new)` where `is_new` is `true` if the run was newly
+    /// created, or `false` if an existing run was returned via idempotency dedup.
     pub fn create_run(
         &mut self,
         run_id: String,
         pipeline_name: String,
         idempotency_key: Option<String>,
-    ) -> String {
+    ) -> (String, bool) {
         // Check idempotency
         if let Some(key) = &idempotency_key {
             if let Some(existing_id) = self.idempotency_index.get(key) {
-                return existing_id.clone();
+                return (existing_id.clone(), false);
             }
         }
 
@@ -98,7 +101,7 @@ impl RunStore {
         if let Some(key) = idempotency_key {
             self.idempotency_index.insert(key, run_id.clone());
         }
-        run_id
+        (run_id, true)
     }
 
     #[must_use]
@@ -186,7 +189,8 @@ mod tests {
     #[test]
     fn create_run_starts_pending() {
         let mut store = RunStore::new();
-        let id = store.create_run("r1".into(), "pipe".into(), None);
+        let (id, is_new) = store.create_run("r1".into(), "pipe".into(), None);
+        assert!(is_new);
         let run = store.get_run(&id).unwrap();
         assert_eq!(run.state, RunState::Pending);
     }
@@ -296,8 +300,10 @@ mod tests {
     #[test]
     fn idempotency_key_returns_existing_run() {
         let mut store = RunStore::new();
-        let id1 = store.create_run("r1".into(), "pipe".into(), Some("key1".into()));
-        let id2 = store.create_run("r2".into(), "pipe".into(), Some("key1".into()));
+        let (id1, new1) = store.create_run("r1".into(), "pipe".into(), Some("key1".into()));
+        let (id2, new2) = store.create_run("r2".into(), "pipe".into(), Some("key1".into()));
+        assert!(new1);
+        assert!(!new2);
         assert_eq!(id1, id2);
         assert_eq!(id1, "r1");
     }
@@ -305,8 +311,8 @@ mod tests {
     #[test]
     fn different_idempotency_key_creates_new_run() {
         let mut store = RunStore::new();
-        let id1 = store.create_run("r1".into(), "pipe".into(), Some("key1".into()));
-        let id2 = store.create_run("r2".into(), "pipe".into(), Some("key2".into()));
+        let (id1, _) = store.create_run("r1".into(), "pipe".into(), Some("key1".into()));
+        let (id2, _) = store.create_run("r2".into(), "pipe".into(), Some("key2".into()));
         assert_ne!(id1, id2);
     }
 }
