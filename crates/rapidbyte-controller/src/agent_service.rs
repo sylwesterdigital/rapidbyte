@@ -12,7 +12,7 @@ use crate::proto::rapidbyte::v1::{
     RunCancelled, RunCompleted, RunEvent, RunFailed, TaskAssignment, TaskOutcome,
 };
 use crate::run_state::RunState as InternalRunState;
-use crate::scheduler::TaskState;
+use crate::scheduler::{TaskState, TerminalTaskOutcome};
 use crate::state::ControllerState;
 
 /// Default lease TTL for assigned tasks.
@@ -310,11 +310,21 @@ impl AgentService for AgentServiceImpl {
 
         // Complete the task in the scheduler (validates lease epoch).
         // Returns run_id and attempt alongside acknowledgement to avoid a second lock.
-        let succeeded = outcome == TaskOutcome::Completed;
+        let scheduler_outcome = match outcome {
+            TaskOutcome::Completed => TerminalTaskOutcome::Completed,
+            TaskOutcome::Failed => TerminalTaskOutcome::Failed,
+            TaskOutcome::Cancelled => TerminalTaskOutcome::Cancelled,
+            TaskOutcome::Unspecified => unreachable!("invalid task outcome rejected above"),
+        };
         let (run_id, attempt) = {
             let mut tasks = self.state.tasks.write().await;
             match tasks
-                .complete(&req.task_id, &req.agent_id, req.lease_epoch, succeeded)
+                .complete(
+                    &req.task_id,
+                    &req.agent_id,
+                    req.lease_epoch,
+                    scheduler_outcome,
+                )
                 .map_err(|e| Status::not_found(e.to_string()))?
             {
                 Some(info) => info,
@@ -1041,6 +1051,11 @@ mod tests {
 
         assert!(resp.acknowledged);
 
+        let tasks = state.tasks.read().await;
+        let task_record = tasks.get(&task.task_id).unwrap();
+        assert_eq!(task_record.state, TaskState::Cancelled);
+        drop(tasks);
+
         let runs = state.runs.read().await;
         let run = runs.get_run(&run_id).unwrap();
         assert_eq!(run.state, InternalRunState::Cancelled);
@@ -1090,7 +1105,7 @@ mod tests {
         let resp = svc
             .complete_task(Request::new(CompleteTaskRequest {
                 agent_id,
-                task_id: task.task_id,
+                task_id: task.task_id.clone(),
                 lease_epoch: task.lease_epoch,
                 outcome: TaskOutcome::Cancelled.into(),
                 error: None,
@@ -1103,6 +1118,11 @@ mod tests {
             .into_inner();
 
         assert!(resp.acknowledged);
+
+        let tasks = state.tasks.read().await;
+        let task_record = tasks.get(&task.task_id).unwrap();
+        assert_eq!(task_record.state, TaskState::Cancelled);
+        drop(tasks);
 
         let runs = state.runs.read().await;
         let run = runs.get_run(&run_id).unwrap();

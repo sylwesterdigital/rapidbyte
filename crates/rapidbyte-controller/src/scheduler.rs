@@ -29,6 +29,13 @@ pub enum TaskState {
     TimedOut,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalTaskOutcome {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
 /// A task record in the scheduler.
 #[derive(Debug, Clone)]
 pub struct TaskRecord {
@@ -181,7 +188,7 @@ impl TaskQueue {
         task_id: &str,
         agent_id: &str,
         lease_epoch: u64,
-        succeeded: bool,
+        outcome: TerminalTaskOutcome,
     ) -> Result<Option<(String, u32)>, SchedulerError> {
         let record = self
             .tasks
@@ -200,10 +207,10 @@ impl TaskQueue {
             return Ok(None);
         }
 
-        record.state = if succeeded {
-            TaskState::Completed
-        } else {
-            TaskState::Failed
+        record.state = match outcome {
+            TerminalTaskOutcome::Completed => TaskState::Completed,
+            TerminalTaskOutcome::Failed => TaskState::Failed,
+            TerminalTaskOutcome::Cancelled => TaskState::Cancelled,
         };
         record.lease = None;
         Ok(Some((record.run_id.clone(), record.attempt)))
@@ -405,7 +412,12 @@ mod tests {
         let assignment = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
 
         let ack = q
-            .complete(&assignment.task_id, "agent-1", assignment.lease_epoch, true)
+            .complete(
+                &assignment.task_id,
+                "agent-1",
+                assignment.lease_epoch,
+                TerminalTaskOutcome::Completed,
+            )
             .unwrap();
         assert!(ack.is_some());
         assert_eq!(
@@ -426,10 +438,31 @@ mod tests {
                 &assignment.task_id,
                 "agent-1",
                 assignment.lease_epoch + 999,
-                true,
+                TerminalTaskOutcome::Completed,
             )
             .unwrap();
         assert!(ack.is_none());
+    }
+
+    #[test]
+    fn complete_with_cancelled_outcome_persists_cancelled_state() {
+        let (mut q, gen) = make_queue_and_gen();
+        q.enqueue("r1".into(), b"yaml".to_vec(), false, None, 1);
+        let assignment = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
+
+        let ack = q
+            .complete(
+                &assignment.task_id,
+                "agent-1",
+                assignment.lease_epoch,
+                TerminalTaskOutcome::Cancelled,
+            )
+            .unwrap();
+        assert!(ack.is_some());
+        assert_eq!(
+            q.get(&assignment.task_id).unwrap().state,
+            TaskState::Cancelled
+        );
     }
 
     #[test]
@@ -597,8 +630,13 @@ mod tests {
 
         assert_eq!(q.active_tasks_for_agent("agent-1"), 2);
 
-        q.complete(&first.task_id, "agent-1", first.lease_epoch, true)
-            .unwrap();
+        q.complete(
+            &first.task_id,
+            "agent-1",
+            first.lease_epoch,
+            TerminalTaskOutcome::Completed,
+        )
+        .unwrap();
         assert_eq!(q.active_tasks_for_agent("agent-1"), 1);
 
         q.cancel(&second.task_id).unwrap();
