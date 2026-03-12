@@ -239,7 +239,11 @@ fn is_valid_transition(from: RunState, to: RunState) -> bool {
         (RunState::Pending, RunState::Assigned | RunState::Cancelled)
             | (
                 RunState::Assigned,
-                RunState::Running | RunState::Failed | RunState::Cancelled | RunState::TimedOut
+                RunState::Running
+                    | RunState::Failed
+                    | RunState::Cancelled
+                    | RunState::TimedOut
+                    | RunState::Cancelling
             )
             | (
                 RunState::Running | RunState::PreviewReady,

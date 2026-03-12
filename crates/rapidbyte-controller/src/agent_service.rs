@@ -1341,6 +1341,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_heartbeat_returns_cancel_directive_for_assigned_run_cancelled_via_pipeline_service(
+    ) {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+        let pipeline_svc = crate::pipeline_service::PipelineServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(t)) => t,
+            _ => panic!("Expected task"),
+        };
+
+        let cancel = pipeline_svc
+            .cancel_run(Request::new(
+                crate::proto::rapidbyte::v1::CancelRunRequest {
+                    run_id: run_id.clone(),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(cancel.accepted);
+
+        {
+            let runs = state.runs.read().await;
+            assert_eq!(
+                runs.get_run(&run_id).unwrap().state,
+                InternalRunState::Cancelling
+            );
+        }
+        {
+            let tasks = state.tasks.read().await;
+            let record = tasks.get(&task.task_id).unwrap();
+            assert_eq!(record.state, TaskState::Assigned);
+            assert!(record.lease.is_some());
+        }
+
+        let resp = svc
+            .heartbeat(Request::new(HeartbeatRequest {
+                agent_id,
+                active_leases: vec![ActiveLease {
+                    task_id: task.task_id.clone(),
+                    lease_epoch: task.lease_epoch,
+                }],
+                active_tasks: 1,
+                cpu_usage: 0.0,
+                memory_used_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.directives.len(), 1);
+        match &resp.directives[0].directive {
+            Some(agent_directive::Directive::CancelTask(ct)) => {
+                assert_eq!(ct.task_id, task.task_id);
+            }
+            _ => panic!("Expected CancelTask directive"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_heartbeat_does_not_return_cancel_directive_for_foreign_lease() {
         let state = test_state();
         let svc = AgentServiceImpl::new(state.clone());

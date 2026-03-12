@@ -192,16 +192,14 @@ impl PipelineServiceImpl {
         snapshot_state: InternalRunState,
     ) -> Result<CancelRunResponse, Status> {
         if let Some(response) = self
-            .transition_or_retry(run_id, snapshot_state, InternalRunState::Cancelled)
+            .transition_or_retry(run_id, snapshot_state, InternalRunState::Cancelling)
             .await?
         {
             return Ok(response);
         }
-        self.cancel_latest_task(run_id).await;
-        self.publish_cancelled(run_id).await;
         Ok(CancelRunResponse {
             accepted: true,
-            message: "Assigned run cancelled".into(),
+            message: "Assigned — cancel will be delivered via heartbeat".into(),
         })
     }
 
@@ -791,7 +789,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cancel_assigned_run_returns_cancelled() {
+    async fn test_cancel_assigned_run_enters_cancelling_without_clearing_task() {
         let state = test_state();
         let svc = PipelineServiceImpl::new(state.clone());
 
@@ -836,20 +834,19 @@ mod tests {
             .into_inner();
 
         assert!(resp.accepted);
-        assert!(resp.message.contains("cancelled"));
+        assert!(resp.message.contains("heartbeat"));
 
         let runs = state.runs.read().await;
         assert_eq!(
             runs.get_run(&run_id).unwrap().state,
-            InternalRunState::Cancelled
+            InternalRunState::Cancelling
         );
         drop(runs);
 
         let tasks = state.tasks.read().await;
-        assert_eq!(
-            tasks.get(&task_id).unwrap().state,
-            crate::scheduler::TaskState::Cancelled
-        );
+        let task = tasks.get(&task_id).unwrap();
+        assert_eq!(task.state, crate::scheduler::TaskState::Assigned);
+        assert!(task.lease.is_some());
     }
 
     #[tokio::test]
