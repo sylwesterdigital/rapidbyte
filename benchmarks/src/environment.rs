@@ -13,7 +13,20 @@ pub struct EnvironmentProfile {
     pub id: String,
     pub provider: EnvironmentProvider,
     pub services: BTreeMap<String, EnvironmentService>,
+    #[serde(default)]
+    pub distributed: Option<DistributedRuntimeProfile>,
     pub bindings: EnvironmentBindings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DistributedRuntimeProfile {
+    pub controller_url: String,
+    #[serde(default)]
+    pub controller_auth_token: Option<String>,
+    pub signing_key: String,
+    pub agent_flight_url: String,
+    #[serde(default = "default_agent_count")]
+    pub agent_count: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -102,8 +115,15 @@ impl EnvironmentProfile {
     pub fn from_path(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("failed to read environment profile {}", path.display()))?;
-        serde_yaml::from_str(&content)
-            .with_context(|| format!("failed to parse environment profile {}", path.display()))
+        let profile: Self = serde_yaml::from_str(&content)
+            .with_context(|| format!("failed to parse environment profile {}", path.display()))?;
+        validate_environment_profile(&profile).with_context(|| {
+            format!(
+                "environment profile {} has invalid distributed environment configuration",
+                path.display()
+            )
+        })?;
+        Ok(profile)
     }
 }
 
@@ -191,6 +211,31 @@ pub fn resolve_environment_profile(root: &Path, id_or_path: &str) -> Result<Envi
             .join(format!("{id_or_path}.yaml"))
     };
     EnvironmentProfile::from_path(&path)
+}
+
+fn default_agent_count() -> u16 {
+    1
+}
+
+fn validate_environment_profile(profile: &EnvironmentProfile) -> Result<()> {
+    let Some(distributed) = profile.distributed.as_ref() else {
+        return Ok(());
+    };
+
+    if distributed.controller_url.trim().is_empty() {
+        anyhow::bail!("distributed.controller_url must not be empty");
+    }
+    if distributed.signing_key.trim().is_empty() {
+        anyhow::bail!("distributed.signing_key must not be empty");
+    }
+    if distributed.agent_flight_url.trim().is_empty() {
+        anyhow::bail!("distributed.agent_flight_url must not be empty");
+    }
+    if distributed.agent_count == 0 {
+        anyhow::bail!("distributed.agent_count must be at least 1");
+    }
+
+    Ok(())
 }
 
 pub fn apply_environment_overrides(profile: &mut EnvironmentProfile) -> Result<()> {
@@ -485,6 +530,117 @@ bindings:
         assert_eq!(profile.services["postgres"].port, 55433);
         assert_eq!(profile.bindings.source.schema, "public");
         assert_eq!(profile.bindings.destination.schema, "raw");
+        assert!(profile.distributed.is_none());
+    }
+
+    #[test]
+    fn parses_distributed_runtime_profile_metadata() {
+        let root = temp_dir("distributed-profile");
+        let profile_path = root.join("local-bench-distributed-postgres.yaml");
+        fs::write(
+            &profile_path,
+            r#"
+id: local-bench-distributed-postgres
+provider:
+  kind: docker_compose
+  project_dir: benchmarks
+  project_name: rapidbyte-bench-distributed
+services:
+  postgres:
+    kind: postgres
+    host: 127.0.0.1
+    port: 55433
+    user: postgres
+    password: postgres
+    database: rapidbyte_test
+distributed:
+  controller_url: http://127.0.0.1:56090
+  controller_auth_token: bench-token
+  signing_key: bench-signing-key
+  agent_flight_url: http://127.0.0.1:56091
+  agent_count: 1
+bindings:
+  source:
+    service: postgres
+    schema: public
+  destination:
+    service: postgres
+    schema: raw
+"#,
+        )
+        .expect("write distributed environment profile");
+
+        let profile = EnvironmentProfile::from_path(&profile_path).expect("parse profile");
+
+        let distributed = profile.distributed.expect("distributed profile metadata");
+        assert_eq!(distributed.controller_url, "http://127.0.0.1:56090");
+        assert_eq!(
+            distributed.controller_auth_token.as_deref(),
+            Some("bench-token")
+        );
+        assert_eq!(distributed.signing_key, "bench-signing-key");
+        assert_eq!(distributed.agent_flight_url, "http://127.0.0.1:56091");
+        assert_eq!(distributed.agent_count, 1);
+    }
+
+    #[test]
+    fn committed_distributed_bench_profile_parses_with_runtime_endpoints() {
+        let profile_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("environments/local-bench-distributed-postgres.yaml");
+
+        let profile = EnvironmentProfile::from_path(&profile_path).expect("parse profile");
+
+        assert_eq!(profile.id, "local-bench-distributed-postgres");
+        assert_eq!(profile.provider.kind, "docker_compose");
+        assert_eq!(
+            profile.provider.project_name.as_deref(),
+            Some("rapidbyte-bench-distributed")
+        );
+        assert_eq!(profile.services["postgres"].port, 55433);
+        assert_eq!(profile.bindings.source.schema, "public");
+        assert_eq!(profile.bindings.destination.schema, "raw");
+        let distributed = profile.distributed.expect("distributed profile metadata");
+        assert_eq!(distributed.controller_url, "http://127.0.0.1:56090");
+        assert_eq!(distributed.agent_flight_url, "http://127.0.0.1:56091");
+        assert_eq!(distributed.agent_count, 1);
+    }
+
+    #[test]
+    fn distributed_profile_requires_signing_key_when_runtime_is_declared() {
+        let root = temp_dir("distributed-profile-invalid");
+        let profile_path = root.join("invalid.yaml");
+        fs::write(
+            &profile_path,
+            r#"
+id: local-bench-distributed-postgres
+provider:
+  kind: existing
+services:
+  postgres:
+    kind: postgres
+    host: localhost
+    port: 5433
+    user: postgres
+    password: postgres
+    database: rapidbyte_test
+distributed:
+  controller_url: http://127.0.0.1:56090
+  agent_flight_url: http://127.0.0.1:56091
+bindings:
+  source:
+    service: postgres
+    schema: public
+  destination:
+    service: postgres
+    schema: raw
+"#,
+        )
+        .expect("write invalid distributed environment profile");
+
+        let err = EnvironmentProfile::from_path(&profile_path).expect_err("should reject");
+        let message = format!("{err:#}");
+        assert!(message.contains("failed to parse environment profile"));
+        assert!(message.contains("missing field `signing_key`"));
     }
 
     #[test]
@@ -532,6 +688,7 @@ bindings:
                         database: "rapidbyte_test".to_string(),
                     },
                 )]),
+                distributed: None,
                 bindings: EnvironmentBindings {
                     source: EnvironmentBinding {
                         service: "postgres".to_string(),
@@ -855,6 +1012,7 @@ bindings:
                     database: "rapidbyte_test".to_string(),
                 },
             )]),
+            distributed: None,
             bindings: EnvironmentBindings {
                 source: EnvironmentBinding {
                     service: "postgres".to_string(),

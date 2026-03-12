@@ -1527,6 +1527,7 @@ mod tests {
                     database: "rapidbyte_test".to_string(),
                 },
             )]),
+            distributed: None,
             bindings: EnvironmentBindings {
                 source: EnvironmentBinding {
                     service: "postgres".to_string(),

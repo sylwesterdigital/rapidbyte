@@ -1,0 +1,26 @@
+id: local-bench-distributed-postgres
+provider:
+  kind: docker_compose
+  project_dir: benchmarks/distributed
+  project_name: rapidbyte-bench-distributed
+services:
+  postgres:
+    kind: postgres
+    host: 127.0.0.1
+    port: 55433
+    user: postgres
+    password: postgres
+    database: rapidbyte_test
+distributed:
+  controller_url: http://127.0.0.1:56090
+  controller_auth_token: rapidbyte-bench-token
+  signing_key: rapidbyte-bench-signing-key
+  agent_flight_url: http://127.0.0.1:56091
+  agent_count: 1
+bindings:
+  source:
+    service: postgres
+    schema: public
+  destination:
+    service: postgres
+    schema: raw
