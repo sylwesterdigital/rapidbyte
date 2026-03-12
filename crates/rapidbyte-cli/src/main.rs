@@ -177,7 +177,14 @@ async fn main() -> ExitCode {
         Commands::Controller {
             listen,
             signing_key,
-        } => commands::controller::execute(&listen, signing_key.as_deref()).await,
+        } => {
+            commands::controller::execute(
+                &listen,
+                signing_key.as_deref(),
+                cli.auth_token.as_deref(),
+            )
+            .await
+        }
         Commands::Agent {
             controller,
             flight_listen,

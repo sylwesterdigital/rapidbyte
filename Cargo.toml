@@ -57,5 +57,5 @@ hmac = "0.12"
 sha2 = "0.10"
 bytes = "1"
 tower = { version = "0.5", features = ["full"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tokio-util = { version = "0.7", features = ["rt"] }

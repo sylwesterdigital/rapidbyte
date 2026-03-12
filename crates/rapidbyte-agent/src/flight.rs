@@ -124,13 +124,17 @@ impl FlightService for PreviewFlightService {
         let (batches, total_rows, total_bytes) = self.lookup_stream(&payload).await?;
         let endpoint = FlightEndpoint::new().with_ticket(Ticket::new(descriptor.cmd.clone()));
 
-        let info = FlightInfo::new()
-            .try_with_schema(batches[0].schema().as_ref())
-            .map_err(|e| Status::internal(format!("Failed to encode preview schema: {e}")))?
-            .with_endpoint(endpoint)
-            .with_descriptor(descriptor)
-            .with_total_records(total_rows.cast_signed())
-            .with_total_bytes(total_bytes.cast_signed());
+        let info = if let Some(first_batch) = batches.first() {
+            FlightInfo::new()
+                .try_with_schema(first_batch.schema().as_ref())
+                .map_err(|e| Status::internal(format!("Failed to encode preview schema: {e}")))?
+        } else {
+            FlightInfo::new()
+        }
+        .with_endpoint(endpoint)
+        .with_descriptor(descriptor)
+        .with_total_records(total_rows.cast_signed())
+        .with_total_bytes(total_bytes.cast_signed());
 
         Ok(Response::new(info))
     }
@@ -279,6 +283,21 @@ mod tests {
         }
     }
 
+    fn empty_stream_result() -> DryRunResult {
+        DryRunResult {
+            streams: vec![DryRunStreamResult {
+                stream_name: "empty".into(),
+                batches: vec![],
+                total_rows: 0,
+                total_bytes: 0,
+            }],
+            source: SourceTiming::default(),
+            transform_count: 0,
+            transform_duration_secs: 0.0,
+            duration_secs: 1.0,
+        }
+    }
+
     #[tokio::test]
     async fn do_get_returns_only_requested_stream_batches() {
         let (service, key, spool) = make_service();
@@ -345,5 +364,39 @@ mod tests {
             ticket.as_slice()
         );
         assert!(info.flight_descriptor.is_some());
+    }
+
+    #[tokio::test]
+    async fn get_flight_info_supports_empty_preview_stream() {
+        let (service, key, spool) = make_service();
+        spool
+            .write()
+            .await
+            .store("task-1".into(), empty_stream_result());
+
+        let ticket = sign_ticket(
+            &key,
+            &crate::ticket::TicketPayload {
+                run_id: "run-1".into(),
+                task_id: "task-1".into(),
+                stream_name: "empty".into(),
+                lease_epoch: 1,
+                expires_at_unix: future_expiry(),
+            },
+        );
+
+        let info = service
+            .get_flight_info(Request::new(FlightDescriptor::new_cmd(ticket.clone())))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(info.total_records, 0);
+        assert_eq!(info.total_bytes, 0);
+        assert_eq!(info.endpoint.len(), 1);
+        assert_eq!(
+            info.endpoint[0].ticket.as_ref().unwrap().ticket.as_ref(),
+            ticket.as_slice()
+        );
     }
 }

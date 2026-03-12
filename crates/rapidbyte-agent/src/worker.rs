@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinSet;
+use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use tracing::{error, info, warn};
@@ -73,6 +74,11 @@ enum WorkerPoll<T> {
 /// is rejected, or the Flight server address cannot be parsed.
 #[allow(clippy::too_many_lines)]
 pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
+    // Bind Flight first so startup fails fast before the agent registers
+    // itself as preview-capable.
+    let flight_listener = tokio::net::TcpListener::bind(&config.flight_listen).await?;
+    let flight_addr = flight_listener.local_addr()?;
+
     let channel = Channel::from_shared(config.controller_url.clone())?
         .connect()
         .await?;
@@ -83,12 +89,11 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
     let verifier = Arc::new(TicketVerifier::new(&config.signing_key));
     let flight_svc = PreviewFlightService::new(spool.clone(), verifier);
 
-    let flight_addr: std::net::SocketAddr = config.flight_listen.parse()?;
     info!(addr = %flight_addr, "Starting Flight server");
     tokio::spawn(async move {
         if let Err(e) = tonic::transport::Server::builder()
             .add_service(flight_svc.into_server())
-            .serve(flight_addr)
+            .serve_with_incoming(TcpListenerStream::new(flight_listener))
             .await
         {
             error!(error = %e, "Flight server failed");
@@ -600,5 +605,26 @@ mod tests {
         assert_eq!(started.load(Ordering::SeqCst), 2);
         release.notify_waiters();
         pool.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_fails_when_flight_listener_is_unavailable() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let err = run(AgentConfig {
+            controller_url: "http://127.0.0.1:1".into(),
+            flight_listen: addr.to_string(),
+            flight_advertise: addr.to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("address already in use") || msg.contains("addrinuse"),
+            "unexpected error: {err:#}"
+        );
     }
 }

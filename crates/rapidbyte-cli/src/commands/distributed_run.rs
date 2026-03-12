@@ -88,16 +88,12 @@ pub async fn execute(
                         );
                     }
 
-                    // If dry-run (including --limit), fetch preview via Flight
                     if effective_dry_run {
-                        if let Err(e) =
+                        handle_preview_result(
+                            true,
                             fetch_and_display_preview(&mut client, &run_id, verbosity, auth_token)
-                                .await
-                        {
-                            if verbosity != Verbosity::Quiet {
-                                eprintln!("Preview fetch failed: {e:#}");
-                            }
-                        }
+                                .await,
+                        )?;
                     }
 
                     return Ok(());
@@ -113,7 +109,7 @@ pub async fn execute(
         }
     }
 
-    Ok(())
+    ensure_terminal_event_received(false)
 }
 
 /// Fetch preview data from the agent's Flight endpoint and display it.
@@ -236,6 +232,23 @@ where
     Ok(results)
 }
 
+fn handle_preview_result(effective_dry_run: bool, preview_result: Result<()>) -> Result<()> {
+    if effective_dry_run {
+        preview_result?;
+    } else if let Err(e) = preview_result {
+        tracing::warn!(error = %e, "Preview fetch failed");
+    }
+    Ok(())
+}
+
+fn ensure_terminal_event_received(seen_terminal: bool) -> Result<()> {
+    if seen_terminal {
+        Ok(())
+    } else {
+        anyhow::bail!("WatchRun stream ended before a terminal event was received");
+    }
+}
+
 fn request_with_bearer<T>(message: T, auth_token: Option<&str>) -> tonic::Request<T> {
     let mut request = tonic::Request::new(message);
     if let Some(token) = auth_token {
@@ -354,5 +367,23 @@ mod tests {
             None,
         );
         assert!(request.metadata().get("authorization").is_none());
+    }
+
+    #[test]
+    fn watch_run_eof_before_terminal_is_error() {
+        let err = ensure_terminal_event_received(false).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("ended before a terminal event was received"));
+    }
+
+    #[test]
+    fn dry_run_preview_failure_is_error() {
+        let err = handle_preview_result(
+            true,
+            Err(anyhow::anyhow!("Flight DoGet failed for stream users")),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Flight DoGet failed"));
     }
 }
