@@ -50,6 +50,7 @@ pub struct AgentConfig {
     pub signing_key: Vec<u8>,
     pub preview_ttl: Duration,
     pub auth_token: Option<String>,
+    pub allow_insecure_default_signing_key: bool,
     pub controller_tls: Option<ClientTlsConfig>,
     pub flight_tls: Option<ServerTlsConfig>,
 }
@@ -66,6 +67,7 @@ impl Default for AgentConfig {
             signing_key: b"rapidbyte-dev-signing-key-not-for-production".to_vec(),
             preview_ttl: Duration::from_secs(300),
             auth_token: None,
+            allow_insecure_default_signing_key: false,
             controller_tls: None,
             flight_tls: None,
         }
@@ -77,6 +79,7 @@ impl Default for AgentConfig {
 type ActiveLeaseMap = Arc<RwLock<HashMap<String, (u64, CancellationToken)>>>;
 
 const COMPLETE_TASK_RETRY_DELAY: Duration = Duration::from_secs(1);
+const DEFAULT_SIGNING_KEY: &[u8] = b"rapidbyte-dev-signing-key-not-for-production";
 
 enum WorkerPoll<T> {
     Task(T),
@@ -92,6 +95,8 @@ enum WorkerPoll<T> {
 /// is rejected, or the Flight server address cannot be parsed.
 #[allow(clippy::too_many_lines)]
 pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
+    validate_signing_key_config(&config)?;
+
     // Bind Flight first so startup fails fast before the agent registers
     // itself as preview-capable.
     let flight_listener = tokio::net::TcpListener::bind(&config.flight_listen).await?;
@@ -205,6 +210,15 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
     pool_result?;
 
     info!("Agent stopped");
+    Ok(())
+}
+
+fn validate_signing_key_config(config: &AgentConfig) -> anyhow::Result<()> {
+    if config.signing_key == DEFAULT_SIGNING_KEY && !config.allow_insecure_default_signing_key {
+        anyhow::bail!(
+            "Agent preview signing key must be set explicitly. Pass --signing-key / RAPIDBYTE_SIGNING_KEY or --allow-insecure-default-signing-key for local development."
+        );
+    }
     Ok(())
 }
 
@@ -889,6 +903,7 @@ mod tests {
             controller_url: "http://127.0.0.1:1".into(),
             flight_listen: addr.to_string(),
             flight_advertise: addr.to_string(),
+            signing_key: b"test-signing-key".to_vec(),
             ..Default::default()
         })
         .await
@@ -899,5 +914,31 @@ mod tests {
             msg.contains("address already in use") || msg.contains("addrinuse"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[test]
+    fn default_signing_key_requires_explicit_override() {
+        let config = AgentConfig {
+            controller_url: "http://127.0.0.1:9090".into(),
+            flight_listen: "127.0.0.1:9091".into(),
+            flight_advertise: "127.0.0.1:9091".into(),
+            ..Default::default()
+        };
+        let err = validate_signing_key_config(&config).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("preview signing key must be set explicitly"));
+    }
+
+    #[test]
+    fn allow_insecure_default_signing_key_permits_dev_default() {
+        let config = AgentConfig {
+            controller_url: "http://127.0.0.1:9090".into(),
+            flight_listen: "127.0.0.1:9091".into(),
+            flight_advertise: "127.0.0.1:9091".into(),
+            allow_insecure_default_signing_key: true,
+            ..Default::default()
+        };
+        validate_signing_key_config(&config).unwrap();
     }
 }

@@ -8,6 +8,7 @@ pub async fn execute(
     signing_key: Option<&str>,
     auth_token: Option<&str>,
     allow_unauthenticated: bool,
+    allow_insecure_default_signing_key: bool,
     tls_cert: Option<&Path>,
     tls_key: Option<&Path>,
 ) -> Result<()> {
@@ -16,6 +17,7 @@ pub async fn execute(
         signing_key,
         auth_token,
         allow_unauthenticated,
+        allow_insecure_default_signing_key,
         tls_cert,
         tls_key,
     )?;
@@ -27,6 +29,7 @@ fn build_config(
     signing_key: Option<&str>,
     auth_token: Option<&str>,
     allow_unauthenticated: bool,
+    allow_insecure_default_signing_key: bool,
     tls_cert: Option<&Path>,
     tls_key: Option<&Path>,
 ) -> Result<rapidbyte_controller::ControllerConfig> {
@@ -52,9 +55,17 @@ fn build_config(
         config.auth_tokens = vec![token.to_string()];
     }
     config.allow_unauthenticated = allow_unauthenticated;
+    config.allow_insecure_default_signing_key = allow_insecure_default_signing_key;
     if config.auth_tokens.is_empty() && !config.allow_unauthenticated {
         anyhow::bail!(
             "controller requires --auth-token / RAPIDBYTE_AUTH_TOKEN or --allow-unauthenticated"
+        );
+    }
+    if config.signing_key == rapidbyte_controller::ControllerConfig::default().signing_key
+        && !config.allow_insecure_default_signing_key
+    {
+        anyhow::bail!(
+            "controller requires --signing-key / RAPIDBYTE_SIGNING_KEY or --allow-insecure-default-signing-key"
         );
     }
     match (tls_cert, tls_key) {
@@ -82,6 +93,7 @@ mod tests {
             Some("signing"),
             Some("secret"),
             false,
+            false,
             None,
             None,
         )
@@ -92,7 +104,7 @@ mod tests {
 
     #[test]
     fn controller_execute_requires_auth_or_explicit_override() {
-        let err = build_config("[::]:9090", None, None, false, None, None)
+        let err = build_config("[::]:9090", Some("signing"), None, false, false, None, None)
             .err()
             .unwrap();
         assert!(err.to_string().contains("controller requires --auth-token"));
@@ -100,25 +112,59 @@ mod tests {
 
     #[test]
     fn controller_execute_allows_explicit_unauthenticated_mode() {
-        let config = build_config("[::]:9090", None, None, true, None, None).unwrap();
+        let config =
+            build_config("[::]:9090", Some("signing"), None, true, false, None, None).unwrap();
         assert!(config.auth_tokens.is_empty());
         assert!(config.allow_unauthenticated);
     }
 
     #[test]
     fn controller_execute_rejects_empty_auth_token() {
-        let err = build_config("[::]:9090", None, Some(""), false, None, None)
-            .err()
-            .unwrap();
+        let err = build_config(
+            "[::]:9090",
+            Some("signing"),
+            Some(""),
+            false,
+            false,
+            None,
+            None,
+        )
+        .err()
+        .unwrap();
         assert!(err.to_string().contains("auth token must not be empty"));
     }
 
     #[test]
     fn controller_execute_rejects_whitespace_auth_token() {
-        let err = build_config("[::]:9090", None, Some("   "), false, None, None)
+        let err = build_config(
+            "[::]:9090",
+            Some("signing"),
+            Some("   "),
+            false,
+            false,
+            None,
+            None,
+        )
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("auth token must not be empty"));
+    }
+
+    #[test]
+    fn controller_execute_rejects_default_signing_key() {
+        let err = build_config("[::]:9090", None, Some("secret"), false, false, None, None)
             .err()
             .unwrap();
-        assert!(err.to_string().contains("auth token must not be empty"));
+        assert!(err
+            .to_string()
+            .contains("controller requires --signing-key"));
+    }
+
+    #[test]
+    fn controller_execute_allows_insecure_default_signing_key() {
+        let config =
+            build_config("[::]:9090", None, Some("secret"), false, true, None, None).unwrap();
+        assert!(config.allow_insecure_default_signing_key);
     }
 
     #[test]
@@ -131,9 +177,10 @@ mod tests {
 
         let config = build_config(
             "[::]:9090",
-            None,
+            Some("signing"),
             None,
             true,
+            false,
             Some(cert_path.as_path()),
             Some(key_path.as_path()),
         )

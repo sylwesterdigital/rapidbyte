@@ -137,6 +137,9 @@ enum Commands {
         /// Explicitly disable controller auth for local development only
         #[arg(long)]
         allow_unauthenticated: bool,
+        /// Explicitly allow the built-in insecure development signing key
+        #[arg(long)]
+        allow_insecure_default_signing_key: bool,
         /// PEM certificate for TLS server mode
         #[arg(long)]
         tls_cert: Option<PathBuf>,
@@ -161,6 +164,9 @@ enum Commands {
         /// Shared signing key for preview tickets (must match controller)
         #[arg(long, env = "RAPIDBYTE_SIGNING_KEY")]
         signing_key: Option<String>,
+        /// Explicitly allow the built-in insecure development signing key
+        #[arg(long)]
+        allow_insecure_default_signing_key: bool,
         /// PEM certificate for the agent Flight server
         #[arg(long)]
         flight_tls_cert: Option<PathBuf>,
@@ -185,6 +191,34 @@ fn controller_url_from_config() -> Option<String> {
         .map(String::from)
 }
 
+fn resolve_controller_url_with<F>(
+    cli_controller: Option<String>,
+    allow_config_fallback: bool,
+    config_loader: F,
+) -> Option<String>
+where
+    F: FnOnce() -> Option<String>,
+{
+    cli_controller.or_else(|| {
+        if allow_config_fallback {
+            config_loader()
+        } else {
+            None
+        }
+    })
+}
+
+fn resolve_controller_url(
+    cli_controller: Option<String>,
+    allow_config_fallback: bool,
+) -> Option<String> {
+    resolve_controller_url_with(
+        cli_controller,
+        allow_config_fallback,
+        controller_url_from_config,
+    )
+}
+
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> ExitCode {
@@ -194,7 +228,6 @@ async fn main() -> ExitCode {
 
     logging::init(&cli.log_level);
 
-    let controller_url = cli.controller.or_else(controller_url_from_config);
     let tls = commands::transport::TlsClientConfig {
         ca_cert_path: cli.tls_ca_cert.clone(),
         domain_name: cli.tls_domain.clone(),
@@ -207,6 +240,7 @@ async fn main() -> ExitCode {
             dry_run,
             limit,
         } => {
+            let controller_url = resolve_controller_url(cli.controller.clone(), false);
             commands::run::execute(
                 &pipeline,
                 dry_run,
@@ -219,6 +253,7 @@ async fn main() -> ExitCode {
             .await
         }
         Commands::Status { run_id } => {
+            let controller_url = resolve_controller_url(cli.controller.clone(), true);
             commands::status::execute(
                 controller_url.as_deref(),
                 &run_id,
@@ -229,6 +264,7 @@ async fn main() -> ExitCode {
             .await
         }
         Commands::Watch { run_id } => {
+            let controller_url = resolve_controller_url(cli.controller.clone(), true);
             commands::watch::execute(
                 controller_url.as_deref(),
                 &run_id,
@@ -239,6 +275,7 @@ async fn main() -> ExitCode {
             .await
         }
         Commands::ListRuns { limit, state } => {
+            let controller_url = resolve_controller_url(cli.controller.clone(), true);
             commands::list_runs::execute(
                 controller_url.as_deref(),
                 limit,
@@ -258,6 +295,7 @@ async fn main() -> ExitCode {
             listen,
             signing_key,
             allow_unauthenticated,
+            allow_insecure_default_signing_key,
             tls_cert,
             tls_key,
         } => {
@@ -266,6 +304,7 @@ async fn main() -> ExitCode {
                 signing_key.as_deref(),
                 cli.auth_token.as_deref(),
                 allow_unauthenticated,
+                allow_insecure_default_signing_key,
                 tls_cert.as_deref(),
                 tls_key.as_deref(),
             )
@@ -277,6 +316,7 @@ async fn main() -> ExitCode {
             flight_advertise,
             max_tasks,
             signing_key,
+            allow_insecure_default_signing_key,
             flight_tls_cert,
             flight_tls_key,
         } => {
@@ -286,6 +326,7 @@ async fn main() -> ExitCode {
                 &flight_advertise,
                 max_tasks,
                 signing_key.as_deref(),
+                allow_insecure_default_signing_key,
                 cli.auth_token.as_deref(),
                 cli.tls_ca_cert.as_deref(),
                 cli.tls_domain.as_deref(),
@@ -304,5 +345,30 @@ async fn main() -> ExitCode {
             }
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_controller_url_with;
+
+    #[test]
+    fn controller_url_resolution_run_ignores_config_fallback() {
+        let resolved = resolve_controller_url_with(None, false, || Some("http://cfg".into()));
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn controller_url_resolution_control_plane_uses_config_fallback() {
+        let resolved = resolve_controller_url_with(None, true, || Some("http://cfg".into()));
+        assert_eq!(resolved.as_deref(), Some("http://cfg"));
+    }
+
+    #[test]
+    fn controller_url_resolution_prefers_explicit_value() {
+        let resolved = resolve_controller_url_with(Some("http://explicit".into()), true, || {
+            Some("http://cfg".into())
+        });
+        assert_eq!(resolved.as_deref(), Some("http://explicit"));
     }
 }

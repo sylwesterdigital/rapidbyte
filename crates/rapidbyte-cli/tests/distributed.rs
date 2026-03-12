@@ -42,9 +42,11 @@ async fn distributed_submit_and_complete() {
     let ctrl_addr = format!("127.0.0.1:{ctrl_port}");
     let ctrl_url = format!("http://{ctrl_addr}");
     let flight_addr = format!("127.0.0.1:{flight_port}");
+    let signing_key = b"distributed-test-signing-key".to_vec();
 
     // Start controller
     let ctrl_addr_parsed = ctrl_addr.parse().unwrap();
+    let controller_signing_key = signing_key.clone();
     tokio::spawn(async move {
         let config = ControllerConfig {
             listen_addr: ctrl_addr_parsed,
@@ -52,6 +54,7 @@ async fn distributed_submit_and_complete() {
             agent_reap_timeout: Duration::from_secs(120),
             lease_check_interval: Duration::from_secs(60),
             allow_unauthenticated: true,
+            signing_key: controller_signing_key,
             ..Default::default()
         };
         let _ = rapidbyte_controller::run(config).await;
@@ -64,6 +67,7 @@ async fn distributed_submit_and_complete() {
     let agent_ctrl_url = ctrl_url.clone();
     let agent_flight_addr = flight_addr.clone();
     let agent_flight_advertise = flight_addr.clone();
+    let agent_signing_key = signing_key.clone();
     tokio::spawn(async move {
         let config = AgentConfig {
             controller_url: agent_ctrl_url,
@@ -72,9 +76,10 @@ async fn distributed_submit_and_complete() {
             max_tasks: 1,
             heartbeat_interval: Duration::from_secs(5),
             poll_wait_seconds: 5,
-            signing_key: Vec::new(),
+            signing_key: agent_signing_key,
             preview_ttl: Duration::from_secs(60),
             auth_token: None,
+            allow_insecure_default_signing_key: false,
             controller_tls: None,
             flight_tls: None,
         };

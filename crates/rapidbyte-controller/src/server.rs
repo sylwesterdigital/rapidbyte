@@ -32,6 +32,8 @@ pub struct ControllerConfig {
     pub auth_tokens: Vec<String>,
     /// Explicit escape hatch for local/dev use. Production should configure auth.
     pub allow_unauthenticated: bool,
+    /// Explicit escape hatch for the built-in development preview signing key.
+    pub allow_insecure_default_signing_key: bool,
     pub tls: Option<ServerTlsConfig>,
 }
 
@@ -50,6 +52,7 @@ impl Default for ControllerConfig {
             lease_check_interval: Duration::from_secs(10),
             auth_tokens: Vec::new(),
             allow_unauthenticated: false,
+            allow_insecure_default_signing_key: false,
             tls: None,
         }
     }
@@ -59,6 +62,15 @@ fn validate_auth_config(config: &ControllerConfig) -> anyhow::Result<()> {
     if config.auth_tokens.is_empty() && !config.allow_unauthenticated {
         anyhow::bail!(
             "Controller auth is required by default. Set --auth-token / RAPIDBYTE_AUTH_TOKEN or pass --allow-unauthenticated for local development."
+        );
+    }
+    Ok(())
+}
+
+fn validate_signing_key_config(config: &ControllerConfig) -> anyhow::Result<()> {
+    if config.signing_key == DEFAULT_SIGNING_KEY && !config.allow_insecure_default_signing_key {
+        anyhow::bail!(
+            "Controller preview signing key must be set explicitly. Pass --signing-key / RAPIDBYTE_SIGNING_KEY or --allow-insecure-default-signing-key for local development."
         );
     }
     Ok(())
@@ -118,6 +130,7 @@ async fn handle_expired_lease(state: &ControllerState, task_id: &str, run_id: &s
 /// transport-level failure.
 pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
     validate_auth_config(&config)?;
+    validate_signing_key_config(&config)?;
 
     if config.signing_key == DEFAULT_SIGNING_KEY {
         tracing::warn!(
@@ -207,6 +220,28 @@ mod tests {
             ..Default::default()
         };
         validate_auth_config(&config).unwrap();
+    }
+
+    #[test]
+    fn default_signing_key_requires_explicit_override() {
+        let config = ControllerConfig {
+            auth_tokens: vec!["secret".into()],
+            ..Default::default()
+        };
+        let err = validate_signing_key_config(&config).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("preview signing key must be set explicitly"));
+    }
+
+    #[test]
+    fn allow_insecure_default_signing_key_permits_dev_default() {
+        let config = ControllerConfig {
+            auth_tokens: vec!["secret".into()],
+            allow_insecure_default_signing_key: true,
+            ..Default::default()
+        };
+        validate_signing_key_config(&config).unwrap();
     }
 
     #[tokio::test]
