@@ -7,6 +7,7 @@ use tonic::transport::Server;
 use tracing::info;
 
 use crate::agent_service::AgentServiceImpl;
+use crate::middleware::BearerAuthInterceptor;
 use crate::pipeline_service::PipelineServiceImpl;
 use crate::proto::rapidbyte::v1::agent_service_server::AgentServiceServer;
 use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineServiceServer;
@@ -20,6 +21,8 @@ pub struct ControllerConfig {
     pub agent_reap_interval: Duration,
     pub agent_reap_timeout: Duration,
     pub lease_check_interval: Duration,
+    /// Bearer tokens for authentication. Empty = auth disabled.
+    pub auth_tokens: Vec<String>,
 }
 
 impl Default for ControllerConfig {
@@ -30,6 +33,7 @@ impl Default for ControllerConfig {
             agent_reap_interval: Duration::from_secs(15),
             agent_reap_timeout: Duration::from_secs(60),
             lease_check_interval: Duration::from_secs(10),
+            auth_tokens: Vec::new(),
         }
     }
 }
@@ -70,8 +74,13 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
         }
     });
 
-    let pipeline_svc = PipelineServiceServer::new(PipelineServiceImpl::new(state.clone()));
-    let agent_svc = AgentServiceServer::new(AgentServiceImpl::new(state));
+    let auth = BearerAuthInterceptor::new(config.auth_tokens.clone());
+
+    let pipeline_svc = PipelineServiceServer::with_interceptor(
+        PipelineServiceImpl::new(state.clone()),
+        auth.clone(),
+    );
+    let agent_svc = AgentServiceServer::with_interceptor(AgentServiceImpl::new(state), auth);
 
     info!(addr = %config.listen_addr, "Controller listening");
 

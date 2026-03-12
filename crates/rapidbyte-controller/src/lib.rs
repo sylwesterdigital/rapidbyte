@@ -23,6 +23,7 @@
 
 pub mod agent_service;
 pub mod lease;
+pub mod middleware;
 pub mod pipeline_service;
 pub mod preview;
 pub mod proto;
