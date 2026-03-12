@@ -9,6 +9,7 @@ use rapidbyte_engine::config::parser;
 use rapidbyte_engine::config::validator;
 use rapidbyte_engine::execution::{ExecutionOptions, PipelineOutcome};
 use tokio_postgres::NoTls;
+use tokio_util::sync::CancellationToken;
 
 static NEXT_SCHEMA_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -311,10 +312,14 @@ impl HarnessContext {
             parser::parse_pipeline_str(&pipeline_yaml).context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
-        let outcome =
-            rapidbyte_engine::orchestrator::run_pipeline(&config, &ExecutionOptions::default(), None)
-                .await
-                .context("pipeline execution failed")?;
+        let outcome = rapidbyte_engine::orchestrator::run_pipeline(
+            &config,
+            &ExecutionOptions::default(),
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .context("pipeline execution failed")?;
 
         let run = match outcome {
             PipelineOutcome::Run(run) => run,
@@ -397,10 +402,14 @@ impl HarnessContext {
             parser::parse_pipeline_str(&pipeline_yaml).context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
-        let outcome =
-            rapidbyte_engine::orchestrator::run_pipeline(&config, &ExecutionOptions::default(), None)
-                .await
-                .context("pipeline execution failed")?;
+        let outcome = rapidbyte_engine::orchestrator::run_pipeline(
+            &config,
+            &ExecutionOptions::default(),
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .context("pipeline execution failed")?;
 
         let run = match outcome {
             PipelineOutcome::Run(run) => run,
@@ -427,10 +436,14 @@ impl HarnessContext {
             parser::parse_pipeline_str(&pipeline_yaml).context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
-        let outcome =
-            rapidbyte_engine::orchestrator::run_pipeline(&config, &ExecutionOptions::default(), None)
-                .await
-                .context("pipeline execution failed")?;
+        let outcome = rapidbyte_engine::orchestrator::run_pipeline(
+            &config,
+            &ExecutionOptions::default(),
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .context("pipeline execution failed")?;
 
         let run = match outcome {
             PipelineOutcome::Run(run) => run,
@@ -531,10 +544,14 @@ impl HarnessContext {
             parser::parse_pipeline_str(&pipeline_yaml).context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
-        let outcome =
-            rapidbyte_engine::orchestrator::run_pipeline(&config, &ExecutionOptions::default(), None)
-                .await
-                .context("pipeline execution failed")?;
+        let outcome = rapidbyte_engine::orchestrator::run_pipeline(
+            &config,
+            &ExecutionOptions::default(),
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .context("pipeline execution failed")?;
 
         let run = match outcome {
             PipelineOutcome::Run(run) => run,

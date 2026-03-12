@@ -24,6 +24,7 @@ tower = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }
+protoc-bin-vendored = { workspace = true }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

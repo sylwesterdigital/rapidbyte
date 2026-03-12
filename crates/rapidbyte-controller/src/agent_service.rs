@@ -108,6 +108,14 @@ impl AgentService for AgentServiceImpl {
 
             for active_lease in &req.active_leases {
                 if let Some(task) = tasks.get(&active_lease.task_id) {
+                    let lease_matches = task.lease.as_ref().is_some_and(|lease| {
+                        lease.is_valid(active_lease.lease_epoch)
+                            && task.assigned_agent_id.as_deref() == Some(req.agent_id.as_str())
+                    });
+                    if !lease_matches {
+                        continue;
+                    }
+
                     if let Some(run) = runs.get_run(&task.run_id) {
                         if run.state == InternalRunState::Cancelling {
                             directives.push(AgentDirective {
@@ -1057,6 +1065,137 @@ mod tests {
             }
             _ => panic!("Expected CancelTask directive"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_does_not_return_cancel_directive_for_foreign_lease() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let owner_agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let wrong_agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9092".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: owner_agent_id,
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(t)) => t,
+            _ => panic!("Expected task"),
+        };
+
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Running).unwrap();
+            runs.transition(&run_id, InternalRunState::Cancelling)
+                .unwrap();
+        }
+
+        let resp = svc
+            .heartbeat(Request::new(HeartbeatRequest {
+                agent_id: wrong_agent_id,
+                active_leases: vec![ActiveLease {
+                    task_id: task.task_id,
+                    lease_epoch: task.lease_epoch,
+                }],
+                active_tasks: 1,
+                cpu_usage: 0.0,
+                memory_used_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(resp.directives.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_does_not_return_cancel_directive_for_stale_epoch() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(t)) => t,
+            _ => panic!("Expected task"),
+        };
+
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Running).unwrap();
+            runs.transition(&run_id, InternalRunState::Cancelling)
+                .unwrap();
+        }
+
+        let resp = svc
+            .heartbeat(Request::new(HeartbeatRequest {
+                agent_id,
+                active_leases: vec![ActiveLease {
+                    task_id: task.task_id,
+                    lease_epoch: task.lease_epoch + 1,
+                }],
+                active_tasks: 1,
+                cpu_usage: 0.0,
+                memory_used_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(resp.directives.is_empty());
     }
 
     #[tokio::test]

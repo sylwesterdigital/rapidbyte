@@ -51,6 +51,7 @@ tonic = { version = "0.12", features = ["tls"] }
 prost = "0.13"
 prost-types = "0.13"
 tonic-build = "0.12"
+protoc-bin-vendored = "3"
 arrow-flight = { version = "53", features = ["tls"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 hmac = "0.12"
