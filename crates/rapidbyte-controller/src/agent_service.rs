@@ -481,13 +481,15 @@ fn test_state() -> ControllerState {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::manual_let_else, clippy::match_same_arms)]
+
     use super::*;
     use crate::proto::rapidbyte::v1::{
         pipeline_service_server::PipelineService as _, ActiveLease, ProgressUpdate,
         SubmitPipelineRequest, TaskError,
     };
 
-    /// Helper to submit a pipeline and return the run_id.
+    /// Helper to submit a pipeline and return the `run_id`.
     async fn submit_pipeline(state: &ControllerState) -> String {
         let svc = crate::pipeline_service::PipelineServiceImpl::new(state.clone());
         let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";

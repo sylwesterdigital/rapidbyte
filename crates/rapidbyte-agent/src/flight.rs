@@ -229,11 +229,23 @@ mod tests {
         type HmacSha256 = Hmac<Sha256>;
 
         let mut buf = Vec::new();
-        buf.extend_from_slice(&(payload.run_id.len() as u32).to_le_bytes());
+        buf.extend_from_slice(
+            &u32::try_from(payload.run_id.len())
+                .expect("run_id length exceeds u32::MAX")
+                .to_le_bytes(),
+        );
         buf.extend_from_slice(payload.run_id.as_bytes());
-        buf.extend_from_slice(&(payload.task_id.len() as u32).to_le_bytes());
+        buf.extend_from_slice(
+            &u32::try_from(payload.task_id.len())
+                .expect("task_id length exceeds u32::MAX")
+                .to_le_bytes(),
+        );
         buf.extend_from_slice(payload.task_id.as_bytes());
-        buf.extend_from_slice(&(payload.stream_name.len() as u32).to_le_bytes());
+        buf.extend_from_slice(
+            &u32::try_from(payload.stream_name.len())
+                .expect("stream_name length exceeds u32::MAX")
+                .to_le_bytes(),
+        );
         buf.extend_from_slice(payload.stream_name.as_bytes());
         buf.extend_from_slice(&payload.lease_epoch.to_le_bytes());
         buf.extend_from_slice(&payload.expires_at_unix.to_le_bytes());

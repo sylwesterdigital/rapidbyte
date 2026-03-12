@@ -317,7 +317,9 @@ mod tests {
             flight_endpoint: "localhost:9091".into(),
             ticket: bytes::Bytes::from_static(b"ticket"),
             streams: vec![],
-            created_at: Instant::now() - Duration::from_secs(120),
+            created_at: Instant::now()
+                .checked_sub(Duration::from_secs(120))
+                .unwrap(),
             ttl: Duration::from_secs(60),
         });
         assert!(store.get("r1").is_none());
@@ -332,7 +334,9 @@ mod tests {
             flight_endpoint: "localhost:9091".into(),
             ticket: bytes::Bytes::from_static(b"ticket"),
             streams: vec![],
-            created_at: Instant::now() - Duration::from_secs(120),
+            created_at: Instant::now()
+                .checked_sub(Duration::from_secs(120))
+                .unwrap(),
             ttl: Duration::from_secs(60),
         });
         store.store(PreviewEntry {

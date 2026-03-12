@@ -83,6 +83,7 @@ pub async fn execute_task(
     .await
 }
 
+#[allow(clippy::too_many_lines)]
 async fn execute_task_with_runner<R>(
     pipeline_yaml: &[u8],
     dry_run: bool,
@@ -326,7 +327,7 @@ destination:
         let result = execute_task(&[0xFF], false, None, None, CancellationToken::new()).await;
         assert_eq!(result.metrics.records_processed, 0);
         assert_eq!(result.metrics.bytes_processed, 0);
-        assert_eq!(result.metrics.elapsed_seconds, 0.0);
+        assert!(result.metrics.elapsed_seconds.abs() < f64::EPSILON);
     }
 
     #[tokio::test]

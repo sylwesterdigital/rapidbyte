@@ -144,13 +144,29 @@ impl TicketSigner {
     }
 
     #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// Panics if any ticket string field exceeds `u32::MAX` bytes.
     pub fn sign(&self, payload: &TicketPayload) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&(payload.run_id.len() as u32).to_le_bytes());
+        buf.extend_from_slice(
+            &u32::try_from(payload.run_id.len())
+                .expect("run_id length exceeds u32::MAX")
+                .to_le_bytes(),
+        );
         buf.extend_from_slice(payload.run_id.as_bytes());
-        buf.extend_from_slice(&(payload.task_id.len() as u32).to_le_bytes());
+        buf.extend_from_slice(
+            &u32::try_from(payload.task_id.len())
+                .expect("task_id length exceeds u32::MAX")
+                .to_le_bytes(),
+        );
         buf.extend_from_slice(payload.task_id.as_bytes());
-        buf.extend_from_slice(&(payload.stream_name.len() as u32).to_le_bytes());
+        buf.extend_from_slice(
+            &u32::try_from(payload.stream_name.len())
+                .expect("stream_name length exceeds u32::MAX")
+                .to_le_bytes(),
+        );
         buf.extend_from_slice(payload.stream_name.as_bytes());
         buf.extend_from_slice(&payload.lease_epoch.to_le_bytes());
         buf.extend_from_slice(&payload.expires_at_unix.to_le_bytes());
@@ -166,17 +182,29 @@ impl TicketSigner {
 mod tests {
     use super::*;
 
-    /// Create a ticket using the same binary format as the controller's TicketSigner.
+    /// Create a ticket using the same binary format as the controller's `TicketSigner`.
     fn sign_ticket(key: &[u8], payload: &TicketPayload) -> Vec<u8> {
         let mut buf = Vec::new();
         // Write run_id
-        buf.extend_from_slice(&(payload.run_id.len() as u32).to_le_bytes());
+        buf.extend_from_slice(
+            &u32::try_from(payload.run_id.len())
+                .expect("run_id length exceeds u32::MAX")
+                .to_le_bytes(),
+        );
         buf.extend_from_slice(payload.run_id.as_bytes());
         // Write task_id
-        buf.extend_from_slice(&(payload.task_id.len() as u32).to_le_bytes());
+        buf.extend_from_slice(
+            &u32::try_from(payload.task_id.len())
+                .expect("task_id length exceeds u32::MAX")
+                .to_le_bytes(),
+        );
         buf.extend_from_slice(payload.task_id.as_bytes());
         // Write stream_name
-        buf.extend_from_slice(&(payload.stream_name.len() as u32).to_le_bytes());
+        buf.extend_from_slice(
+            &u32::try_from(payload.stream_name.len())
+                .expect("stream_name length exceeds u32::MAX")
+                .to_le_bytes(),
+        );
         buf.extend_from_slice(payload.stream_name.as_bytes());
         // Write u64 fields
         buf.extend_from_slice(&payload.lease_epoch.to_le_bytes());
@@ -210,8 +238,8 @@ mod tests {
             expires_at_unix: future_expiry(),
         };
         let ticket = sign_ticket(key, &payload);
-        let verified = verifier.verify(&ticket).unwrap();
-        assert_eq!(verified, payload);
+        let actual = verifier.verify(&ticket).unwrap();
+        assert_eq!(actual, payload);
     }
 
     #[test]

@@ -200,6 +200,12 @@ impl TaskQueue {
     }
 
     /// Reject a claimed assignment when the run can no longer accept it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchedulerError::UnknownTask`] if the task does not exist or
+    /// [`SchedulerError::InvalidState`] if the task is no longer assigned with
+    /// the provided lease epoch.
     pub fn reject_assignment(
         &mut self,
         task_id: &str,

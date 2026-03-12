@@ -82,8 +82,8 @@ fn terminal_event_for_run(record: &crate::run_state::RunRecord) -> RunEvent {
 fn to_timestamp(time: std::time::SystemTime) -> Timestamp {
     let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
     Timestamp {
-        seconds: duration.as_secs() as i64,
-        nanos: duration.subsec_nanos() as i32,
+        seconds: duration.as_secs().cast_signed(),
+        nanos: duration.subsec_nanos().cast_signed(),
     }
 }
 

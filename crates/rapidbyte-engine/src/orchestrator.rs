@@ -425,10 +425,10 @@ pub async fn run_pipeline(
                         },
                     );
                     tokio::select! {
-                        _ = cancel_token.cancelled() => {
+                        () = cancel_token.cancelled() => {
                             return Err(cancelled_pipeline_error("Pipeline cancelled during retry backoff"));
                         }
-                        _ = tokio::time::sleep(delay) => {}
+                        () = tokio::time::sleep(delay) => {}
                     }
                 }
             }
@@ -917,7 +917,11 @@ async fn collect_transform_results(
     })
 }
 
-#[allow(clippy::too_many_lines, clippy::similar_names)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::similar_names
+)]
 async fn execute_streams(
     config: &PipelineConfig,
     plugins: &ResolvedPlugins,
@@ -1016,7 +1020,7 @@ async fn execute_streams(
                 "Pipeline cancelled before destination preflight",
             )?;
             let permit = tokio::select! {
-                _ = cancel_token.cancelled() => {
+                () = cancel_token.cancelled() => {
                     return Err(cancelled_pipeline_error("Pipeline cancelled before destination preflight"));
                 }
                 permit = preflight_semaphore.clone().acquire_owned() => {
@@ -1097,7 +1101,7 @@ async fn execute_streams(
     for stream_ctx in &stream_build.stream_ctxs {
         ensure_not_cancelled(cancel_token, "Pipeline cancelled before stream execution")?;
         let permit = tokio::select! {
-            _ = cancel_token.cancelled() => {
+            () = cancel_token.cancelled() => {
                 return Err(cancelled_pipeline_error("Pipeline cancelled before stream execution"));
             }
             permit = semaphore.clone().acquire_owned() => {

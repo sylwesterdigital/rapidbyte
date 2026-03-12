@@ -287,6 +287,7 @@ async fn worker_runner_loop(
     .await
 }
 
+#[allow(clippy::too_many_lines)]
 async fn process_task(
     channel: Channel,
     agent_id: String,
@@ -444,7 +445,7 @@ where
     loop {
         match poll().await? {
             WorkerPoll::Task(task) => handle_task(task).await?,
-            WorkerPoll::Idle => continue,
+            WorkerPoll::Idle => {}
             WorkerPoll::Stop => return Ok(()),
         }
     }
@@ -462,8 +463,8 @@ async fn heartbeat_loop(
     let mut ticker = tokio::time::interval(interval);
     loop {
         tokio::select! {
-            _ = shutdown.cancelled() => break,
-            _ = ticker.tick() => {}
+            () = shutdown.cancelled() => break,
+            _tick = ticker.tick() => {}
         }
 
         let removed = spool.write().await.cleanup_expired();
@@ -555,14 +556,14 @@ where
                     "Failed to report completion, retrying while lease stays active"
                 );
                 tokio::select! {
-                    _ = shutdown.cancelled() => {
+                    () = shutdown.cancelled() => {
                         warn!(
                             task_id = request.task_id,
                             "Stopping completion retries because the agent is shutting down"
                         );
                         return false;
                     }
-                    _ = tokio::time::sleep(retry_delay) => {}
+                    () = tokio::time::sleep(retry_delay) => {}
                 }
             }
         }

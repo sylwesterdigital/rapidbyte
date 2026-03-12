@@ -3,6 +3,7 @@
 use anyhow::Result;
 use std::path::Path;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute(
     controller: &str,
     flight_listen: &str,
@@ -30,6 +31,7 @@ pub async fn execute(
     rapidbyte_agent::run(config).await
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_config(
     controller: &str,
     flight_listen: &str,

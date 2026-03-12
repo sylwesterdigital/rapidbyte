@@ -100,7 +100,7 @@ enum Commands {
         /// Maximum number of runs to return
         #[arg(long, default_value_t = 20)]
         limit: i32,
-        /// Optional state filter (pending, assigned, running, preview_ready, completed, failed, cancelled)
+        /// Optional state filter (pending, assigned, running, `preview_ready`, completed, failed, cancelled)
         #[arg(long)]
         state: Option<String>,
     },
@@ -183,6 +183,7 @@ fn controller_url_from_config() -> Option<String> {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
 
