@@ -27,6 +27,37 @@ impl AgentServiceImpl {
     pub fn new(state: ControllerState) -> Self {
         Self { state }
     }
+
+    async fn prepare_retry_if_allowed(
+        &self,
+        run_id: &str,
+        safe_to_retry: bool,
+        retryable: bool,
+        commit_state: &str,
+    ) -> bool {
+        if !safe_to_retry
+            || !retryable
+            || commit_state == "after_commit_unknown"
+            || commit_state == "after_commit_confirmed"
+        {
+            return false;
+        }
+
+        let mut runs = self.state.runs.write().await;
+        if runs
+            .get_run(run_id)
+            .is_some_and(|run| run.state == InternalRunState::Cancelling)
+        {
+            return false;
+        }
+
+        let _ = runs.transition(run_id, InternalRunState::Failed);
+        if let Some(record) = runs.get_run_mut(run_id) {
+            record.attempt += 1;
+        }
+        runs.prepare_retry(run_id);
+        true
+    }
 }
 
 #[tonic::async_trait]
@@ -429,11 +460,10 @@ impl AgentService for AgentServiceImpl {
 
                 // Retry safety policy: only auto-requeue if safe_to_retry AND retryable
                 // AND not after any commit state
-                let should_retry = safe_to_retry
-                    && retryable
-                    && !is_cancelling
-                    && commit_state != "after_commit_unknown"
-                    && commit_state != "after_commit_confirmed";
+                let should_retry = !is_cancelling
+                    && self
+                        .prepare_retry_if_allowed(&run_id, safe_to_retry, retryable, commit_state)
+                        .await;
 
                 if should_retry {
                     // Extract retry-specific task data (only cloned when needed)
@@ -442,15 +472,6 @@ impl AgentService for AgentServiceImpl {
                         let task = tasks.get(&req.task_id).unwrap();
                         (task.pipeline_yaml.clone(), task.dry_run, task.limit)
                     };
-
-                    {
-                        let mut runs = self.state.runs.write().await;
-                        let _ = runs.transition(&run_id, InternalRunState::Failed);
-                        if let Some(record) = runs.get_run_mut(&run_id) {
-                            record.attempt += 1;
-                        }
-                        runs.prepare_retry(&run_id);
-                    }
 
                     {
                         let mut tasks = self.state.tasks.write().await;
@@ -2087,5 +2108,46 @@ mod tests {
         assert_eq!(latest.task_id, task.task_id);
         assert_eq!(latest.attempt, 1);
         assert_eq!(latest.state, TaskState::Failed);
+    }
+
+    #[tokio::test]
+    async fn test_prepare_retry_if_allowed_rechecks_cancelling_state() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let run_id = submit_pipeline(&state).await;
+
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&run_id, InternalRunState::Running).unwrap();
+        }
+
+        {
+            let runs = state.runs.read().await;
+            assert_eq!(
+                runs.get_run(&run_id).unwrap().state,
+                InternalRunState::Running
+            );
+        }
+
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Cancelling)
+                .unwrap();
+        }
+
+        let should_retry = svc
+            .prepare_retry_if_allowed(&run_id, true, true, "before_commit")
+            .await;
+
+        assert!(!should_retry);
+
+        let runs = state.runs.read().await;
+        assert_eq!(
+            runs.get_run(&run_id).unwrap().state,
+            InternalRunState::Cancelling
+        );
     }
 }

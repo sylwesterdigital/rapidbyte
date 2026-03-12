@@ -460,7 +460,13 @@ impl PipelineService for PipelineServiceImpl {
         request: Request<ListRunsRequest>,
     ) -> Result<Response<ListRunsResponse>, Status> {
         let req = request.into_inner();
-        let state_filter = req.filter_state.and_then(from_proto_states);
+        let state_filter = match req.filter_state {
+            Some(state) => Some(
+                from_proto_states(state)
+                    .ok_or_else(|| Status::invalid_argument("Unknown filter_state"))?,
+            ),
+            None => None,
+        };
 
         let runs = self.state.runs.read().await;
         let mut records = runs.list_runs(state_filter.as_deref());
@@ -714,6 +720,23 @@ mod tests {
         assert_eq!(resp.runs[1].run_id, first);
         assert!(resp.runs[0].submitted_at.is_some());
         assert!(resp.runs[1].submitted_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn list_runs_rejects_unknown_filter_state() {
+        let state = test_state();
+        let svc = PipelineServiceImpl::new(state);
+
+        let err = svc
+            .list_runs(Request::new(ListRunsRequest {
+                limit: 20,
+                filter_state: Some(999),
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("Unknown filter_state"));
     }
 
     #[tokio::test]
