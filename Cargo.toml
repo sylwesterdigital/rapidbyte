@@ -45,3 +45,14 @@ indicatif = "0.17"
 console = "0.15"
 datafusion = "43"
 reedline = "0.38"
+tonic = { version = "0.12", features = ["tls"] }
+prost = "0.13"
+prost-types = "0.13"
+tonic-build = "0.12"
+arrow-flight = { version = "53", features = ["tls"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+hmac = "0.12"
+sha2 = "0.10"
+bytes = "1"
+tower = { version = "0.5", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
