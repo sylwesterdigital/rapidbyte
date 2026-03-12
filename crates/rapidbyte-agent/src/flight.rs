@@ -36,7 +36,7 @@ impl PreviewFlightService {
         &self,
         payload: &crate::ticket::TicketPayload,
     ) -> Result<(Vec<arrow::record_batch::RecordBatch>, u64, u64), Status> {
-        let spool = self.spool.read().await;
+        let mut spool = self.spool.write().await;
         let dry_run = spool
             .get(&payload.task_id)
             .ok_or_else(|| Status::not_found("Preview not found or expired"))?;

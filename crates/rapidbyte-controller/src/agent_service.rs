@@ -147,11 +147,16 @@ impl AgentService for AgentServiceImpl {
                 }));
             }
             if let Some(assignment) = tasks.poll(&req.agent_id, LEASE_TTL, &self.state.epoch_gen) {
-                // Transition run to Assigned
-                let mut runs = self.state.runs.write().await;
-                let _ = runs.transition(&assignment.run_id, InternalRunState::Assigned);
+                let claimed = {
+                    let mut runs = self.state.runs.write().await;
+                    runs.transition(&assignment.run_id, InternalRunState::Assigned)
+                        .is_ok()
+                };
+                if claimed {
+                    return Ok(Response::new(make_task_response(assignment)));
+                }
 
-                return Ok(Response::new(make_task_response(assignment)));
+                let _ = tasks.reject_assignment(&assignment.task_id, assignment.lease_epoch);
             }
         }
 
@@ -178,10 +183,16 @@ impl AgentService for AgentServiceImpl {
             }));
         }
         if let Some(assignment) = tasks.poll(&req.agent_id, LEASE_TTL, &self.state.epoch_gen) {
-            let mut runs = self.state.runs.write().await;
-            let _ = runs.transition(&assignment.run_id, InternalRunState::Assigned);
+            let claimed = {
+                let mut runs = self.state.runs.write().await;
+                runs.transition(&assignment.run_id, InternalRunState::Assigned)
+                    .is_ok()
+            };
+            if claimed {
+                return Ok(Response::new(make_task_response(assignment)));
+            }
 
-            return Ok(Response::new(make_task_response(assignment)));
+            let _ = tasks.reject_assignment(&assignment.task_id, assignment.lease_epoch);
         }
 
         Ok(Response::new(PollTaskResponse {
@@ -529,6 +540,51 @@ mod tests {
             }
             _ => panic!("Expected a task assignment"),
         }
+    }
+
+    #[tokio::test]
+    async fn poll_task_does_not_return_cancelled_assignment() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Cancelled)
+                .unwrap();
+        }
+
+        let resp = svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id,
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(matches!(
+            resp.result,
+            Some(poll_task_response::Result::NoTask(_))
+        ));
+
+        let tasks = state.tasks.read().await;
+        let task = tasks.find_by_run_id(&run_id).unwrap();
+        assert_eq!(task.state, TaskState::Cancelled);
+        assert!(task.lease.is_none());
     }
 
     #[tokio::test]

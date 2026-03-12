@@ -37,13 +37,17 @@ impl PreviewSpool {
     }
 
     #[must_use]
-    pub fn get(&self, task_id: &str) -> Option<&DryRunResult> {
-        let entry = self.entries.get(task_id)?;
-        if entry.created_at.elapsed() < entry.ttl {
-            Some(&entry.result)
-        } else {
-            None
+    pub fn get(&mut self, task_id: &str) -> Option<&DryRunResult> {
+        let expired = {
+            let entry = self.entries.get(task_id)?;
+            entry.created_at.elapsed() >= entry.ttl
+        };
+        if expired {
+            self.entries.remove(task_id);
+            return None;
         }
+
+        self.entries.get(task_id).map(|entry| &entry.result)
     }
 
     pub fn cleanup_expired(&mut self) -> usize {
@@ -84,6 +88,16 @@ mod tests {
     }
 
     #[test]
+    fn expired_get_evicts_entry() {
+        let mut spool = PreviewSpool::new(Duration::from_secs(0));
+        spool.store("t1".into(), make_dry_run_result());
+        std::thread::sleep(Duration::from_millis(10));
+
+        assert!(spool.get("t1").is_none());
+        assert_eq!(spool.cleanup_expired(), 0);
+    }
+
+    #[test]
     fn cleanup_removes_expired() {
         let mut spool = PreviewSpool::new(Duration::from_secs(0));
         spool.store("t1".into(), make_dry_run_result());
@@ -101,7 +115,7 @@ mod tests {
 
     #[test]
     fn unknown_task_returns_none() {
-        let spool = PreviewSpool::new(Duration::from_secs(60));
+        let mut spool = PreviewSpool::new(Duration::from_secs(60));
         assert!(spool.get("nonexistent").is_none());
     }
 }

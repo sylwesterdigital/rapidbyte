@@ -7,6 +7,7 @@
 use std::path::Path;
 
 use anyhow::Result;
+use tokio_util::sync::CancellationToken;
 
 use rapidbyte_engine::execution::{ExecutionOptions, PipelineOutcome};
 use rapidbyte_engine::orchestrator;
@@ -79,7 +80,8 @@ pub async fn execute(
 
     // Run the pipeline
     let cpu_start = process_cpu_seconds();
-    let outcome = orchestrator::run_pipeline(&config, &options, progress_tx).await;
+    let outcome =
+        orchestrator::run_pipeline(&config, &options, progress_tx, CancellationToken::new()).await;
     let (cpu_end, peak_rss_mb) = post_pipeline_metrics();
 
     // Wait for spinner to finish before printing results

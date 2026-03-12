@@ -197,6 +197,39 @@ impl TaskQueue {
         Ok(Some((record.run_id.clone(), record.attempt)))
     }
 
+    /// Reject a claimed assignment when the run can no longer accept it.
+    pub fn reject_assignment(
+        &mut self,
+        task_id: &str,
+        lease_epoch: u64,
+    ) -> Result<(), SchedulerError> {
+        let record = self
+            .tasks
+            .get_mut(task_id)
+            .ok_or_else(|| SchedulerError::UnknownTask(task_id.to_string()))?;
+
+        if record.state != TaskState::Assigned {
+            return Err(SchedulerError::InvalidState(
+                task_id.to_string(),
+                TaskState::Assigned,
+            ));
+        }
+
+        match &record.lease {
+            Some(lease) if lease.is_valid(lease_epoch) => {}
+            _ => {
+                return Err(SchedulerError::InvalidState(
+                    task_id.to_string(),
+                    TaskState::Assigned,
+                ));
+            }
+        }
+
+        record.state = TaskState::Cancelled;
+        record.lease = None;
+        Ok(())
+    }
+
     /// Cancel a task.
     /// If pending, removes it from the queue. If running/assigned, marks it cancelled.
     ///
@@ -397,6 +430,20 @@ mod tests {
             q.get(&assignment.task_id).unwrap().state,
             TaskState::Cancelled
         );
+    }
+
+    #[test]
+    fn reject_assignment_clears_claimed_lease() {
+        let (mut q, gen) = make_queue_and_gen();
+        q.enqueue("r1".into(), b"yaml".to_vec(), false, None, 1);
+
+        let assignment = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
+        q.reject_assignment(&assignment.task_id, assignment.lease_epoch)
+            .unwrap();
+
+        let task = q.get(&assignment.task_id).unwrap();
+        assert_eq!(task.state, TaskState::Cancelled);
+        assert!(task.lease.is_none());
     }
 
     #[test]

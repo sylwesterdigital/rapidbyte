@@ -125,6 +125,7 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
     let hb_agent_id = agent_id.clone();
     let hb_interval = config.heartbeat_interval;
     let hb_leases = active_leases.clone();
+    let hb_spool = spool.clone();
     let hb_shutdown = shutdown_token.clone();
     let hb_auth_token = config.auth_token.clone();
     let heartbeat_handle = tokio::spawn(async move {
@@ -133,6 +134,7 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
             hb_agent_id,
             hb_interval,
             hb_leases,
+            hb_spool,
             hb_shutdown,
             hb_auth_token,
         )
@@ -236,6 +238,7 @@ async fn worker_runner_loop(
                 active_leases.clone(),
                 spool.clone(),
                 config.clone(),
+                shutdown.clone(),
             )
         },
     )
@@ -249,6 +252,7 @@ async fn process_task(
     active_leases: ActiveLeaseMap,
     spool: Arc<RwLock<PreviewSpool>>,
     config: AgentConfig,
+    shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
     info!(
         task_id = task.task_id,
@@ -357,6 +361,7 @@ async fn process_task(
                     .map(tonic::Response::into_inner)
             }
         },
+        shutdown,
     )
     .await;
 
@@ -401,6 +406,7 @@ async fn heartbeat_loop(
     agent_id: String,
     interval: Duration,
     active_leases: ActiveLeaseMap,
+    spool: Arc<RwLock<PreviewSpool>>,
     shutdown: CancellationToken,
     auth_token: Option<String>,
 ) {
@@ -410,6 +416,12 @@ async fn heartbeat_loop(
             _ = shutdown.cancelled() => break,
             _ = ticker.tick() => {}
         }
+
+        let removed = spool.write().await.cleanup_expired();
+        if removed > 0 {
+            tracing::debug!(removed, "Evicted expired preview entries");
+        }
+
         let leases: Vec<ActiveLease> = active_leases
             .read()
             .await
@@ -459,12 +471,21 @@ async fn report_completion_until_terminal<F, Fut>(
     request: CompleteTaskRequest,
     retry_delay: Duration,
     mut send_completion: F,
+    shutdown: CancellationToken,
 ) -> bool
 where
     F: FnMut(CompleteTaskRequest) -> Fut,
     Fut: Future<Output = Result<crate::proto::rapidbyte::v1::CompleteTaskResponse, tonic::Status>>,
 {
     loop {
+        if shutdown.is_cancelled() {
+            warn!(
+                task_id = request.task_id,
+                "Stopping completion retries because the agent is shutting down"
+            );
+            return false;
+        }
+
         match send_completion(request.clone()).await {
             Ok(resp) => {
                 active_leases.write().await.remove(&request.task_id);
@@ -484,7 +505,16 @@ where
                     error = %e,
                     "Failed to report completion, retrying while lease stays active"
                 );
-                tokio::time::sleep(retry_delay).await;
+                tokio::select! {
+                    _ = shutdown.cancelled() => {
+                        warn!(
+                            task_id = request.task_id,
+                            "Stopping completion retries because the agent is shutting down"
+                        );
+                        return false;
+                    }
+                    _ = tokio::time::sleep(retry_delay) => {}
+                }
             }
         }
     }
@@ -508,6 +538,7 @@ mod tests {
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_for_closure = attempts.clone();
         let active_for_closure = active_leases.clone();
+        let shutdown = CancellationToken::new();
         let acknowledged =
             report_completion_until_terminal(
                 &active_leases,
@@ -542,12 +573,72 @@ mod tests {
                         }
                     }
                 },
+                shutdown,
             )
             .await;
 
         assert!(acknowledged);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert!(!active_leases.read().await.contains_key("task-1"));
+    }
+
+    #[tokio::test]
+    async fn completion_retries_stop_on_shutdown() {
+        let active_leases: ActiveLeaseMap = Arc::new(RwLock::new(HashMap::new()));
+        active_leases
+            .write()
+            .await
+            .insert("task-1".into(), (42, CancellationToken::new()));
+        let shutdown = CancellationToken::new();
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_closure = attempts.clone();
+        let completion = tokio::spawn({
+            let active_leases = active_leases.clone();
+            let shutdown = shutdown.clone();
+            async move {
+                report_completion_until_terminal(
+                    &active_leases,
+                    CompleteTaskRequest {
+                        agent_id: "agent-1".into(),
+                        task_id: "task-1".into(),
+                        lease_epoch: 42,
+                        outcome: TaskOutcome::Completed.into(),
+                        error: None,
+                        metrics: Some(TaskMetrics {
+                            records_processed: 1,
+                            bytes_processed: 1,
+                            elapsed_seconds: 0.1,
+                            cursors_advanced: 0,
+                        }),
+                        preview: None,
+                        backend_run_id: 0,
+                    },
+                    Duration::from_millis(1),
+                    move |_req| {
+                        let attempts = attempts_for_closure.clone();
+                        async move {
+                            attempts.fetch_add(1, Ordering::SeqCst);
+                            Err(tonic::Status::unavailable("controller unavailable"))
+                        }
+                    },
+                    shutdown,
+                )
+                .await
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        shutdown.cancel();
+
+        let acknowledged = tokio::time::timeout(Duration::from_secs(1), completion)
+            .await
+            .expect("completion retry loop should stop on shutdown")
+            .unwrap();
+
+        assert!(!acknowledged);
+        assert!(attempts.load(Ordering::SeqCst) > 0);
+        assert!(active_leases.read().await.contains_key("task-1"));
     }
 
     #[tokio::test]

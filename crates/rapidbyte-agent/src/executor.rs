@@ -71,8 +71,13 @@ pub async fn execute_task(
         limit,
         progress_tx,
         cancel_token,
-        |config, options, progress_tx| {
-            Box::pin(orchestrator::run_pipeline(config, options, progress_tx))
+        |config, options, progress_tx, cancel_token| {
+            Box::pin(orchestrator::run_pipeline(
+                config,
+                options,
+                progress_tx,
+                cancel_token,
+            ))
         },
     )
     .await
@@ -91,6 +96,7 @@ where
         &'a rapidbyte_engine::config::types::PipelineConfig,
         &'a ExecutionOptions,
         Option<mpsc::UnboundedSender<ProgressEvent>>,
+        CancellationToken,
     ) -> PipelineRunFuture<'a>,
 {
     // Check for early cancellation before doing any work
@@ -170,7 +176,7 @@ where
         };
     }
 
-    let pipeline_result = run_pipeline(&config, &options, progress_tx).await;
+    let pipeline_result = run_pipeline(&config, &options, progress_tx, cancel_token.clone()).await;
 
     match pipeline_result {
         Ok(outcome) => {
@@ -245,6 +251,8 @@ mod tests {
     use super::*;
     use rapidbyte_engine::execution::PipelineOutcome;
     use rapidbyte_engine::result::{DestTiming, PipelineCounts, PipelineResult, SourceTiming};
+    use rapidbyte_engine::PipelineError;
+    use rapidbyte_types::error::{CommitState, PluginError};
     use std::sync::Arc;
     use tokio::sync::Notify;
 
@@ -340,15 +348,22 @@ destination:
             let started = started.clone();
             let release = release.clone();
             tokio::spawn(async move {
-                execute_task_with_runner(valid_yaml(), false, None, None, token, move |_, _, _| {
-                    let started = started.clone();
-                    let release = release.clone();
-                    Box::pin(async move {
-                        started.notify_one();
-                        release.notified().await;
-                        Ok(completed_outcome())
-                    })
-                })
+                execute_task_with_runner(
+                    valid_yaml(),
+                    false,
+                    None,
+                    None,
+                    token,
+                    move |_, _, _, _cancel_token| {
+                        let started = started.clone();
+                        let release = release.clone();
+                        Box::pin(async move {
+                            started.notify_one();
+                            release.notified().await;
+                            Ok(completed_outcome())
+                        })
+                    },
+                )
                 .await
             })
         };
@@ -361,5 +376,106 @@ destination:
         assert!(matches!(result.outcome, TaskOutcomeKind::Completed));
         assert_eq!(result.metrics.records_processed, 7);
         assert_eq!(result.metrics.bytes_processed, 128);
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_destination_write_returns_cancelled_failure() {
+        let token = CancellationToken::new();
+        let started = Arc::new(Notify::new());
+
+        let handle = {
+            let token = token.clone();
+            let started = started.clone();
+            tokio::spawn(async move {
+                execute_task_with_runner(
+                    valid_yaml(),
+                    false,
+                    None,
+                    None,
+                    token,
+                    move |_, _, _, cancel_token| {
+                        let started = started.clone();
+                        Box::pin(async move {
+                            let mut cancelled = PluginError::internal(
+                                "CANCELLED",
+                                "Pipeline cancelled before destination write",
+                            );
+                            cancelled.safe_to_retry = true;
+                            started.notify_one();
+                            cancel_token.cancelled().await;
+                            Err(PipelineError::Plugin(
+                                cancelled.with_commit_state(CommitState::BeforeCommit),
+                            ))
+                        })
+                    },
+                )
+                .await
+            })
+        };
+
+        started.notified().await;
+        token.cancel();
+
+        let result = handle.await.unwrap();
+        match result.outcome {
+            TaskOutcomeKind::Failed(info) => {
+                assert_eq!(info.code, "CANCELLED");
+                assert!(info.safe_to_retry);
+                assert_eq!(info.commit_state, "before_commit");
+            }
+            _ => panic!("expected cancelled failure outcome"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_destination_start_preserves_real_outcome() {
+        let token = CancellationToken::new();
+        let started_destination = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+
+        let handle = {
+            let token = token.clone();
+            let started_destination = started_destination.clone();
+            let release = release.clone();
+            tokio::spawn(async move {
+                execute_task_with_runner(
+                    valid_yaml(),
+                    false,
+                    None,
+                    None,
+                    token,
+                    move |_, _, _, _cancel_token| {
+                        let started_destination = started_destination.clone();
+                        let release = release.clone();
+                        Box::pin(async move {
+                            started_destination.notify_one();
+                            release.notified().await;
+                            Err(PipelineError::Plugin(
+                                PluginError::transient_db(
+                                    "WRITE_FAILED",
+                                    "destination write failed after cancellation",
+                                )
+                                .with_commit_state(CommitState::AfterCommitUnknown),
+                            ))
+                        })
+                    },
+                )
+                .await
+            })
+        };
+
+        started_destination.notified().await;
+        token.cancel();
+        release.notify_one();
+
+        let result = handle.await.unwrap();
+        match result.outcome {
+            TaskOutcomeKind::Failed(info) => {
+                assert_eq!(info.code, "WRITE_FAILED");
+                assert!(!info.safe_to_retry);
+                assert_eq!(info.commit_state, "after_commit_unknown");
+            }
+            _ => panic!("expected real post-commit failure outcome"),
+        }
     }
 }

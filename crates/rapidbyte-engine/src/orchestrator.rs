@@ -7,6 +7,7 @@ use std::time::Instant;
 use anyhow::Result;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 use rapidbyte_runtime::{
     parse_plugin_ref, Frame, HostTimings, LoadedComponent, SandboxOverrides, WasmRuntime,
@@ -15,7 +16,7 @@ use rapidbyte_state::StateBackend;
 use rapidbyte_types::catalog::{Catalog, SchemaHint};
 use rapidbyte_types::cursor::{CursorInfo, CursorType, CursorValue};
 use rapidbyte_types::envelope::DlqRecord;
-use rapidbyte_types::error::{ValidationResult, ValidationStatus};
+use rapidbyte_types::error::{CommitState, PluginError, ValidationResult, ValidationStatus};
 use rapidbyte_types::manifest::{Permissions, PluginManifest, ResourceLimits};
 use rapidbyte_types::metric::{ReadSummary, WriteSummary};
 use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
@@ -379,13 +380,17 @@ pub async fn run_pipeline(
     config: &PipelineConfig,
     options: &ExecutionOptions,
     progress_tx: Option<tokio_mpsc::UnboundedSender<ProgressEvent>>,
+    cancel_token: CancellationToken,
 ) -> Result<PipelineOutcome, PipelineError> {
     let max_retries = config.resources.max_retries;
     let mut attempt = 0u32;
 
     loop {
+        ensure_not_cancelled(&cancel_token, "Pipeline cancelled before execution")?;
         attempt += 1;
-        let result = execute_pipeline_once(config, options, attempt, progress_tx.clone()).await;
+        let result =
+            execute_pipeline_once(config, options, attempt, progress_tx.clone(), &cancel_token)
+                .await;
 
         match result {
             Ok(outcome) => return Ok(outcome),
@@ -419,7 +424,12 @@ pub async fn run_pipeline(
                             delay_secs: delay.as_secs_f64(),
                         },
                     );
-                    tokio::time::sleep(delay).await;
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => {
+                            return Err(cancelled_pipeline_error("Pipeline cancelled during retry backoff"));
+                        }
+                        _ = tokio::time::sleep(delay) => {}
+                    }
                 }
             }
             Err(err) => {
@@ -459,6 +469,7 @@ async fn execute_pipeline_once(
     options: &ExecutionOptions,
     attempt: u32,
     progress_tx: ProgressTx,
+    cancel_token: &CancellationToken,
 ) -> Result<PipelineOutcome, PipelineError> {
     let start = Instant::now();
     let pipeline_id = PipelineId::new(config.pipeline.clone());
@@ -534,6 +545,7 @@ async fn execute_pipeline_once(
             phase: Phase::Running,
         },
     );
+    ensure_not_cancelled(cancel_token, "Pipeline cancelled before stream execution")?;
     let aggregated = execute_streams(
         config,
         &plugins,
@@ -542,6 +554,7 @@ async fn execute_pipeline_once(
         state.clone(),
         options,
         &progress_tx,
+        cancel_token,
     )
     .await?;
 
@@ -551,6 +564,7 @@ async fn execute_pipeline_once(
             phase: Phase::Finished,
         },
     );
+    ensure_not_cancelled(cancel_token, "Pipeline cancelled before finalization")?;
 
     if options.dry_run {
         let duration_secs = start.elapsed().as_secs_f64();
@@ -912,6 +926,7 @@ async fn execute_streams(
     state: Arc<dyn StateBackend>,
     options: &ExecutionOptions,
     progress_tx: &ProgressTx,
+    cancel_token: &CancellationToken,
 ) -> Result<AggregatedStreamResults, PipelineError> {
     let (source_plugin_id, source_plugin_version) = parse_plugin_ref(&config.source.use_ref);
     let (dest_plugin_id, dest_plugin_version) = parse_plugin_ref(&config.destination.use_ref);
@@ -980,6 +995,10 @@ async fn execute_streams(
     let run_dlq_records: Arc<Mutex<Vec<DlqRecord>>> = Arc::new(Mutex::new(Vec::new()));
 
     if !options.dry_run {
+        ensure_not_cancelled(
+            cancel_token,
+            "Pipeline cancelled before destination preflight",
+        )?;
         let preflight_streams = destination_preflight_streams(&stream_build.stream_ctxs);
         let preflight_parallelism = parallelism.min(preflight_streams.len()).max(1);
         tracing::info!(
@@ -992,15 +1011,22 @@ async fn execute_streams(
         let preflight_semaphore = Arc::new(tokio::sync::Semaphore::new(preflight_parallelism));
 
         for stream_ctx in preflight_streams {
-            let permit = preflight_semaphore
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|e| {
-                    PipelineError::Infrastructure(anyhow::anyhow!(
-                        "Preflight semaphore closed: {e}"
-                    ))
-                })?;
+            ensure_not_cancelled(
+                cancel_token,
+                "Pipeline cancelled before destination preflight",
+            )?;
+            let permit = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    return Err(cancelled_pipeline_error("Pipeline cancelled before destination preflight"));
+                }
+                permit = preflight_semaphore.clone().acquire_owned() => {
+                    permit.map_err(|e| {
+                        PipelineError::Infrastructure(anyhow::anyhow!(
+                            "Preflight semaphore closed: {e}"
+                        ))
+                    })?
+                }
+            };
 
             let stream_name = stream_ctx.stream_name.clone();
             let state_dst = state.clone();
@@ -1069,10 +1095,17 @@ async fn execute_streams(
     }
 
     for stream_ctx in &stream_build.stream_ctxs {
-        let permit =
-            semaphore.clone().acquire_owned().await.map_err(|e| {
+        ensure_not_cancelled(cancel_token, "Pipeline cancelled before stream execution")?;
+        let permit = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Err(cancelled_pipeline_error("Pipeline cancelled before stream execution"));
+            }
+            permit = semaphore.clone().acquire_owned() => {
+                permit.map_err(|e| {
                 PipelineError::Infrastructure(anyhow::anyhow!("Semaphore closed: {e}"))
-            })?;
+                })?
+            }
+        };
 
         let params = params.clone();
         let source_module = modules.source_module.clone();
@@ -1593,6 +1626,23 @@ fn reported_parallelism(config: &PipelineConfig, aggregated: &AggregatedStreamRe
     } else {
         resolve_effective_parallelism(config, false)
     }
+}
+
+fn cancelled_pipeline_error(message: &str) -> PipelineError {
+    let mut error = PluginError::internal("CANCELLED", message);
+    error.safe_to_retry = true;
+    error.commit_state = Some(CommitState::BeforeCommit);
+    PipelineError::Plugin(error)
+}
+
+fn ensure_not_cancelled(
+    cancel_token: &CancellationToken,
+    message: &str,
+) -> Result<(), PipelineError> {
+    if cancel_token.is_cancelled() {
+        return Err(cancelled_pipeline_error(message));
+    }
+    Ok(())
 }
 
 async fn complete_run_status(
