@@ -10,7 +10,8 @@ use tokio_postgres::Client;
 
 use rapidbyte_sdk::prelude::*;
 
-use crate::decode::{downcast_columns, write_binary_field, WriteTarget};
+use crate::decode::{write_binary_field, WriteTarget};
+use crate::types::downcast_columns;
 
 /// Default COPY flush buffer size (4 MB).
 const DEFAULT_FLUSH_BYTES: usize = 4 * 1024 * 1024;

@@ -24,7 +24,7 @@ pub(crate) async fn connect(config: &crate::config::Config) -> Result<Client, St
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            rapidbyte_sdk::host_ffi::log(0, &format!("PostgreSQL connection error: {e}"));
+            rapidbyte_sdk::host_ffi::log_error(&format!("PostgreSQL connection error: {e}"));
         }
     });
 

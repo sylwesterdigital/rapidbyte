@@ -1,22 +1,19 @@
-//! Arrow `RecordBatch` decoding helpers for INSERT and COPY write paths.
+//! Arrow `RecordBatch` encoding helpers for INSERT and COPY write paths.
 //!
-//! Provides typed column extraction (one downcast per column per batch),
-//! SQL parameter value extraction for INSERT, binary COPY serialization,
-//! and shared helpers for column filtering and SQL building.
+//! Provides SQL parameter value extraction for INSERT, binary COPY
+//! serialization, and shared helpers for column filtering and SQL building.
 
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use pg_escape::quote_identifier;
-use rapidbyte_sdk::arrow::array::{
-    Array, BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array,
-    Int32Array, Int64Array, TimestampMicrosecondArray,
-};
-use rapidbyte_sdk::arrow::datatypes::{DataType, Schema};
-use rapidbyte_sdk::arrow::record_batch::RecordBatch;
+use rapidbyte_sdk::arrow::array::Array;
+use rapidbyte_sdk::arrow::datatypes::Schema;
 use rapidbyte_sdk::prelude::*;
 use tokio_postgres::types::ToSql;
+
+use crate::types::TypedCol;
 
 /// Unix epoch date — base for Arrow Date32 day offsets.
 static UNIX_EPOCH_DATE: LazyLock<NaiveDate> =
@@ -116,61 +113,6 @@ impl WriteTarget<'_> {
             .collect::<Vec<_>>()
             .join(", ")
     }
-}
-
-// ── TypedCol: pre-downcast Arrow columns ─────────────────────────────
-
-/// Pre-downcast Arrow column reference. Eliminates per-cell `downcast_ref()` calls
-/// by resolving the concrete array type once per column per batch.
-#[derive(Debug)]
-pub(crate) enum TypedCol<'a> {
-    Int16(&'a Int16Array),
-    Int32(&'a Int32Array),
-    Int64(&'a Int64Array),
-    Float32(&'a Float32Array),
-    Float64(&'a Float64Array),
-    Boolean(&'a BooleanArray),
-    Utf8(&'a rapidbyte_sdk::arrow::array::StringArray),
-    TimestampMicros(&'a TimestampMicrosecondArray),
-    Date32(&'a Date32Array),
-    Binary(&'a BinaryArray),
-    Null,
-}
-
-/// Pre-downcast active columns from a `RecordBatch` into `TypedCol` references.
-///
-/// # Errors
-///
-/// Returns `Err` if an Arrow column has an unsupported data type for the
-/// `PostgreSQL` write path.
-pub(crate) fn downcast_columns<'a>(
-    batch: &'a RecordBatch,
-    active_cols: &[usize],
-) -> Result<Vec<TypedCol<'a>>, String> {
-    active_cols
-        .iter()
-        .map(|&i| {
-            let col = batch.column(i);
-            match col.data_type() {
-                DataType::Int16 => Ok(TypedCol::Int16(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected Int16Array)"))?)),
-                DataType::Int32 => Ok(TypedCol::Int32(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected Int32Array)"))?)),
-                DataType::Int64 => Ok(TypedCol::Int64(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected Int64Array)"))?)),
-                DataType::Float32 => Ok(TypedCol::Float32(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected Float32Array)"))?)),
-                DataType::Float64 => Ok(TypedCol::Float64(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected Float64Array)"))?)),
-                DataType::Boolean => Ok(TypedCol::Boolean(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected BooleanArray)"))?)),
-                DataType::Utf8 => Ok(TypedCol::Utf8(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected StringArray)"))?)),
-                DataType::Timestamp(rapidbyte_sdk::arrow::datatypes::TimeUnit::Microsecond, _) => {
-                    Ok(TypedCol::TimestampMicros(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected TimestampMicrosecondArray)"))?))
-                }
-                DataType::Date32 => Ok(TypedCol::Date32(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected Date32Array)"))?)),
-                DataType::Binary => Ok(TypedCol::Binary(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected BinaryArray)"))?)),
-                DataType::Null => Ok(TypedCol::Null),
-                other => Err(format!(
-                    "unsupported Arrow type for column {i}: {other:?}. Cast in a transform before writing to dest-postgres"
-                )),
-            }
-        })
-        .collect()
 }
 
 // ── SqlParamValue: typed INSERT bind parameters ──────────────────────
@@ -348,10 +290,10 @@ pub(crate) fn write_binary_field(buf: &mut Vec<u8>, col: &TypedCol<'_>, row_idx:
 mod tests {
     use super::*;
     use rapidbyte_sdk::arrow::array::{
-        BinaryArray, BooleanArray, Date32Array, Float64Array, Int16Array, Int32Array, StringArray,
-        TimestampMicrosecondArray,
+        BinaryArray, BooleanArray, Date32Array, Float64Array, Int16Array, Int32Array, Int64Array,
+        StringArray, TimestampMicrosecondArray,
     };
-    use rapidbyte_sdk::arrow::datatypes::{Field, TimeUnit};
+    use rapidbyte_sdk::arrow::datatypes::{DataType, Field};
 
     // ── qualified_name ───────────────────────────────────────────────
 
@@ -440,36 +382,6 @@ mod tests {
             SqlParamValue::Text(None) => {}
             _ => panic!("expected Text(None)"),
         }
-    }
-
-    #[test]
-    fn downcast_columns_handles_timestamp_date_binary() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("ts", DataType::Timestamp(TimeUnit::Microsecond, None), true),
-            Field::new("d", DataType::Date32, true),
-            Field::new("b", DataType::Binary, true),
-        ]));
-        let ts_arr = TimestampMicrosecondArray::from(vec![Some(1705312200000000i64)]);
-        let d_arr = Date32Array::from(vec![Some(19737)]);
-        let b_arr = BinaryArray::from(vec![Some(b"test" as &[u8])]);
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![Arc::new(ts_arr), Arc::new(d_arr), Arc::new(b_arr)],
-        )
-        .unwrap();
-        let cols = downcast_columns(&batch, &[0, 1, 2]).unwrap();
-        assert!(matches!(cols[0], TypedCol::TimestampMicros(_)));
-        assert!(matches!(cols[1], TypedCol::Date32(_)));
-        assert!(matches!(cols[2], TypedCol::Binary(_)));
-    }
-
-    #[test]
-    fn downcast_columns_rejects_unsupported_types() {
-        let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::LargeUtf8, true)]));
-        let arr = rapidbyte_sdk::arrow::array::LargeStringArray::from(vec![Some("alice")]);
-        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
-        let err = downcast_columns(&batch, &[0]).expect_err("LargeUtf8 should be rejected");
-        assert!(err.contains("unsupported Arrow type"));
     }
 
     #[test]

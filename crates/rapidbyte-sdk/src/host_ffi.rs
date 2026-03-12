@@ -425,6 +425,11 @@ pub fn log(level: i32, message: &str) {
     host_imports().log(level, message)
 }
 
+/// Log an error message through the host runtime.
+pub fn log_error(message: &str) {
+    log(0, message);
+}
+
 /// Emit an Arrow RecordBatch to the host pipeline via V3 frame transport.
 ///
 /// Streams IPC encoding directly into a host frame via `FrameWriter`,
@@ -653,5 +658,10 @@ mod tests {
         let err = decode_next_batch_frame(&[1, 2, 3], 3).expect_err("invalid ipc should fail");
         assert_eq!(err.code, "NEXT_BATCH_DECODE");
         assert!(err.message.contains("frame_len=3"));
+    }
+
+    #[test]
+    fn test_log_error_does_not_panic() {
+        log_error("test error");
     }
 }

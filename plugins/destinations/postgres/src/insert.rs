@@ -11,8 +11,9 @@ use tokio_postgres::Client;
 
 use rapidbyte_sdk::prelude::*;
 
-use crate::decode::{downcast_columns, sql_param_value, SqlParamValue, WriteTarget};
+use crate::decode::{sql_param_value, SqlParamValue, WriteTarget};
 use crate::pg_error::format_pg_error;
+use crate::types::downcast_columns;
 
 /// Maximum rows per multi-value INSERT statement (PG parameter limit).
 const CHUNK_SIZE: usize = 1000;

@@ -5,12 +5,15 @@
 
 mod client;
 mod config;
+mod contract;
 mod copy;
 mod ddl;
 mod decode;
 mod insert;
+mod metrics;
 mod pg_error;
-mod type_map;
+mod session;
+mod types;
 mod watermark;
 mod writer;
 

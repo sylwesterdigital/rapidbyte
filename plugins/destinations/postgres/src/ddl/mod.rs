@@ -13,7 +13,7 @@ use rapidbyte_sdk::stream::SchemaEvolutionPolicy;
 
 use self::drift::detect_schema_drift;
 use crate::pg_error::format_pg_error;
-use crate::type_map::arrow_to_pg_type;
+use crate::types::arrow_to_pg_type;
 
 pub(crate) use self::staging::{prepare_staging, swap_staging_table};
 

@@ -10,7 +10,7 @@ use rapidbyte_sdk::stream::{
     ColumnPolicy, NullabilityPolicy, SchemaEvolutionPolicy, TypeChangePolicy,
 };
 
-use crate::type_map::{arrow_to_pg_type, pg_types_compatible};
+use crate::types::{arrow_to_pg_type, pg_types_compatible};
 
 /// Detected differences between an incoming Arrow schema and an existing PG table.
 #[derive(Debug, Default)]

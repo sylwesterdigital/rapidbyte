@@ -16,6 +16,8 @@ There are three plugin roles:
 
 All plugins depend on `rapidbyte-sdk`, which provides the trait definitions, Arrow re-exports, host FFI bindings, and the `#[plugin(...)]` proc macro.
 
+For the default module layout and architectural conventions, see [Plugin Architecture](./PLUGIN_ARCHITECTURE.md).
+
 ## 2. Scaffold a New Plugin
 
 The fastest way to start is with the scaffold command:
@@ -42,23 +44,37 @@ plugins/sources/mysql/
     main.rs            # Entry point with #[plugin(source)] and trait impl
     config.rs          # Config struct with serde + schema derives
     client.rs          # Connection setup and validation stub
-    reader.rs          # Stream reading stub (sources) / writer.rs (destinations)
-    schema.rs          # Schema discovery stub (sources only)
+    discover.rs        # Source discovery stub
+    read.rs            # Source read stub
+
+plugins/destinations/snowflake/src/
+  main.rs              # Entry point with #[plugin(destination)]
+  config.rs
+  client.rs
+  write.rs             # Destination write stub
+
+plugins/transforms/example/src/
+  main.rs              # Entry point with #[plugin(transform)]
+  config.rs
+  validate.rs          # Transform validation stub
+  transform.rs         # Transform runtime stub
 ```
 
 ## 3. Project Structure
 
-A mature plugin typically has these modules:
+A mature plugin typically uses role-oriented modules:
 
 | Module | Role |
 |---|---|
-| `config` | Config struct with `Deserialize` + `ConfigSchema` derives and a `validate()` method |
-| `client` | Connection setup (using `HostTcpStream`), connection string builder, `validate()` |
-| `encode` | Arrow RecordBatch encoding from source rows (sources) |
-| `decode` | Arrow RecordBatch decoding into target rows (destinations) |
-| `query` | SQL query builders, identifier quoting, cursor logic |
-| `metrics` | Metric emission helpers (`ctx.metric(...)`) |
-| `reader` / `writer` | Core read/write loop orchestration |
+| `config` | Config struct with `Deserialize` + `ConfigSchema` derives and validation/normalization helpers |
+| `client` / `transport` | Connection setup, auth, connection tests |
+| `discover` | Source schema/catalog discovery |
+| `read` | Source read orchestration |
+| `write` | Destination write orchestration |
+| `validate` | Transform validation/planning helpers when non-trivial |
+| `transform` | Transform runtime path |
+| `encode` / `decode` | Connector-specific row/batch conversion helpers |
+| `metrics` | Metric emission helpers (`ctx.metric(...)`) when they stop being obviously local |
 
 ## 4. Manifest (build.rs)
 
@@ -203,9 +219,10 @@ A source plugin implements the `Source` trait. Here is a walkthrough of each met
 
 ```rust
 mod client;
-pub mod config;
+mod config;
+mod discover;
 mod encode;
-mod reader;
+mod read;
 
 use rapidbyte_sdk::prelude::*;
 

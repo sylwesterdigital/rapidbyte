@@ -5,6 +5,7 @@
 
 mod config;
 mod transform;
+mod validate;
 
 use rapidbyte_sdk::prelude::*;
 
