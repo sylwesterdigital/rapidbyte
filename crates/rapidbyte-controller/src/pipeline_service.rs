@@ -140,6 +140,19 @@ impl PipelineServiceImpl {
         }
     }
 
+    async fn rollback_queued_cancel(
+        &self,
+        previous_run: crate::run_state::RunRecord,
+        previous_task: Option<crate::scheduler::TaskRecord>,
+    ) {
+        if let Some(previous_task) = previous_task {
+            let mut tasks = self.state.tasks.write().await;
+            tasks.restore_task(previous_task);
+        }
+        let mut runs = self.state.runs.write().await;
+        runs.restore_run(previous_run);
+    }
+
     async fn terminal_event_for_existing_run(
         &self,
         run_id: &str,
@@ -240,22 +253,58 @@ impl PipelineServiceImpl {
         run_id: &str,
         snapshot_state: InternalRunState,
     ) -> Result<CancelRunResponse, Status> {
+        let previous_run = {
+            self.state
+                .runs
+                .read()
+                .await
+                .get_run(run_id)
+                .cloned()
+                .ok_or_else(|| Status::not_found(format!("Run {run_id} not found")))?
+        };
         if let Some(response) = self
             .transition_or_retry(run_id, snapshot_state, InternalRunState::Cancelled)
             .await?
         {
             return Ok(response);
         }
-        let cancelled_task_id = self.cancel_latest_task(run_id).await;
-        self.state
-            .persist_run(run_id)
+        let (previous_task, cancelled_task) = self.cancel_latest_task(run_id).await;
+        if let Some(cancelled_task) = cancelled_task.as_ref() {
+            if let Err(error) = self.state.persist_task_record(cancelled_task).await {
+                self.rollback_queued_cancel(previous_run, previous_task)
+                    .await;
+                return Err(Status::internal(error.to_string()));
+            }
+        }
+        let cancelled_run = self
+            .state
+            .runs
+            .read()
             .await
-            .map_err(|error| Status::internal(error.to_string()))?;
-        if let Some(task_id) = cancelled_task_id {
-            self.state
-                .persist_task(&task_id)
-                .await
-                .map_err(|error| Status::internal(error.to_string()))?;
+            .get_run(run_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found(format!("Run {run_id} not found")))?;
+        if let Err(error) = self.state.persist_run_record(&cancelled_run).await {
+            if let Some(previous_task_record) = previous_task.clone() {
+                let rollback_task_id = previous_task_record.task_id.clone();
+                let rollback_error = self
+                    .state
+                    .persist_task_record(&previous_task_record)
+                    .await
+                    .err();
+                self.rollback_queued_cancel(previous_run, Some(previous_task_record))
+                    .await;
+                return Err(Status::internal(match rollback_error {
+                    Some(rollback_error) => {
+                        format!(
+                            "{error}; durable rollback for task {rollback_task_id} also failed: {rollback_error}"
+                        )
+                    }
+                    None => error.to_string(),
+                }));
+            }
+            self.rollback_queued_cancel(previous_run, None).await;
+            return Err(Status::internal(error.to_string()));
         }
         self.publish_cancelled(run_id).await;
         Ok(CancelRunResponse {
@@ -337,14 +386,22 @@ impl PipelineServiceImpl {
         ))
     }
 
-    async fn cancel_latest_task(&self, run_id: &str) -> Option<String> {
+    async fn cancel_latest_task(
+        &self,
+        run_id: &str,
+    ) -> (
+        Option<crate::scheduler::TaskRecord>,
+        Option<crate::scheduler::TaskRecord>,
+    ) {
         let mut tasks = self.state.tasks.write().await;
         if let Some(task) = tasks.find_by_run_id(run_id) {
-            let task_id = task.task_id.clone();
+            let previous_task = task.clone();
+            let task_id = previous_task.task_id.clone();
             let _ = tasks.cancel(&task_id);
-            return Some(task_id);
+            let cancelled_task = tasks.get(&task_id).cloned();
+            return (Some(previous_task), cancelled_task);
         }
-        None
+        (None, None)
     }
 
     async fn publish_cancelled(&self, run_id: &str) {
@@ -624,6 +681,7 @@ mod tests {
         RegisterAgentRequest,
     };
     use crate::run_state::RunState as InternalRunState;
+    use crate::scheduler::TaskState;
     use crate::store::test_support::FailingMetadataStore;
     use tokio_stream::StreamExt;
 
@@ -930,6 +988,130 @@ mod tests {
             .unwrap()
             .into_inner();
         assert_eq!(get_resp.state, RunState::Cancelled as i32);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_queued_run_rolls_back_when_task_persist_fails() {
+        let store = FailingMetadataStore::new().fail_task_upsert_on(2);
+        let state =
+            ControllerState::with_metadata_store(b"test-key-for-pipeline-service!!", store.clone());
+        let svc = PipelineServiceImpl::new(state.clone());
+
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+        let run_id = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+        let task_id = state
+            .tasks
+            .read()
+            .await
+            .find_by_run_id(&run_id)
+            .expect("submitted task should exist")
+            .task_id
+            .clone();
+
+        let err = svc
+            .cancel_run(Request::new(CancelRunRequest {
+                run_id: run_id.clone(),
+            }))
+            .await
+            .expect_err("cancel should fail when task persistence fails");
+        assert_eq!(err.code(), tonic::Code::Internal);
+
+        let runs = state.runs.read().await;
+        assert_eq!(
+            runs.get_run(&run_id).unwrap().state,
+            InternalRunState::Pending
+        );
+        drop(runs);
+
+        let tasks = state.tasks.read().await;
+        assert_eq!(tasks.get(&task_id).unwrap().state, TaskState::Pending);
+        drop(tasks);
+
+        assert_eq!(
+            store
+                .persisted_run(&run_id)
+                .expect("durable run should exist")
+                .state,
+            InternalRunState::Pending
+        );
+        assert_eq!(
+            store
+                .persisted_task(&task_id)
+                .expect("durable task should exist")
+                .state,
+            TaskState::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_queued_run_rolls_back_when_run_persist_fails() {
+        let store = FailingMetadataStore::new().fail_run_upsert_on(2);
+        let state =
+            ControllerState::with_metadata_store(b"test-key-for-pipeline-service!!", store.clone());
+        let svc = PipelineServiceImpl::new(state.clone());
+
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+        let run_id = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+        let task_id = state
+            .tasks
+            .read()
+            .await
+            .find_by_run_id(&run_id)
+            .expect("submitted task should exist")
+            .task_id
+            .clone();
+
+        let err = svc
+            .cancel_run(Request::new(CancelRunRequest {
+                run_id: run_id.clone(),
+            }))
+            .await
+            .expect_err("cancel should fail when run persistence fails");
+        assert_eq!(err.code(), tonic::Code::Internal);
+
+        let runs = state.runs.read().await;
+        assert_eq!(
+            runs.get_run(&run_id).unwrap().state,
+            InternalRunState::Pending
+        );
+        drop(runs);
+
+        let tasks = state.tasks.read().await;
+        assert_eq!(tasks.get(&task_id).unwrap().state, TaskState::Pending);
+        drop(tasks);
+
+        assert_eq!(
+            store
+                .persisted_run(&run_id)
+                .expect("durable run should exist")
+                .state,
+            InternalRunState::Pending
+        );
+        assert_eq!(
+            store
+                .persisted_task(&task_id)
+                .expect("durable task should exist")
+                .state,
+            TaskState::Pending
+        );
     }
 
     #[tokio::test]

@@ -70,6 +70,15 @@ impl AgentServiceImpl {
             {
                 drop(runs);
                 let _ = tasks.reject_assignment(&assignment.task_id, assignment.lease_epoch);
+                let rejected_task = tasks
+                    .get(&assignment.task_id)
+                    .cloned()
+                    .expect("rejected task should still exist");
+                drop(tasks);
+                self.state
+                    .persist_task_record(&rejected_task)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?;
                 return Ok(None);
             }
             runs.set_current_task(
@@ -814,6 +823,63 @@ mod tests {
         assert!(task.lease.is_none());
         assert!(task.assigned_agent_id.is_none());
         assert_eq!(tasks.active_tasks_for_agent(&agent_id), 0);
+    }
+
+    #[tokio::test]
+    async fn poll_task_persists_rejected_assignment() {
+        let store = FailingMetadataStore::new();
+        let state =
+            ControllerState::with_metadata_store(b"test-key-for-agent-service!!!!", store.clone());
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+        let task_id = state
+            .tasks
+            .read()
+            .await
+            .find_by_run_id(&run_id)
+            .expect("submitted task should exist")
+            .task_id
+            .clone();
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Cancelled)
+                .unwrap();
+        }
+
+        let resp = svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id,
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(matches!(
+            resp.result,
+            Some(poll_task_response::Result::NoTask(_))
+        ));
+
+        assert_eq!(
+            store
+                .persisted_task(&task_id)
+                .expect("durable task should exist")
+                .state,
+            TaskState::Cancelled
+        );
     }
 
     #[tokio::test]

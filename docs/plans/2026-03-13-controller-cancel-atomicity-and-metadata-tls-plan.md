@@ -6,7 +6,7 @@
 
 **Architecture:** Reuse the branch’s existing snapshot-and-rollback pattern for queued cancel and rejected assignment paths so in-memory state is never accepted ahead of durable writes. Replace the hardcoded `NoTls` metadata connection bootstrap with Postgres-config-driven connection setup that supports both plain and TLS transport without new controller-specific DB TLS flags.
 
-**Tech Stack:** Rust, Tokio, tonic, tokio-postgres, postgres-native-tls, native-tls, clap, controller unit tests, existing ignored Postgres-backed integration tests.
+**Tech Stack:** Rust, Tokio, tonic, tokio-postgres, rustls, tokio-rustls, rustls-native-certs, clap, controller unit tests, existing ignored Postgres-backed integration tests.
 
 ---
 

@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use rustls::crypto::ring::default_provider;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Verbosity {
@@ -228,6 +229,7 @@ fn resolve_controller_url(
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> ExitCode {
+    let _ = default_provider().install_default();
     let cli = Cli::parse();
 
     let verbosity = Verbosity::from_flags(cli.quiet, cli.verbose);

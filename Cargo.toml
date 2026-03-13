@@ -62,3 +62,6 @@ tower = { version = "0.5", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 async-trait = "0.1"
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+tokio-rustls = "0.26"
+rustls-native-certs = "0.8"

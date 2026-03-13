@@ -3,12 +3,17 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use rustls::crypto::ring::default_provider;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsClientConfig {
     pub ca_cert_path: Option<PathBuf>,
     pub domain_name: Option<String>,
+}
+
+fn install_rustls_provider() {
+    let _ = default_provider().install_default();
 }
 
 impl TlsClientConfig {
@@ -21,6 +26,7 @@ impl TlsClientConfig {
 pub fn build_endpoint(url: &str, tls: Option<&TlsClientConfig>) -> Result<Endpoint> {
     let mut endpoint = Endpoint::from_shared(url.to_string())?;
     if url.starts_with("https://") || tls.is_some() {
+        install_rustls_provider();
         let mut tls_config = ClientTlsConfig::new();
         if let Some(tls) = tls {
             if let Some(path) = &tls.ca_cert_path {

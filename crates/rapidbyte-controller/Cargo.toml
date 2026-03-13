@@ -25,6 +25,9 @@ tower = { workspace = true }
 tokio-postgres = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }

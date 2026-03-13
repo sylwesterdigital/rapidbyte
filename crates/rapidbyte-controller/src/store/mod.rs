@@ -1,11 +1,20 @@
 //! Durable controller metadata store bootstrap and persistence helpers.
 
+use std::future::Future;
+use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use tokio_postgres::{Client, NoTls, Row};
+use tokio::io::{AsyncRead, AsyncWrite, BufReader, ReadBuf};
+use tokio_postgres::tls::{self, MakeTlsConnect, TlsConnect};
+use tokio_postgres::{config::SslMode, Client, Config as PgConfig, NoTls, Row};
+use tokio_rustls::{
+    client::TlsStream as RustlsClientStream, rustls, TlsConnector as RustlsConnector,
+};
 
 use crate::lease::Lease;
 use crate::preview::{PreviewEntry, PreviewStreamEntry};
@@ -28,6 +37,106 @@ pub struct MetadataSnapshot {
 #[derive(Clone)]
 pub struct MetadataStore {
     client: Arc<Client>,
+}
+
+#[derive(Clone)]
+struct MakeRustlsConnect {
+    config: Arc<rustls::ClientConfig>,
+}
+
+impl MakeRustlsConnect {
+    fn new(config: rustls::ClientConfig) -> Self {
+        Self {
+            config: Arc::new(config),
+        }
+    }
+}
+
+impl<S> MakeTlsConnect<S> for MakeRustlsConnect
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    type Stream = RustlsStream<S>;
+    type TlsConnect = RustlsTlsConnect;
+    type Error = io::Error;
+
+    fn make_tls_connect(&mut self, domain: &str) -> Result<Self::TlsConnect, Self::Error> {
+        let domain = rustls::pki_types::ServerName::try_from(domain.to_owned())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        Ok(RustlsTlsConnect {
+            connector: RustlsConnector::from(self.config.clone()),
+            domain,
+        })
+    }
+}
+
+struct RustlsTlsConnect {
+    connector: RustlsConnector,
+    domain: rustls::pki_types::ServerName<'static>,
+}
+
+impl<S> TlsConnect<S> for RustlsTlsConnect
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    type Stream = RustlsStream<S>;
+    type Error = io::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Stream, Self::Error>> + Send>>;
+
+    fn connect(self, stream: S) -> Self::Future {
+        Box::pin(async move {
+            let stream = self
+                .connector
+                .connect(self.domain, BufReader::with_capacity(8192, stream))
+                .await?;
+            Ok(RustlsStream(stream))
+        })
+    }
+}
+
+struct RustlsStream<S>(RustlsClientStream<BufReader<S>>);
+
+impl<S> AsyncRead for RustlsStream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
+impl<S> AsyncWrite for RustlsStream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_shutdown(cx)
+    }
+}
+
+impl<S> tls::TlsStream for RustlsStream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    fn channel_binding(&self) -> tls::ChannelBinding {
+        tls::ChannelBinding::none()
+    }
 }
 
 #[async_trait]
@@ -58,12 +167,25 @@ impl MetadataStore {
     /// Returns an error if the database cannot be reached or the schema
     /// migration fails.
     pub async fn connect(database_url: &str) -> anyhow::Result<Self> {
-        let (client, connection) = tokio_postgres::connect(database_url, NoTls).await?;
-        tokio::spawn(async move {
-            if let Err(error) = connection.await {
-                tracing::error!(?error, "controller metadata store connection failed");
-            }
-        });
+        let config = parse_metadata_database_config(database_url)?;
+        let client = if config.get_ssl_mode() == SslMode::Disable {
+            let (client, connection) = config.connect(NoTls).await?;
+            tokio::spawn(async move {
+                if let Err(error) = connection.await {
+                    tracing::error!(?error, "controller metadata store connection failed");
+                }
+            });
+            client
+        } else {
+            let tls = MakeRustlsConnect::new(metadata_rustls_config(&config)?);
+            let (client, connection) = config.connect(tls).await?;
+            tokio::spawn(async move {
+                if let Err(error) = connection.await {
+                    tracing::error!(?error, "controller metadata store connection failed");
+                }
+            });
+            client
+        };
         client.batch_execute(CONTROLLER_METADATA_MIGRATIONS).await?;
         Ok(Self {
             client: Arc::new(client),
@@ -685,10 +807,49 @@ fn system_time_from_instant(time: Instant) -> SystemTime {
         .unwrap_or_else(SystemTime::now)
 }
 
+fn parse_metadata_database_config(database_url: &str) -> anyhow::Result<PgConfig> {
+    database_url.parse::<PgConfig>().map_err(Into::into)
+}
+
+fn metadata_rustls_config(config: &PgConfig) -> anyhow::Result<rustls::ClientConfig> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let mut roots = rustls::RootCertStore::empty();
+    let certs = rustls_native_certs::load_native_certs();
+    let mut valid_count = 0usize;
+
+    for cert in certs.certs {
+        if roots.add(cert).is_ok() {
+            valid_count += 1;
+        }
+    }
+
+    if valid_count == 0 {
+        anyhow::bail!("no valid native root certificates available for metadata database TLS");
+    }
+
+    let mut tls_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    if config.get_ssl_negotiation() == tokio_postgres::config::SslNegotiation::Direct {
+        tls_config.alpn_protocols.push(b"postgresql".to_vec());
+    }
+    Ok(tls_config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::env;
+
+    #[test]
+    fn metadata_store_config_parses_sslmode_require() {
+        let config = parse_metadata_database_config(
+            "postgres://user:password@db.example.com/app?sslmode=require",
+        )
+        .expect("config should parse");
+
+        assert_eq!(config.get_ssl_mode(), SslMode::Require);
+    }
 
     #[tokio::test]
     #[ignore = "requires RAPIDBYTE_CONTROLLER_METADATA_TEST_DATABASE_URL"]
@@ -829,6 +990,7 @@ mod tests {
 pub mod test_support {
     #![allow(clippy::missing_panics_doc)]
 
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime};
 
@@ -848,6 +1010,8 @@ pub mod test_support {
         run_upsert_calls: usize,
         task_upsert_calls: usize,
         delete_run_calls: usize,
+        persisted_runs: HashMap<String, RunRecord>,
+        persisted_tasks: HashMap<String, TaskRecord>,
     }
 
     #[derive(Default)]
@@ -878,6 +1042,26 @@ pub mod test_support {
             self.failures.lock().unwrap().delete_run_fail_on = Some(call);
             self
         }
+
+        #[must_use]
+        pub fn persisted_run(&self, run_id: &str) -> Option<RunRecord> {
+            self.failures
+                .lock()
+                .unwrap()
+                .persisted_runs
+                .get(run_id)
+                .cloned()
+        }
+
+        #[must_use]
+        pub fn persisted_task(&self, task_id: &str) -> Option<TaskRecord> {
+            self.failures
+                .lock()
+                .unwrap()
+                .persisted_tasks
+                .get(task_id)
+                .cloned()
+        }
     }
 
     #[async_trait]
@@ -888,6 +1072,9 @@ pub mod test_support {
             if failures.run_upsert_fail_on == Some(failures.run_upsert_calls) {
                 anyhow::bail!("injected run upsert failure");
             }
+            failures
+                .persisted_runs
+                .insert(_run.run_id.clone(), _run.clone());
             Ok(())
         }
 
@@ -897,6 +1084,9 @@ pub mod test_support {
             if failures.task_upsert_fail_on == Some(failures.task_upsert_calls) {
                 anyhow::bail!("injected task upsert failure");
             }
+            failures
+                .persisted_tasks
+                .insert(_task.task_id.clone(), _task.clone());
             Ok(())
         }
 
@@ -927,6 +1117,10 @@ pub mod test_support {
             if failures.delete_run_fail_on == Some(failures.delete_run_calls) {
                 anyhow::bail!("injected run delete failure");
             }
+            failures.persisted_runs.remove(_run_id);
+            failures
+                .persisted_tasks
+                .retain(|_, task| task.run_id != _run_id);
             Ok(())
         }
     }
