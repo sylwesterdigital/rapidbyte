@@ -2048,6 +2048,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn test_heartbeat_rolls_back_renewed_leases_when_persist_fails() {
         let store = FailingMetadataStore::new().fail_task_upsert_on(6);
         let state =
