@@ -39,7 +39,7 @@ impl PreviewFlightService {
         &self,
         payload: &crate::ticket::TicketPayload,
     ) -> Result<(Vec<arrow::record_batch::RecordBatch>, u64, u64), Status> {
-        let mut spool = self.spool.write().await;
+        let spool = self.spool.read().await;
         let key = PreviewKey {
             run_id: payload.run_id.clone(),
             task_id: payload.task_id.clone(),
@@ -223,37 +223,7 @@ mod tests {
     use tokio_stream::StreamExt;
 
     fn sign_ticket(key: &[u8], payload: &crate::ticket::TicketPayload) -> Vec<u8> {
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-
-        type HmacSha256 = Hmac<Sha256>;
-
-        let mut buf = Vec::new();
-        buf.extend_from_slice(
-            &u32::try_from(payload.run_id.len())
-                .expect("run_id length exceeds u32::MAX")
-                .to_le_bytes(),
-        );
-        buf.extend_from_slice(payload.run_id.as_bytes());
-        buf.extend_from_slice(
-            &u32::try_from(payload.task_id.len())
-                .expect("task_id length exceeds u32::MAX")
-                .to_le_bytes(),
-        );
-        buf.extend_from_slice(payload.task_id.as_bytes());
-        buf.extend_from_slice(
-            &u32::try_from(payload.stream_name.len())
-                .expect("stream_name length exceeds u32::MAX")
-                .to_le_bytes(),
-        );
-        buf.extend_from_slice(payload.stream_name.as_bytes());
-        buf.extend_from_slice(&payload.lease_epoch.to_le_bytes());
-        buf.extend_from_slice(&payload.expires_at_unix.to_le_bytes());
-
-        let mut mac = HmacSha256::new_from_slice(key).unwrap();
-        mac.update(&buf);
-        buf.extend_from_slice(&mac.finalize().into_bytes());
-        buf
+        crate::ticket::TicketSigner::new(key).sign(payload)
     }
 
     fn future_expiry() -> u64 {

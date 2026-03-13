@@ -182,42 +182,6 @@ impl TicketSigner {
 mod tests {
     use super::*;
 
-    /// Create a ticket using the same binary format as the controller's `TicketSigner`.
-    fn sign_ticket(key: &[u8], payload: &TicketPayload) -> Vec<u8> {
-        let mut buf = Vec::new();
-        // Write run_id
-        buf.extend_from_slice(
-            &u32::try_from(payload.run_id.len())
-                .expect("run_id length exceeds u32::MAX")
-                .to_le_bytes(),
-        );
-        buf.extend_from_slice(payload.run_id.as_bytes());
-        // Write task_id
-        buf.extend_from_slice(
-            &u32::try_from(payload.task_id.len())
-                .expect("task_id length exceeds u32::MAX")
-                .to_le_bytes(),
-        );
-        buf.extend_from_slice(payload.task_id.as_bytes());
-        // Write stream_name
-        buf.extend_from_slice(
-            &u32::try_from(payload.stream_name.len())
-                .expect("stream_name length exceeds u32::MAX")
-                .to_le_bytes(),
-        );
-        buf.extend_from_slice(payload.stream_name.as_bytes());
-        // Write u64 fields
-        buf.extend_from_slice(&payload.lease_epoch.to_le_bytes());
-        buf.extend_from_slice(&payload.expires_at_unix.to_le_bytes());
-
-        // HMAC
-        let mut mac = HmacSha256::new_from_slice(key).unwrap();
-        mac.update(&buf);
-        let sig = mac.finalize().into_bytes();
-        buf.extend_from_slice(&sig);
-        buf
-    }
-
     fn future_expiry() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -237,7 +201,7 @@ mod tests {
             lease_epoch: 42,
             expires_at_unix: future_expiry(),
         };
-        let ticket = sign_ticket(key, &payload);
+        let ticket = TicketSigner::new(key).sign(&payload);
         let actual = verifier.verify(&ticket).unwrap();
         assert_eq!(actual, payload);
     }
@@ -253,7 +217,7 @@ mod tests {
             lease_epoch: 42,
             expires_at_unix: future_expiry(),
         };
-        let mut ticket = sign_ticket(key, &payload);
+        let mut ticket = TicketSigner::new(key).sign(&payload);
         ticket[0] ^= 0xFF;
         assert!(matches!(
             verifier.verify(&ticket),
@@ -272,7 +236,7 @@ mod tests {
             lease_epoch: 1,
             expires_at_unix: 0, // already expired
         };
-        let ticket = sign_ticket(key, &payload);
+        let ticket = TicketSigner::new(key).sign(&payload);
         assert!(matches!(
             verifier.verify(&ticket),
             Err(TicketError::Expired)
@@ -303,5 +267,46 @@ mod tests {
 
         let ticket = signer.sign(&payload);
         assert_eq!(verifier.verify(&ticket).unwrap(), payload);
+    }
+
+    /// Verify against a manually-constructed wire-format ticket to ensure
+    /// the binary layout stays compatible with the controller's signer.
+    /// This catches signer+verifier drifting together without detection.
+    #[test]
+    fn verify_independent_wire_format() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let key = b"test-secret-key-32-bytes-long!!!";
+        let verifier = TicketVerifier::new(key);
+
+        // Manually encode: len-prefixed strings + u64 LE fields
+        let mut buf = Vec::new();
+        // run_id = "r1"
+        buf.extend_from_slice(&2u32.to_le_bytes());
+        buf.extend_from_slice(b"r1");
+        // task_id = "t1"
+        buf.extend_from_slice(&2u32.to_le_bytes());
+        buf.extend_from_slice(b"t1");
+        // stream_name = "users"
+        buf.extend_from_slice(&5u32.to_le_bytes());
+        buf.extend_from_slice(b"users");
+        // lease_epoch = 42
+        buf.extend_from_slice(&42u64.to_le_bytes());
+        // expires_at_unix = far future
+        let expires = future_expiry();
+        buf.extend_from_slice(&expires.to_le_bytes());
+
+        // HMAC-SHA256
+        let mut mac = <Hmac<Sha256>>::new_from_slice(key).unwrap();
+        mac.update(&buf);
+        buf.extend_from_slice(&mac.finalize().into_bytes());
+
+        let payload = verifier.verify(&buf).unwrap();
+        assert_eq!(payload.run_id, "r1");
+        assert_eq!(payload.task_id, "t1");
+        assert_eq!(payload.stream_name, "users");
+        assert_eq!(payload.lease_epoch, 42);
+        assert_eq!(payload.expires_at_unix, expires);
     }
 }

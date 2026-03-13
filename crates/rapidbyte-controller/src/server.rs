@@ -301,6 +301,13 @@ async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_t
         } else {
             None
         };
+        let error_info = TimeoutErrorInfo {
+            code: ERROR_CODE_RECOVERY_TIMEOUT,
+            message: "Run recovery reconciliation timed out after controller restart".into(),
+            retryable: false,
+            safe_to_retry: false,
+        };
+
         let attempt = {
             let mut runs = state.runs.write().await;
             let Some(run) = runs.get_run(&run_id) else {
@@ -317,16 +324,7 @@ async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_t
                 continue;
             }
             if let Some(run) = runs.get_run_mut(&run_id) {
-                set_run_error(
-                    run,
-                    &TimeoutErrorInfo {
-                        code: ERROR_CODE_RECOVERY_TIMEOUT,
-                        message: "Run recovery reconciliation timed out after controller restart"
-                            .into(),
-                        retryable: false,
-                        safe_to_retry: false,
-                    },
-                );
+                set_run_error(run, &error_info);
             }
             attempt
         };
@@ -371,19 +369,7 @@ async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_t
         }
 
         if durable {
-            publish_run_failed(
-                state,
-                &run_id,
-                TimeoutErrorInfo {
-                    code: ERROR_CODE_RECOVERY_TIMEOUT,
-                    message: "Run recovery reconciliation timed out after controller restart"
-                        .into(),
-                    retryable: false,
-                    safe_to_retry: false,
-                },
-                attempt,
-            )
-            .await;
+            publish_run_failed(state, &run_id, error_info, attempt).await;
         } else {
             tracing::warn!(run_id, "skipping reconciliation-timeout terminal publish because durable persistence failed");
         }
