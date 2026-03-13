@@ -135,6 +135,21 @@ impl RunStore {
         self.runs.get_mut(run_id)
     }
 
+    /// Restore an existing run record loaded from durable storage.
+    pub fn restore_run(&mut self, record: RunRecord) {
+        if let Some(key) = &record.idempotency_key {
+            self.idempotency_index
+                .insert(key.clone(), record.run_id.clone());
+        }
+        self.runs.insert(record.run_id.clone(), record);
+    }
+
+    /// Snapshot all run records.
+    #[must_use]
+    pub fn all_runs(&self) -> Vec<RunRecord> {
+        self.runs.values().cloned().collect()
+    }
+
     /// Transition a run to a new state. Returns error if the transition is invalid.
     ///
     /// # Errors
@@ -436,5 +451,33 @@ mod tests {
         let (id1, _) = store.create_run("r1".into(), "pipe".into(), Some("key1".into()));
         let (id2, _) = store.create_run("r2".into(), "pipe".into(), Some("key2".into()));
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn restore_run_rebuilds_idempotency_index() {
+        let now = SystemTime::now();
+        let mut store = RunStore::new();
+        store.restore_run(RunRecord {
+            run_id: "r1".into(),
+            pipeline_name: "pipe".into(),
+            state: RunState::Pending,
+            created_at: now,
+            updated_at: now,
+            started_at: None,
+            completed_at: None,
+            current_task: None,
+            error_message: None,
+            attempt: 1,
+            idempotency_key: Some("idem-key".into()),
+            total_records: 0,
+            total_bytes: 0,
+            elapsed_seconds: 0.0,
+            cursors_advanced: 0,
+        });
+
+        assert_eq!(
+            store.find_by_idempotency_key("idem-key").unwrap().run_id,
+            "r1"
+        );
     }
 }

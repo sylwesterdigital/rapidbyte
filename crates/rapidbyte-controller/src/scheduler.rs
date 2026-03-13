@@ -339,6 +339,20 @@ impl TaskQueue {
         self.tasks.get(task_id)
     }
 
+    /// Restore an existing task record loaded from durable storage.
+    pub fn restore_task(&mut self, record: TaskRecord) {
+        if record.state == TaskState::Pending {
+            self.pending.push_back(record.task_id.clone());
+        }
+        self.tasks.insert(record.task_id.clone(), record);
+    }
+
+    /// Snapshot all task records.
+    #[must_use]
+    pub fn all_tasks(&self) -> Vec<TaskRecord> {
+        self.tasks.values().cloned().collect()
+    }
+
     /// Find the task for a given `run_id` (most recent attempt).
     #[must_use]
     pub fn find_by_run_id(&self, run_id: &str) -> Option<&TaskRecord> {
@@ -657,5 +671,25 @@ mod tests {
         assert_eq!(a1.run_id, "r1");
         assert_eq!(a2.run_id, "r2");
         assert_eq!(a3.run_id, "r3");
+    }
+
+    #[test]
+    fn restore_task_rebuilds_pending_queue() {
+        let (mut q, gen) = make_queue_and_gen();
+        q.restore_task(TaskRecord {
+            task_id: "task-1".into(),
+            run_id: "r1".into(),
+            attempt: 1,
+            lease: None,
+            state: TaskState::Pending,
+            pipeline_yaml: b"yaml".to_vec(),
+            dry_run: false,
+            limit: None,
+            assigned_agent_id: None,
+        });
+
+        let assignment = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
+        assert_eq!(assignment.task_id, "task-1");
+        assert_eq!(assignment.run_id, "r1");
     }
 }

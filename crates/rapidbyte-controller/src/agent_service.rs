@@ -115,14 +115,25 @@ impl AgentService for AgentServiceImpl {
 
         // Renew leases for active tasks reported by the agent
         if !req.active_leases.is_empty() {
+            let mut renewed_tasks = Vec::new();
             let mut tasks = self.state.tasks.write().await;
             for active_lease in &req.active_leases {
-                tasks.renew_lease(
+                if tasks.renew_lease(
                     &active_lease.task_id,
                     &req.agent_id,
                     active_lease.lease_epoch,
                     LEASE_TTL,
-                );
+                ) {
+                    renewed_tasks.push(active_lease.task_id.clone());
+                }
+            }
+            drop(tasks);
+
+            for task_id in renewed_tasks {
+                self.state
+                    .persist_task(&task_id)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?;
             }
         }
 
@@ -206,6 +217,14 @@ impl AgentService for AgentServiceImpl {
                     }
                 };
                 if claimed {
+                    self.state
+                        .persist_run(&assignment.run_id)
+                        .await
+                        .map_err(|error| Status::internal(error.to_string()))?;
+                    self.state
+                        .persist_task(&assignment.task_id)
+                        .await
+                        .map_err(|error| Status::internal(error.to_string()))?;
                     return Ok(Response::new(make_task_response(assignment)));
                 }
 
@@ -255,6 +274,14 @@ impl AgentService for AgentServiceImpl {
                 }
             };
             if claimed {
+                self.state
+                    .persist_run(&assignment.run_id)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?;
+                self.state
+                    .persist_task(&assignment.task_id)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?;
                 return Ok(Response::new(make_task_response(assignment)));
             }
 
@@ -307,6 +334,14 @@ impl AgentService for AgentServiceImpl {
         };
 
         self.state.runs.write().await.ensure_running(&run_id);
+        self.state
+            .persist_task(&req.task_id)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+        self.state
+            .persist_run(&run_id)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
 
         if let Some(progress) = req.progress {
             let watchers = self.state.watchers.read().await;
@@ -362,6 +397,10 @@ impl AgentService for AgentServiceImpl {
                 }
             }
         };
+        self.state
+            .persist_task(&req.task_id)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
 
         // Transition run state and publish events
         match outcome {
@@ -426,6 +465,14 @@ impl AgentService for AgentServiceImpl {
                         ttl: Duration::from_secs(300),
                     });
                 }
+                self.state
+                    .persist_preview(&run_id)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?;
+                self.state
+                    .persist_run(&run_id)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?;
 
                 let metrics = req.metrics.as_ref();
                 self.state.watchers.write().await.publish_terminal(
@@ -469,10 +516,18 @@ impl AgentService for AgentServiceImpl {
                         (task.pipeline_yaml.clone(), task.dry_run, task.limit)
                     };
 
-                    {
+                    let next_task_id = {
                         let mut tasks = self.state.tasks.write().await;
-                        tasks.enqueue(run_id.clone(), yaml, dry_run, limit, attempt + 1);
-                    }
+                        tasks.enqueue(run_id.clone(), yaml, dry_run, limit, attempt + 1)
+                    };
+                    self.state
+                        .persist_task(&next_task_id)
+                        .await
+                        .map_err(|error| Status::internal(error.to_string()))?;
+                    self.state
+                        .persist_run(&run_id)
+                        .await
+                        .map_err(|error| Status::internal(error.to_string()))?;
                     self.state.task_notify.notify_waiters();
 
                     tracing::info!(run_id, attempt = attempt + 1, "Auto-requeued failed task");
@@ -486,6 +541,10 @@ impl AgentService for AgentServiceImpl {
                                 error.map(|e| format!("{}: {}", e.code, e.message));
                         }
                     }
+                    self.state
+                        .persist_run(&run_id)
+                        .await
+                        .map_err(|error| Status::internal(error.to_string()))?;
 
                     self.state.watchers.write().await.publish_terminal(
                         &run_id,
@@ -505,6 +564,10 @@ impl AgentService for AgentServiceImpl {
                     runs.ensure_running(&run_id);
                     let _ = runs.transition(&run_id, InternalRunState::Cancelled);
                 }
+                self.state
+                    .persist_run(&run_id)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?;
 
                 self.state.watchers.write().await.publish_terminal(
                     &run_id,

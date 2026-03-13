@@ -92,7 +92,9 @@ fn metadata_database_url(config: &ControllerConfig) -> anyhow::Result<&str> {
     }
 }
 
-async fn initialize_metadata_store(config: &ControllerConfig) -> anyhow::Result<()> {
+async fn initialize_metadata_store(
+    config: &ControllerConfig,
+) -> anyhow::Result<store::MetadataStore> {
     let url = metadata_database_url(config)?;
     store::initialize_metadata_store(url).await
 }
@@ -122,6 +124,12 @@ async fn handle_expired_lease(state: &ControllerState, task_id: &str, run_id: &s
             None
         }
     };
+    if let Err(error) = state.persist_task(task_id).await {
+        tracing::error!(task_id, run_id, ?error, "failed to persist expired task");
+    }
+    if let Err(error) = state.persist_run(run_id).await {
+        tracing::error!(task_id, run_id, ?error, "failed to persist timed-out run");
+    }
 
     if let Some((msg, attempt)) = error_msg {
         state.watchers.write().await.publish_terminal(
@@ -168,7 +176,7 @@ fn spawn_preview_cleanup_task(
 pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
     validate_auth_config(&config)?;
     validate_signing_key_config(&config)?;
-    initialize_metadata_store(&config).await?;
+    let metadata_store = initialize_metadata_store(&config).await?;
 
     if config.signing_key == DEFAULT_SIGNING_KEY {
         tracing::warn!(
@@ -181,7 +189,7 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
         );
     }
 
-    let state = ControllerState::new(&config.signing_key);
+    let state = ControllerState::from_metadata_store(&config.signing_key, metadata_store).await?;
 
     // Background task: reap dead agents
     let reap_state = state.clone();

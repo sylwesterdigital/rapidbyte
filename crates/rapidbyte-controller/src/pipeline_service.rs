@@ -178,7 +178,17 @@ impl PipelineServiceImpl {
         {
             return Ok(response);
         }
-        self.cancel_latest_task(run_id).await;
+        let cancelled_task_id = self.cancel_latest_task(run_id).await;
+        self.state
+            .persist_run(run_id)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+        if let Some(task_id) = cancelled_task_id {
+            self.state
+                .persist_task(&task_id)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+        }
         self.publish_cancelled(run_id).await;
         Ok(CancelRunResponse {
             accepted: true,
@@ -197,6 +207,10 @@ impl PipelineServiceImpl {
         {
             return Ok(response);
         }
+        self.state
+            .persist_run(run_id)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
         Ok(CancelRunResponse {
             accepted: true,
             message: "Assigned — cancel will be delivered via heartbeat".into(),
@@ -214,6 +228,10 @@ impl PipelineServiceImpl {
         {
             return Ok(response);
         }
+        self.state
+            .persist_run(run_id)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
         Ok(CancelRunResponse {
             accepted: true,
             message: "Running — cancel will be delivered via heartbeat".into(),
@@ -251,12 +269,14 @@ impl PipelineServiceImpl {
         ))
     }
 
-    async fn cancel_latest_task(&self, run_id: &str) {
+    async fn cancel_latest_task(&self, run_id: &str) -> Option<String> {
         let mut tasks = self.state.tasks.write().await;
         if let Some(task) = tasks.find_by_run_id(run_id) {
             let task_id = task.task_id.clone();
             let _ = tasks.cancel(&task_id);
+            return Some(task_id);
         }
+        None
     }
 
     async fn publish_cancelled(&self, run_id: &str) {
@@ -339,6 +359,14 @@ impl PipelineService for PipelineServiceImpl {
             };
 
             tracing::info!(run_id = %actual_run_id, task_id, "Pipeline submitted");
+            self.state
+                .persist_run(&actual_run_id)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+            self.state
+                .persist_task(&task_id)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
             self.state.task_notify.notify_waiters();
         }
 

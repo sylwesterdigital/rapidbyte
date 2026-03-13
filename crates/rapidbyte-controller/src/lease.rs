@@ -11,8 +11,13 @@ pub struct EpochGenerator {
 impl EpochGenerator {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_start(0)
+    }
+
+    #[must_use]
+    pub fn with_start(last_issued_epoch: u64) -> Self {
         Self {
-            counter: AtomicU64::new(0),
+            counter: AtomicU64::new(last_issued_epoch),
         }
     }
 
