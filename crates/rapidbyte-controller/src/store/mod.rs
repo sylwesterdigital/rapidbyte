@@ -264,6 +264,7 @@ impl MetadataStore {
     /// # Errors
     ///
     /// Returns an error if the database write fails.
+    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_preview(
         &self,
         run_id: &str,
@@ -374,6 +375,11 @@ impl MetadataStore {
     }
 }
 
+/// Initialize the controller metadata store and apply schema migrations.
+///
+/// # Errors
+///
+/// Returns an error if the database connection, migration, or store initialization fails.
 pub async fn initialize_metadata_store(database_url: &str) -> anyhow::Result<MetadataStore> {
     MetadataStore::connect(database_url).await
 }
@@ -616,6 +622,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires RAPIDBYTE_CONTROLLER_METADATA_TEST_DATABASE_URL"]
+    #[allow(clippy::too_many_lines)]
     async fn metadata_store_roundtrips_runs_and_tasks() {
         let admin_url = env::var("RAPIDBYTE_CONTROLLER_METADATA_TEST_DATABASE_URL")
             .expect("test database URL env var must be set");

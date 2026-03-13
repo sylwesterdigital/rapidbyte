@@ -29,8 +29,7 @@ pub fn to_proto_state(s: InternalRunState) -> i32 {
         InternalRunState::PreviewReady => RunState::PreviewReady.into(),
         InternalRunState::Completed => RunState::Completed.into(),
         InternalRunState::RecoveryFailed => RunState::RecoveryFailed.into(),
-        InternalRunState::Failed => RunState::Failed.into(),
-        InternalRunState::TimedOut => RunState::Failed.into(),
+        InternalRunState::Failed | InternalRunState::TimedOut => RunState::Failed.into(),
         InternalRunState::Cancelled => RunState::Cancelled.into(),
     }
 }

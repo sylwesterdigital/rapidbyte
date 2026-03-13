@@ -4,6 +4,7 @@ use anyhow::Result;
 use std::path::Path;
 use std::time::Duration;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute(
     listen: &str,
     metadata_database_url: Option<&str>,
@@ -29,6 +30,7 @@ pub async fn execute(
     rapidbyte_controller::run(config).await
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_config(
     listen: &str,
     metadata_database_url: Option<&str>,
