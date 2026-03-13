@@ -107,62 +107,39 @@ impl PreviewSpool {
     }
 
     #[must_use]
-    pub fn get(&mut self, key: &PreviewKey) -> Option<DryRunResult> {
-        if self.entry_expired(key) {
-            if let Some(entry) = self.entries.remove(key) {
-                remove_entry_files(entry);
-            }
+    pub fn get(&self, key: &PreviewKey) -> Option<DryRunResult> {
+        let entry = self.entries.get(key)?;
+        if entry.created_at.elapsed() >= entry.ttl {
             return None;
         }
 
-        let result = {
-            let entry = self.entries.get(key)?;
-            let streams = entry
-                .streams
-                .iter()
-                .map(|stored| {
-                    load_batches(&stored.storage)
-                        .ok()
-                        .map(|batches| DryRunStreamResult {
-                            stream_name: stored.stream_name.clone(),
-                            batches,
-                            total_rows: stored.total_rows,
-                            total_bytes: stored.total_bytes,
-                        })
-                })
-                .collect::<Option<Vec<_>>>();
-
-            streams.map(|streams| DryRunResult {
-                streams,
-                source: entry.source.clone(),
-                transform_count: entry.transform_count,
-                transform_duration_secs: entry.transform_duration_secs,
-                duration_secs: entry.duration_secs,
+        let streams = entry
+            .streams
+            .iter()
+            .map(|stored| {
+                load_batches(&stored.storage)
+                    .ok()
+                    .map(|batches| DryRunStreamResult {
+                        stream_name: stored.stream_name.clone(),
+                        batches,
+                        total_rows: stored.total_rows,
+                        total_bytes: stored.total_bytes,
+                    })
             })
-        };
+            .collect::<Option<Vec<_>>>()?;
 
-        if result.is_none() {
-            if let Some(entry) = self.entries.remove(key) {
-                remove_entry_files(entry);
-            }
-        }
-
-        result
+        Some(DryRunResult {
+            streams,
+            source: entry.source.clone(),
+            transform_count: entry.transform_count,
+            transform_duration_secs: entry.transform_duration_secs,
+            duration_secs: entry.duration_secs,
+        })
     }
 
     #[must_use]
     pub fn list_active(&mut self) -> Vec<PreviewListing> {
-        let expired_keys: Vec<_> = self
-            .entries
-            .iter()
-            .filter(|(_, entry)| entry.created_at.elapsed() >= entry.ttl)
-            .map(|(key, _)| key.clone())
-            .collect();
-        for key in expired_keys {
-            if let Some(entry) = self.entries.remove(&key) {
-                remove_entry_files(entry);
-            }
-        }
+        self.evict_expired();
 
         self.entries
             .iter()
@@ -186,25 +163,23 @@ impl PreviewSpool {
     }
 
     pub fn cleanup_expired(&mut self) -> usize {
-        let before = self.entries.len();
+        self.evict_expired()
+    }
+
+    fn evict_expired(&mut self) -> usize {
         let expired_keys: Vec<_> = self
             .entries
             .iter()
             .filter(|(_, entry)| entry.created_at.elapsed() >= entry.ttl)
             .map(|(key, _)| key.clone())
             .collect();
+        let count = expired_keys.len();
         for key in expired_keys {
             if let Some(entry) = self.entries.remove(&key) {
                 remove_entry_files(entry);
             }
         }
-        before - self.entries.len()
-    }
-
-    fn entry_expired(&self, key: &PreviewKey) -> bool {
-        self.entries
-            .get(key)
-            .is_some_and(|entry| entry.created_at.elapsed() >= entry.ttl)
+        count
     }
 
     fn store_stream(&self, stream: DryRunStreamResult) -> StoredStream {
@@ -330,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_get_evicts_entry() {
+    fn expired_get_returns_none_without_evicting() {
         let mut spool = PreviewSpool::new(Duration::from_secs(0));
         let key = PreviewKey {
             run_id: "r1".into(),
@@ -341,11 +316,12 @@ mod tests {
         std::thread::sleep(Duration::from_millis(10));
 
         assert!(spool.get(&key).is_none());
-        assert_eq!(spool.cleanup_expired(), 0);
+        // get() no longer evicts; cleanup is done by cleanup_expired()
+        assert_eq!(spool.cleanup_expired(), 1);
     }
 
     #[test]
-    fn expired_get_removes_file_backed_preview_file() {
+    fn expired_cleanup_removes_file_backed_preview_file() {
         let mut spool = PreviewSpool::with_spill_threshold(Duration::from_secs(0), 1);
         let key = PreviewKey {
             run_id: "r1".into(),
@@ -377,6 +353,7 @@ mod tests {
         };
 
         assert!(spool.get(&key).is_none());
+        assert_eq!(spool.cleanup_expired(), 1);
         assert!(!path.exists());
     }
 
@@ -408,7 +385,7 @@ mod tests {
 
     #[test]
     fn unknown_task_returns_none() {
-        let mut spool = PreviewSpool::new(Duration::from_secs(60));
+        let spool = PreviewSpool::new(Duration::from_secs(60));
         assert!(spool
             .get(&PreviewKey {
                 run_id: "missing".into(),
