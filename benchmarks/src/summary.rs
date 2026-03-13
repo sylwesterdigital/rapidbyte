@@ -242,6 +242,9 @@ fn stream_metric_sum(artifact: &BenchmarkArtifact, key: &str) -> Option<u64> {
         .connector_metrics
         .get("stream_metrics")?
         .as_array()?;
+    if metrics.is_empty() {
+        return None;
+    }
     Some(
         metrics
             .iter()
@@ -251,32 +254,28 @@ fn stream_metric_sum(artifact: &BenchmarkArtifact, key: &str) -> Option<u64> {
 }
 
 fn total_records_written(artifact: &BenchmarkArtifact) -> Option<u64> {
-    stream_metric_sum(artifact, "records_written")
-        .filter(|value| *value > 0)
-        .or_else(|| {
-            artifact
-                .correctness
-                .details
-                .as_ref()?
-                .get("actual_records_written")
-                .and_then(|value| value.as_u64())
-        })
+    stream_metric_sum(artifact, "records_written").or_else(|| {
+        artifact
+            .correctness
+            .details
+            .as_ref()?
+            .get("actual_records_written")
+            .and_then(|value| value.as_u64())
+    })
 }
 
 fn total_bytes_written(artifact: &BenchmarkArtifact) -> Option<u64> {
-    stream_metric_sum(artifact, "bytes_written")
-        .filter(|value| *value > 0)
-        .or_else(|| {
-            let mb_per_sec = artifact
-                .canonical_metrics
-                .get("mb_per_sec")
-                .and_then(|value| value.as_f64())?;
-            let duration_secs = artifact
-                .canonical_metrics
-                .get("duration_secs")
-                .and_then(|value| value.as_f64())?;
-            Some((mb_per_sec * 1024.0 * 1024.0 * duration_secs).round() as u64)
-        })
+    stream_metric_sum(artifact, "bytes_written").or_else(|| {
+        let mb_per_sec = artifact
+            .canonical_metrics
+            .get("mb_per_sec")
+            .and_then(|value| value.as_f64())?;
+        let duration_secs = artifact
+            .canonical_metrics
+            .get("duration_secs")
+            .and_then(|value| value.as_f64())?;
+        Some((mb_per_sec * 1024.0 * 1024.0 * duration_secs).round() as u64)
+    })
 }
 
 fn distributed_agent_count(artifact: &BenchmarkArtifact) -> Option<u64> {
@@ -676,6 +675,22 @@ mod tests {
         assert!(rendered.contains("1000000"));
         assert!(rendered.contains("bytes written"));
         assert!(rendered.contains("67108864"));
+    }
+
+    #[test]
+    fn render_summary_report_preserves_zero_write_totals_from_nonempty_stream_metrics() {
+        let report = summarize_artifacts(&[
+            sample_artifact_with_context("release", true, 1, 0, 0),
+            sample_artifact_with_context("release", true, 1, 0, 0),
+            sample_artifact_with_context("release", true, 1, 0, 0),
+        ])
+        .expect("summary");
+
+        let rendered = render_summary_report(&report);
+        assert!(rendered.contains("records written"));
+        assert!(rendered.contains("  records written: 0"));
+        assert!(rendered.contains("bytes written"));
+        assert!(rendered.contains("  bytes written: 0"));
     }
 
     #[test]
