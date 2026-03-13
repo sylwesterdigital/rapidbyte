@@ -15,6 +15,7 @@ pub enum RunState {
     PreviewReady,
     Completed,
     Failed,
+    RecoveryFailed,
     Cancelling,
     Cancelled,
     TimedOut,
@@ -26,7 +27,11 @@ impl RunState {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Completed | Self::Failed | Self::Cancelled | Self::TimedOut
+            Self::Completed
+                | Self::Failed
+                | Self::RecoveryFailed
+                | Self::Cancelled
+                | Self::TimedOut
         )
     }
 }
@@ -57,8 +62,13 @@ pub struct RunRecord {
     pub updated_at: SystemTime,
     pub started_at: Option<SystemTime>,
     pub completed_at: Option<SystemTime>,
+    pub recovery_started_at: Option<SystemTime>,
     pub current_task: Option<CurrentTask>,
+    pub error_code: Option<String>,
     pub error_message: Option<String>,
+    pub error_retryable: Option<bool>,
+    pub error_safe_to_retry: Option<bool>,
+    pub error_commit_state: Option<String>,
     pub attempt: u32,
     pub idempotency_key: Option<String>,
     /// Terminal completion metrics (populated when a run completes successfully).
@@ -110,8 +120,13 @@ impl RunStore {
             updated_at: now,
             started_at: None,
             completed_at: None,
+            recovery_started_at: None,
             current_task: None,
+            error_code: None,
             error_message: None,
+            error_retryable: None,
+            error_safe_to_retry: None,
+            error_commit_state: None,
             attempt: 1,
             idempotency_key: idempotency_key.clone(),
             total_records: 0,
@@ -176,6 +191,11 @@ impl RunStore {
 
         if matches!(to, RunState::Running | RunState::Reconciling) && record.started_at.is_none() {
             record.started_at = Some(now);
+        }
+        if to == RunState::Reconciling {
+            record.recovery_started_at = Some(now);
+        } else if record.state != RunState::Reconciling {
+            record.recovery_started_at = None;
         }
 
         if to.is_terminal() {
@@ -258,6 +278,7 @@ fn is_valid_transition(from: RunState, to: RunState) -> bool {
                 RunState::Reconciling
                     | RunState::Running
                     | RunState::Failed
+                    | RunState::RecoveryFailed
                     | RunState::Cancelled
                     | RunState::TimedOut
                     | RunState::Cancelling
@@ -266,6 +287,7 @@ fn is_valid_transition(from: RunState, to: RunState) -> bool {
                 RunState::Reconciling,
                 RunState::Running
                     | RunState::Failed
+                    | RunState::RecoveryFailed
                     | RunState::Cancelled
                     | RunState::TimedOut
                     | RunState::Cancelling
@@ -277,6 +299,7 @@ fn is_valid_transition(from: RunState, to: RunState) -> bool {
             | (
                 RunState::Running,
                 RunState::Failed
+                    | RunState::RecoveryFailed
                     | RunState::Cancelled
                     | RunState::TimedOut
                     | RunState::PreviewReady
@@ -287,6 +310,7 @@ fn is_valid_transition(from: RunState, to: RunState) -> bool {
                 RunState::PreviewReady
                     | RunState::Completed
                     | RunState::Failed
+                    | RunState::RecoveryFailed
                     | RunState::TimedOut
                     | RunState::Cancelled,
             )
@@ -336,6 +360,7 @@ mod tests {
         store.create_run("r1".into(), "pipe".into(), None);
         store.transition("r1", RunState::Assigned).unwrap();
         assert!(store.transition("r1", RunState::Reconciling).is_ok());
+        assert!(store.get_run("r1").unwrap().recovery_started_at.is_some());
     }
 
     #[test]
@@ -362,6 +387,7 @@ mod tests {
         store.transition("r1", RunState::Assigned).unwrap();
         store.transition("r1", RunState::Reconciling).unwrap();
         assert!(store.transition("r1", RunState::Running).is_ok());
+        assert!(store.get_run("r1").unwrap().recovery_started_at.is_none());
     }
 
     #[test]
@@ -371,6 +397,15 @@ mod tests {
         store.transition("r1", RunState::Assigned).unwrap();
         store.transition("r1", RunState::Reconciling).unwrap();
         assert!(store.transition("r1", RunState::Completed).is_ok());
+    }
+
+    #[test]
+    fn valid_transition_reconciling_to_recovery_failed() {
+        let mut store = RunStore::new();
+        store.create_run("r1".into(), "pipe".into(), None);
+        store.transition("r1", RunState::Assigned).unwrap();
+        store.transition("r1", RunState::Reconciling).unwrap();
+        assert!(store.transition("r1", RunState::RecoveryFailed).is_ok());
     }
 
     #[test]
@@ -501,8 +536,13 @@ mod tests {
             updated_at: now,
             started_at: None,
             completed_at: None,
+            recovery_started_at: None,
             current_task: None,
+            error_code: None,
             error_message: None,
+            error_retryable: None,
+            error_safe_to_retry: None,
+            error_commit_state: None,
             attempt: 1,
             idempotency_key: Some("idem-key".into()),
             total_records: 0,

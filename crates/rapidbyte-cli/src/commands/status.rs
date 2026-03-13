@@ -56,6 +56,8 @@ fn state_label(state: i32) -> &'static str {
         Ok(RunState::Pending) => "PENDING",
         Ok(RunState::Assigned) => "ASSIGNED",
         Ok(RunState::Running) => "RUNNING",
+        Ok(RunState::Reconciling) => "RECONCILING",
+        Ok(RunState::RecoveryFailed) => "RECOVERY_FAILED",
         Ok(RunState::PreviewReady) => "PREVIEW_READY",
         Ok(RunState::Completed) => "COMPLETED",
         Ok(RunState::Failed) => "FAILED",
@@ -74,5 +76,18 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("status requires --controller"));
+    }
+
+    #[test]
+    fn state_label_includes_reconciling() {
+        assert_eq!(state_label(RunState::Reconciling as i32), "RECONCILING");
+    }
+
+    #[test]
+    fn state_label_includes_recovery_failed() {
+        assert_eq!(
+            state_label(RunState::RecoveryFailed as i32),
+            "RECOVERY_FAILED"
+        );
     }
 }

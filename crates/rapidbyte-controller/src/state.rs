@@ -198,6 +198,7 @@ fn normalize_recovery_snapshot(mut snapshot: MetadataSnapshot) -> MetadataSnapsh
         {
             run.state = crate::run_state::RunState::Reconciling;
             run.updated_at = SystemTime::now();
+            run.recovery_started_at = Some(SystemTime::now());
         }
     }
 
@@ -231,8 +232,13 @@ mod tests {
                 updated_at: now,
                 started_at: None,
                 completed_at: None,
+                recovery_started_at: None,
                 current_task: None,
+                error_code: None,
                 error_message: None,
+                error_retryable: None,
+                error_safe_to_retry: None,
+                error_commit_state: None,
                 attempt: 1,
                 idempotency_key: Some("idem".into()),
                 total_records: 0,
@@ -282,7 +288,12 @@ mod tests {
                     lease_epoch: 11,
                     assigned_at: now,
                 }),
+                recovery_started_at: None,
+                error_code: None,
                 error_message: None,
+                error_retryable: None,
+                error_safe_to_retry: None,
+                error_commit_state: None,
                 attempt: 1,
                 idempotency_key: None,
                 total_records: 0,
@@ -315,6 +326,13 @@ mod tests {
             state.runs.blocking_read().get_run("run-1").unwrap().state,
             RunState::Reconciling
         );
+        assert!(state
+            .runs
+            .blocking_read()
+            .get_run("run-1")
+            .unwrap()
+            .recovery_started_at
+            .is_some());
         assert_eq!(state.epoch_gen.next(), 12);
     }
 

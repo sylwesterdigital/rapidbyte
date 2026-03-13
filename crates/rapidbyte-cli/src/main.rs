@@ -143,6 +143,9 @@ enum Commands {
         /// Explicitly allow the built-in insecure development signing key
         #[arg(long)]
         allow_insecure_signing_key: bool,
+        /// Max time to wait for restart reconciliation before failing recovery
+        #[arg(long, env = "RAPIDBYTE_CONTROLLER_RECONCILIATION_TIMEOUT_SECONDS")]
+        reconciliation_timeout_seconds: Option<u64>,
         /// PEM certificate for TLS server mode
         #[arg(long)]
         tls_cert: Option<PathBuf>,
@@ -300,6 +303,7 @@ async fn main() -> ExitCode {
             signing_key,
             allow_unauthenticated,
             allow_insecure_signing_key,
+            reconciliation_timeout_seconds,
             tls_cert,
             tls_key,
         } => {
@@ -310,6 +314,7 @@ async fn main() -> ExitCode {
                 cli.auth_token.as_deref(),
                 allow_unauthenticated,
                 allow_insecure_signing_key,
+                reconciliation_timeout_seconds.map(std::time::Duration::from_secs),
                 tls_cert.as_deref(),
                 tls_key.as_deref(),
             )

@@ -139,14 +139,18 @@ impl MetadataStore {
             .execute(
                 "INSERT INTO controller_runs (
                     run_id, pipeline_name, state, created_at, updated_at, started_at, completed_at,
+                    recovery_started_at,
                     current_task_id, current_agent_id, current_attempt, current_lease_epoch,
-                    current_task_assigned_at, error_message, attempt, idempotency_key,
+                    current_task_assigned_at, error_code, error_message, error_retryable,
+                    error_safe_to_retry, error_commit_state, attempt, idempotency_key,
                     total_records, total_bytes, elapsed_seconds, cursors_advanced
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7,
-                    $8, $9, $10, $11,
-                    $12, $13, $14, $15,
-                    $16, $17, $18, $19
+                    $8,
+                    $9, $10, $11, $12,
+                    $13, $14, $15, $16,
+                    $17, $18, $19, $20,
+                    $21, $22, $23, $24
                 )
                 ON CONFLICT (run_id) DO UPDATE SET
                     pipeline_name = EXCLUDED.pipeline_name,
@@ -155,12 +159,17 @@ impl MetadataStore {
                     updated_at = EXCLUDED.updated_at,
                     started_at = EXCLUDED.started_at,
                     completed_at = EXCLUDED.completed_at,
+                    recovery_started_at = EXCLUDED.recovery_started_at,
                     current_task_id = EXCLUDED.current_task_id,
                     current_agent_id = EXCLUDED.current_agent_id,
                     current_attempt = EXCLUDED.current_attempt,
                     current_lease_epoch = EXCLUDED.current_lease_epoch,
                     current_task_assigned_at = EXCLUDED.current_task_assigned_at,
+                    error_code = EXCLUDED.error_code,
                     error_message = EXCLUDED.error_message,
+                    error_retryable = EXCLUDED.error_retryable,
+                    error_safe_to_retry = EXCLUDED.error_safe_to_retry,
+                    error_commit_state = EXCLUDED.error_commit_state,
                     attempt = EXCLUDED.attempt,
                     idempotency_key = EXCLUDED.idempotency_key,
                     total_records = EXCLUDED.total_records,
@@ -175,12 +184,17 @@ impl MetadataStore {
                     &to_datetime(run.updated_at),
                     &run.started_at.map(to_datetime),
                     &run.completed_at.map(to_datetime),
+                    &run.recovery_started_at.map(to_datetime),
                     &current_task.map(|task| task.task_id.clone()),
                     &current_task.map(|task| task.agent_id.clone()),
                     &current_attempt,
                     &current_lease_epoch,
                     &current_task.map(|task| to_datetime(task.assigned_at)),
+                    &run.error_code,
                     &run.error_message,
+                    &run.error_retryable,
+                    &run.error_safe_to_retry,
+                    &run.error_commit_state,
                     &attempt,
                     &run.idempotency_key,
                     &total_records,
@@ -373,6 +387,7 @@ fn run_state_to_db(state: RunState) -> &'static str {
         RunState::PreviewReady => "preview_ready",
         RunState::Completed => "completed",
         RunState::Failed => "failed",
+        RunState::RecoveryFailed => "recovery_failed",
         RunState::Cancelling => "cancelling",
         RunState::Cancelled => "cancelled",
         RunState::TimedOut => "timed_out",
@@ -388,6 +403,7 @@ fn run_state_from_db(state: &str) -> anyhow::Result<RunState> {
         "preview_ready" => Ok(RunState::PreviewReady),
         "completed" => Ok(RunState::Completed),
         "failed" => Ok(RunState::Failed),
+        "recovery_failed" => Ok(RunState::RecoveryFailed),
         "cancelling" => Ok(RunState::Cancelling),
         "cancelled" => Ok(RunState::Cancelled),
         "timed_out" => Ok(RunState::TimedOut),
@@ -433,8 +449,15 @@ fn run_record_from_row(row: &Row) -> anyhow::Result<RunRecord> {
         completed_at: row
             .get::<_, Option<DateTime<Utc>>>("completed_at")
             .map(datetime_to_system_time),
+        recovery_started_at: row
+            .get::<_, Option<DateTime<Utc>>>("recovery_started_at")
+            .map(datetime_to_system_time),
         current_task: current_task_from_row(row)?,
+        error_code: row.get("error_code"),
         error_message: row.get("error_message"),
+        error_retryable: row.get("error_retryable"),
+        error_safe_to_retry: row.get("error_safe_to_retry"),
+        error_commit_state: row.get("error_commit_state"),
         attempt: u32::try_from(row.get::<_, i32>("attempt"))?,
         idempotency_key: row.get("idempotency_key"),
         total_records: u64::try_from(row.get::<_, i64>("total_records"))?,
@@ -643,7 +666,12 @@ mod tests {
                 lease_epoch: 7,
                 assigned_at: now,
             }),
+            recovery_started_at: Some(now),
+            error_code: Some("TEST_ERROR".into()),
             error_message: None,
+            error_retryable: Some(false),
+            error_safe_to_retry: Some(false),
+            error_commit_state: Some("before_commit".into()),
             attempt: 1,
             idempotency_key: Some("idem-key".into()),
             total_records: 0,
@@ -709,6 +737,7 @@ mod tests {
             Some("agent-1")
         );
         assert_eq!(snapshot.tasks[0].limit, Some(25));
+        assert!(snapshot.runs[0].recovery_started_at.is_some());
         assert_eq!(snapshot.agents[0].agent_id, "agent-1");
         assert_eq!(snapshot.previews[0].streams[0].stream, "users");
 

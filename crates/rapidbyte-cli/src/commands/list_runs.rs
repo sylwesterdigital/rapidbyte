@@ -56,6 +56,8 @@ fn parse_state_filter(value: &str) -> Result<i32> {
         "pending" => RunState::Pending,
         "assigned" => RunState::Assigned,
         "running" => RunState::Running,
+        "reconciling" => RunState::Reconciling,
+        "recovery_failed" => RunState::RecoveryFailed,
         "preview_ready" => RunState::PreviewReady,
         "completed" => RunState::Completed,
         "failed" => RunState::Failed,
@@ -70,6 +72,8 @@ fn state_label(state: i32) -> &'static str {
         Ok(RunState::Pending) => "PENDING",
         Ok(RunState::Assigned) => "ASSIGNED",
         Ok(RunState::Running) => "RUNNING",
+        Ok(RunState::Reconciling) => "RECONCILING",
+        Ok(RunState::RecoveryFailed) => "RECOVERY_FAILED",
         Ok(RunState::PreviewReady) => "PREVIEW_READY",
         Ok(RunState::Completed) => "COMPLETED",
         Ok(RunState::Failed) => "FAILED",
@@ -88,5 +92,34 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("list-runs requires --controller"));
+    }
+
+    #[test]
+    fn parse_state_filter_accepts_reconciling() {
+        assert_eq!(
+            parse_state_filter("reconciling").unwrap(),
+            RunState::Reconciling as i32
+        );
+    }
+
+    #[test]
+    fn state_label_includes_reconciling() {
+        assert_eq!(state_label(RunState::Reconciling as i32), "RECONCILING");
+    }
+
+    #[test]
+    fn parse_state_filter_accepts_recovery_failed() {
+        assert_eq!(
+            parse_state_filter("recovery_failed").unwrap(),
+            RunState::RecoveryFailed as i32
+        );
+    }
+
+    #[test]
+    fn state_label_includes_recovery_failed() {
+        assert_eq!(
+            state_label(RunState::RecoveryFailed as i32),
+            "RECOVERY_FAILED"
+        );
     }
 }

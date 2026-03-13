@@ -34,3 +34,4 @@ console = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 syn = { version = "2", features = ["full", "parsing"] }
+tokio-postgres = { workspace = true }

@@ -307,6 +307,21 @@ impl TaskQueue {
         expired
     }
 
+    /// Mark a task as timed out and clear its lease.
+    ///
+    /// Returns `true` if the task was transitioned from a live state.
+    pub fn mark_timed_out(&mut self, task_id: &str) -> bool {
+        let Some(record) = self.tasks.get_mut(task_id) else {
+            return false;
+        };
+        if !matches!(record.state, TaskState::Assigned | TaskState::Running) {
+            return false;
+        }
+        record.state = TaskState::TimedOut;
+        record.lease = None;
+        true
+    }
+
     /// Renew the lease for a task if the epoch matches. Returns `true` if renewed.
     pub fn renew_lease(
         &mut self,

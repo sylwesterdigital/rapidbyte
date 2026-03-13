@@ -6,7 +6,7 @@ use crate::commands::transport::{connect_channel, request_with_bearer, TlsClient
 use crate::Verbosity;
 
 use rapidbyte_controller::proto::rapidbyte::v1::pipeline_service_client::PipelineServiceClient;
-use rapidbyte_controller::proto::rapidbyte::v1::{run_event, WatchRunRequest};
+use rapidbyte_controller::proto::rapidbyte::v1::{run_event, RunState, WatchRunRequest};
 
 pub async fn execute(
     controller_url: Option<&str>,
@@ -43,6 +43,16 @@ pub async fn execute(
                     );
                 }
             }
+            Some(run_event::Event::Status(status)) => {
+                if verbosity != Verbosity::Quiet {
+                    let state = state_label(status.state);
+                    if status.message.is_empty() {
+                        eprintln!("State: {state}");
+                    } else {
+                        eprintln!("State: {state} - {}", status.message);
+                    }
+                }
+            }
             Some(run_event::Event::Completed(done)) => {
                 if verbosity != Verbosity::Quiet {
                     eprintln!(
@@ -64,6 +74,21 @@ pub async fn execute(
     }
 
     anyhow::bail!("WatchRun stream ended before a terminal event was received");
+}
+
+fn state_label(state: i32) -> &'static str {
+    match RunState::try_from(state) {
+        Ok(RunState::Pending) => "PENDING",
+        Ok(RunState::Assigned) => "ASSIGNED",
+        Ok(RunState::Running) => "RUNNING",
+        Ok(RunState::Reconciling) => "RECONCILING",
+        Ok(RunState::RecoveryFailed) => "RECOVERY_FAILED",
+        Ok(RunState::PreviewReady) => "PREVIEW_READY",
+        Ok(RunState::Completed) => "COMPLETED",
+        Ok(RunState::Failed) => "FAILED",
+        Ok(RunState::Cancelled) => "CANCELLED",
+        _ => "UNKNOWN",
+    }
 }
 
 #[cfg(test)]

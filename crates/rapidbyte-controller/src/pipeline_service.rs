@@ -11,8 +11,9 @@ use tonic::{Request, Response, Status};
 use crate::proto::rapidbyte::v1::{
     pipeline_service_server::PipelineService, run_event, CancelRunRequest, CancelRunResponse,
     GetRunRequest, GetRunResponse, ListRunsRequest, ListRunsResponse, PreviewAccess, PreviewState,
-    RunCancelled, RunCompleted, RunEvent, RunFailed, RunState, RunSummary, StreamPreview,
-    SubmitPipelineRequest, SubmitPipelineResponse, TaskError, TaskRef, WatchRunRequest,
+    RunCancelled, RunCompleted, RunEvent, RunFailed, RunState, RunStatus, RunSummary,
+    StreamPreview, SubmitPipelineRequest, SubmitPipelineResponse, TaskError, TaskRef,
+    WatchRunRequest,
 };
 use crate::run_state::RunState as InternalRunState;
 use crate::state::ControllerState;
@@ -23,34 +24,57 @@ pub fn to_proto_state(s: InternalRunState) -> i32 {
     match s {
         InternalRunState::Pending => RunState::Pending.into(),
         InternalRunState::Assigned => RunState::Assigned.into(),
-        InternalRunState::Reconciling
-        | InternalRunState::Running
-        | InternalRunState::Cancelling => RunState::Running.into(),
+        InternalRunState::Reconciling => RunState::Reconciling.into(),
+        InternalRunState::Running | InternalRunState::Cancelling => RunState::Running.into(),
         InternalRunState::PreviewReady => RunState::PreviewReady.into(),
         InternalRunState::Completed => RunState::Completed.into(),
-        InternalRunState::Failed | InternalRunState::TimedOut => RunState::Failed.into(),
+        InternalRunState::RecoveryFailed => RunState::RecoveryFailed.into(),
+        InternalRunState::Failed => RunState::Failed.into(),
+        InternalRunState::TimedOut => RunState::Failed.into(),
         InternalRunState::Cancelled => RunState::Cancelled.into(),
     }
 }
 
 /// Maps proto `RunState` i32 back to internal `RunState`(s) for filtering.
 /// `RUNNING` maps to both `Running` and `Cancelling` (externally both appear as `RUNNING`).
-/// `FAILED` maps to both `Failed` and `TimedOut` (externally both appear as `FAILED`).
+/// `FAILED` includes normal failure plus ordinary lease timeouts.
+/// `RECOVERY_FAILED` is reserved for reconciliation-specific terminal failure.
 fn from_proto_states(v: i32) -> Option<Vec<InternalRunState>> {
     match RunState::try_from(v) {
         Ok(RunState::Pending) => Some(vec![InternalRunState::Pending]),
         Ok(RunState::Assigned) => Some(vec![InternalRunState::Assigned]),
         Ok(RunState::Running) => Some(vec![
-            InternalRunState::Reconciling,
             InternalRunState::Running,
             InternalRunState::Cancelling,
         ]),
+        Ok(RunState::Reconciling) => Some(vec![InternalRunState::Reconciling]),
         Ok(RunState::PreviewReady) => Some(vec![InternalRunState::PreviewReady]),
         Ok(RunState::Completed) => Some(vec![InternalRunState::Completed]),
         Ok(RunState::Failed) => Some(vec![InternalRunState::Failed, InternalRunState::TimedOut]),
+        Ok(RunState::RecoveryFailed) => Some(vec![InternalRunState::RecoveryFailed]),
         Ok(RunState::Cancelled) => Some(vec![InternalRunState::Cancelled]),
         _ => None,
     }
+}
+
+fn terminal_error_for_run(record: &crate::run_state::RunRecord) -> Option<TaskError> {
+    let message = record.error_message.clone()?;
+    let (code, retryable, safe_to_retry) = match record.state {
+        InternalRunState::RecoveryFailed => ("RECOVERY_TIMEOUT".into(), false, false),
+        InternalRunState::TimedOut => ("LEASE_EXPIRED".into(), true, true),
+        _ => (
+            record.error_code.clone().unwrap_or_default(),
+            record.error_retryable.unwrap_or(false),
+            record.error_safe_to_retry.unwrap_or(false),
+        ),
+    };
+    Some(TaskError {
+        code,
+        message,
+        retryable,
+        safe_to_retry,
+        commit_state: record.error_commit_state.clone().unwrap_or_default(),
+    })
 }
 
 /// Build a terminal `RunEvent` for a run that is already in a terminal state,
@@ -64,21 +88,27 @@ fn terminal_event_for_run(record: &crate::run_state::RunRecord) -> RunEvent {
             cursors_advanced: record.cursors_advanced,
         }),
         InternalRunState::Cancelled => run_event::Event::Cancelled(RunCancelled {}),
-        // Failed and TimedOut both map to Failed
         _ => run_event::Event::Failed(RunFailed {
-            error: record.error_message.as_ref().map(|msg| TaskError {
-                code: String::new(),
-                message: msg.clone(),
-                retryable: false,
-                safe_to_retry: false,
-                commit_state: String::new(),
-            }),
+            error: terminal_error_for_run(record),
             attempt: record.attempt,
         }),
     };
     RunEvent {
         run_id: record.run_id.clone(),
         event: Some(event),
+    }
+}
+
+fn status_event_for_run(record: &crate::run_state::RunRecord) -> Option<RunEvent> {
+    match record.state {
+        InternalRunState::Reconciling => Some(RunEvent {
+            run_id: record.run_id.clone(),
+            event: Some(run_event::Event::Status(RunStatus {
+                state: RunState::Reconciling.into(),
+                message: "Controller restarted while this run was in flight; waiting to reconcile the active lease.".into(),
+            })),
+        }),
+        _ => None,
     }
 }
 
@@ -114,6 +144,17 @@ impl PipelineServiceImpl {
             .then(|| terminal_event_for_run(record)))
     }
 
+    async fn status_event_for_existing_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<RunEvent>, Status> {
+        let runs = self.state.runs.read().await;
+        let record = runs
+            .get_run(run_id)
+            .ok_or_else(|| Status::not_found(format!("Run {run_id} not found")))?;
+        Ok(status_event_for_run(record))
+    }
+
     async fn watch_run_after_subscribe(
         &self,
         run_id: &str,
@@ -137,11 +178,23 @@ impl PipelineServiceImpl {
             return Ok(Response::new(stream));
         }
 
-        let stream: WatchRunStream =
-            Box::pin(BroadcastStream::new(rx).filter_map(|result| match result {
-                Ok(event) => Some(Ok(event)),
-                Err(_) => None, // Lag or closed — skip
-            }));
+        let live_stream = BroadcastStream::new(rx).filter_map(|result| match result {
+            Ok(event) => Some(Ok(event)),
+            Err(_) => None, // Lag or closed — skip
+        });
+
+        let status_event = match self.status_event_for_existing_run(run_id).await {
+            Ok(event) => event,
+            Err(err) => {
+                self.state.watchers.write().await.remove(run_id);
+                return Err(err);
+            }
+        };
+
+        let stream: WatchRunStream = match status_event {
+            Some(event) => Box::pin(tokio_stream::once(Ok(event)).chain(live_stream)),
+            None => Box::pin(live_stream),
+        };
 
         Ok(Response::new(stream))
     }
@@ -415,13 +468,7 @@ impl PipelineService for PipelineServiceImpl {
                     lease_epoch: task.lease_epoch,
                     assigned_at: Some(to_timestamp(task.assigned_at)),
                 }),
-                record.error_message.as_ref().map(|msg| TaskError {
-                    code: String::new(),
-                    message: msg.clone(),
-                    retryable: false,
-                    safe_to_retry: false,
-                    commit_state: String::new(),
-                }),
+                terminal_error_for_run(record),
             )
         };
 
@@ -1019,6 +1066,363 @@ mod tests {
                 assert_eq!(completed.total_records, 11);
             }
             other => panic!("Expected completed event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_run_returns_reconciling_state() {
+        let state = test_state();
+        let svc = PipelineServiceImpl::new(state.clone());
+
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+        let run_id = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&run_id, InternalRunState::Reconciling)
+                .unwrap();
+        }
+
+        let resp = svc
+            .get_run(Request::new(GetRunRequest { run_id }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.state, RunState::Reconciling as i32);
+    }
+
+    #[tokio::test]
+    async fn test_list_runs_returns_reconciling_state() {
+        let state = test_state();
+        let svc = PipelineServiceImpl::new(state.clone());
+
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+        let run_id = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&run_id, InternalRunState::Reconciling)
+                .unwrap();
+        }
+
+        let resp = svc
+            .list_runs(Request::new(ListRunsRequest {
+                limit: 20,
+                filter_state: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let run = resp
+            .runs
+            .into_iter()
+            .find(|run| run.run_id == run_id)
+            .unwrap();
+        assert_eq!(run.state, RunState::Reconciling as i32);
+    }
+
+    #[tokio::test]
+    async fn test_list_runs_filters_reconciling_state() {
+        let state = test_state();
+        let svc = PipelineServiceImpl::new(state.clone());
+
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+        let reconciling_run_id = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+
+        let running_run_id = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&reconciling_run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&reconciling_run_id, InternalRunState::Reconciling)
+                .unwrap();
+            runs.transition(&running_run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&running_run_id, InternalRunState::Running)
+                .unwrap();
+        }
+
+        let resp = svc
+            .list_runs(Request::new(ListRunsRequest {
+                limit: 20,
+                filter_state: Some(RunState::Reconciling as i32),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.runs.len(), 1);
+        assert_eq!(resp.runs[0].run_id, reconciling_run_id);
+        assert_eq!(resp.runs[0].state, RunState::Reconciling as i32);
+    }
+
+    #[tokio::test]
+    async fn test_get_run_returns_failed_state_for_timed_out_run() {
+        let state = test_state();
+        let svc = PipelineServiceImpl::new(state.clone());
+
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+        let run_id = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&run_id, InternalRunState::TimedOut)
+                .unwrap();
+            runs.get_run_mut(&run_id).unwrap().error_message =
+                Some("Task task-1 lease expired (agent unresponsive)".into());
+        }
+
+        let resp = svc
+            .get_run(Request::new(GetRunRequest { run_id }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.state, RunState::Failed as i32);
+        let error = resp
+            .last_error
+            .expect("timed out runs expose recovery error");
+        assert_eq!(error.code, "LEASE_EXPIRED");
+    }
+
+    #[tokio::test]
+    async fn test_get_run_returns_execution_error_code_for_failed_run() {
+        let state = test_state();
+        let svc = PipelineServiceImpl::new(state.clone());
+
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+        let run_id = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&run_id, InternalRunState::Running).unwrap();
+            runs.transition(&run_id, InternalRunState::Failed).unwrap();
+            let run = runs.get_run_mut(&run_id).unwrap();
+            run.error_code = Some("TEST_EXECUTION_FAILED".into());
+            run.error_message = Some("TEST_EXECUTION_FAILED: injected failure".into());
+            run.error_retryable = Some(false);
+            run.error_safe_to_retry = Some(false);
+            run.error_commit_state = Some("before_commit".into());
+        }
+
+        let resp = svc
+            .get_run(Request::new(GetRunRequest { run_id }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.state, RunState::Failed as i32);
+        let error = resp
+            .last_error
+            .expect("failed runs expose execution error metadata");
+        assert_eq!(error.code, "TEST_EXECUTION_FAILED");
+        assert_eq!(error.message, "TEST_EXECUTION_FAILED: injected failure");
+        assert_eq!(error.commit_state, "before_commit");
+    }
+
+    #[tokio::test]
+    async fn test_list_runs_filters_recovery_failed_state() {
+        let state = test_state();
+        let svc = PipelineServiceImpl::new(state.clone());
+
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+        let recovery_failed_run_id = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+
+        let failed_run_id = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&recovery_failed_run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&recovery_failed_run_id, InternalRunState::RecoveryFailed)
+                .unwrap();
+            runs.transition(&failed_run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&failed_run_id, InternalRunState::Running)
+                .unwrap();
+            runs.transition(&failed_run_id, InternalRunState::Failed)
+                .unwrap();
+        }
+
+        let resp = svc
+            .list_runs(Request::new(ListRunsRequest {
+                limit: 20,
+                filter_state: Some(RunState::RecoveryFailed as i32),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.runs.len(), 1);
+        assert_eq!(resp.runs[0].run_id, recovery_failed_run_id);
+        assert_eq!(resp.runs[0].state, RunState::RecoveryFailed as i32);
+    }
+
+    #[tokio::test]
+    async fn test_watch_run_surfaces_reconciling_status() {
+        let state = test_state();
+        let svc = PipelineServiceImpl::new(state.clone());
+
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+        let run_id = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&run_id, InternalRunState::Reconciling)
+                .unwrap();
+        }
+
+        let response = svc.watch_run_after_subscribe(&run_id).await.unwrap();
+        let mut stream = response.into_inner();
+        let event = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+            .await
+            .expect("expected a reconciling event")
+            .expect("stream should yield an event")
+            .unwrap();
+
+        match event.event {
+            Some(run_event::Event::Status(status)) => {
+                assert_eq!(status.state, RunState::Reconciling as i32);
+                assert!(status.message.contains("waiting to reconcile"));
+            }
+            other => panic!("expected reconciling status event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_watch_run_returns_recovery_failed_terminal_event_for_timed_out_run() {
+        let state = test_state();
+        let svc = PipelineServiceImpl::new(state.clone());
+
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+        let run_id = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&run_id, InternalRunState::RecoveryFailed)
+                .unwrap();
+            runs.get_run_mut(&run_id).unwrap().error_message =
+                Some("Run recovery reconciliation timed out after controller restart".into());
+        }
+
+        let response = svc.watch_run_after_subscribe(&run_id).await.unwrap();
+        let mut stream = response.into_inner();
+        let event = stream.next().await.unwrap().unwrap();
+
+        match event.event {
+            Some(run_event::Event::Failed(failed)) => {
+                let error = failed
+                    .error
+                    .expect("timed out watch exposes recovery error");
+                assert_eq!(error.code, "RECOVERY_TIMEOUT");
+                assert!(error.message.contains("reconciliation timed out"));
+            }
+            other => panic!("expected failed terminal event, got {other:?}"),
         }
     }
 

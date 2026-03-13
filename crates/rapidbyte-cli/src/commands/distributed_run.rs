@@ -15,8 +15,8 @@ use crate::Verbosity;
 
 use rapidbyte_controller::proto::rapidbyte::v1::pipeline_service_client::PipelineServiceClient;
 use rapidbyte_controller::proto::rapidbyte::v1::{
-    run_event, ExecutionOptions, GetRunRequest, PreviewAccess, RunCompleted, SubmitPipelineRequest,
-    WatchRunRequest,
+    run_event, ExecutionOptions, GetRunRequest, PreviewAccess, RunCompleted, RunState,
+    SubmitPipelineRequest, WatchRunRequest,
 };
 
 pub async fn execute(
@@ -82,6 +82,16 @@ pub async fn execute(
                         );
                     }
                 }
+                run_event::Event::Status(status) => {
+                    if verbosity != Verbosity::Quiet {
+                        let state = state_label(status.state);
+                        if status.message.is_empty() {
+                            eprintln!("State: {state}");
+                        } else {
+                            eprintln!("State: {state} - {}", status.message);
+                        }
+                    }
+                }
                 run_event::Event::Completed(c) => {
                     if verbosity != Verbosity::Quiet {
                         eprintln!(
@@ -119,6 +129,21 @@ pub async fn execute(
     }
 
     ensure_terminal_event_received(false)
+}
+
+fn state_label(state: i32) -> &'static str {
+    match RunState::try_from(state) {
+        Ok(RunState::Pending) => "PENDING",
+        Ok(RunState::Assigned) => "ASSIGNED",
+        Ok(RunState::Running) => "RUNNING",
+        Ok(RunState::Reconciling) => "RECONCILING",
+        Ok(RunState::RecoveryFailed) => "RECOVERY_FAILED",
+        Ok(RunState::PreviewReady) => "PREVIEW_READY",
+        Ok(RunState::Completed) => "COMPLETED",
+        Ok(RunState::Failed) => "FAILED",
+        Ok(RunState::Cancelled) => "CANCELLED",
+        _ => "UNKNOWN",
+    }
 }
 
 /// Fetch preview data from the agent's Flight endpoint and display it.

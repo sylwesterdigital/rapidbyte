@@ -30,6 +30,7 @@ pub struct ControllerConfig {
     pub agent_reap_interval: Duration,
     pub agent_reap_timeout: Duration,
     pub lease_check_interval: Duration,
+    pub reconciliation_timeout: Duration,
     pub preview_cleanup_interval: Duration,
     /// Bearer tokens for authentication. Empty requires `allow_unauthenticated`.
     pub auth_tokens: Vec<String>,
@@ -54,6 +55,7 @@ impl Default for ControllerConfig {
             agent_reap_interval: Duration::from_secs(15),
             agent_reap_timeout: Duration::from_secs(60),
             lease_check_interval: Duration::from_secs(10),
+            reconciliation_timeout: Duration::from_secs(300),
             preview_cleanup_interval: Duration::from_secs(30),
             auth_tokens: Vec::new(),
             allow_unauthenticated: false,
@@ -100,14 +102,45 @@ async fn initialize_metadata_store(
 }
 
 async fn handle_expired_lease(state: &ControllerState, task_id: &str, run_id: &str) {
-    let error_msg = {
+    let timeout_outcome = {
         let mut runs = state.runs.write().await;
-        if let Ok(()) = runs.transition(run_id, InternalRunState::TimedOut) {
+        let target_state = if runs
+            .get_run(run_id)
+            .is_some_and(|record| record.state == InternalRunState::Reconciling)
+        {
+            InternalRunState::RecoveryFailed
+        } else {
+            InternalRunState::TimedOut
+        };
+
+        if let Ok(()) = runs.transition(run_id, target_state) {
             let record = runs.get_run_mut(run_id);
             if let Some(r) = record {
-                let msg = format!("Task {task_id} lease expired (agent unresponsive)");
+                let (code, msg, retryable, safe_to_retry) = if target_state
+                    == InternalRunState::RecoveryFailed
+                {
+                    (
+                            "RECOVERY_TIMEOUT",
+                            format!(
+                                "Run recovery reconciliation timed out after controller restart for task {task_id}"
+                            ),
+                            false,
+                            false,
+                        )
+                } else {
+                    (
+                        "LEASE_EXPIRED",
+                        format!("Task {task_id} lease expired (agent unresponsive)"),
+                        true,
+                        true,
+                    )
+                };
                 r.error_message = Some(msg.clone());
-                Some((msg, r.attempt))
+                r.error_code = Some(code.into());
+                r.error_retryable = Some(retryable);
+                r.error_safe_to_retry = Some(safe_to_retry);
+                r.error_commit_state = Some(String::new());
+                Some((code, msg, retryable, safe_to_retry, r.attempt))
             } else {
                 None
             }
@@ -131,17 +164,105 @@ async fn handle_expired_lease(state: &ControllerState, task_id: &str, run_id: &s
         tracing::error!(task_id, run_id, ?error, "failed to persist timed-out run");
     }
 
-    if let Some((msg, attempt)) = error_msg {
+    if let Some((code, msg, retryable, safe_to_retry, attempt)) = timeout_outcome {
         state.watchers.write().await.publish_terminal(
             run_id,
             RunEvent {
                 run_id: run_id.to_string(),
                 event: Some(run_event::Event::Failed(RunFailed {
                     error: Some(TaskError {
-                        code: "LEASE_EXPIRED".into(),
+                        code: code.into(),
                         message: msg,
-                        retryable: true,
-                        safe_to_retry: true,
+                        retryable,
+                        safe_to_retry,
+                        commit_state: String::new(),
+                    }),
+                    attempt,
+                })),
+            },
+        );
+    }
+}
+
+async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_timeout: Duration) {
+    let now = std::time::SystemTime::now();
+    let stale_run_ids = {
+        let runs = state.runs.read().await;
+        runs.all_runs()
+            .into_iter()
+            .filter(|run| run.state == InternalRunState::Reconciling)
+            .filter(|run| {
+                run.recovery_started_at
+                    .and_then(|started_at| now.duration_since(started_at).ok())
+                    .is_some_and(|elapsed| elapsed >= reconciliation_timeout)
+            })
+            .map(|run| run.run_id)
+            .collect::<Vec<_>>()
+    };
+
+    for run_id in stale_run_ids {
+        let (task_id, attempt) = {
+            let mut runs = state.runs.write().await;
+            let Some(run) = runs.get_run(&run_id) else {
+                continue;
+            };
+            if run.state != InternalRunState::Reconciling {
+                continue;
+            }
+            let task_id = run.current_task.as_ref().map(|task| task.task_id.clone());
+            let attempt = run.attempt;
+            if runs
+                .transition(&run_id, InternalRunState::RecoveryFailed)
+                .is_err()
+            {
+                continue;
+            }
+            if let Some(run) = runs.get_run_mut(&run_id) {
+                run.error_code = Some("RECOVERY_TIMEOUT".into());
+                run.error_message =
+                    Some("Run recovery reconciliation timed out after controller restart".into());
+                run.error_retryable = Some(false);
+                run.error_safe_to_retry = Some(false);
+                run.error_commit_state = Some(String::new());
+            }
+            (task_id, attempt)
+        };
+
+        if let Some(task_id) = task_id.as_deref() {
+            let timed_out = {
+                let mut tasks = state.tasks.write().await;
+                tasks.mark_timed_out(task_id)
+            };
+            if timed_out {
+                if let Err(error) = state.persist_task(task_id).await {
+                    tracing::error!(
+                        task_id,
+                        run_id,
+                        ?error,
+                        "failed to persist reconciliation-timeout task"
+                    );
+                }
+            }
+        }
+        if let Err(error) = state.persist_run(&run_id).await {
+            tracing::error!(
+                run_id,
+                ?error,
+                "failed to persist reconciliation-timeout run"
+            );
+        }
+
+        state.watchers.write().await.publish_terminal(
+            &run_id,
+            RunEvent {
+                run_id: run_id.clone(),
+                event: Some(run_event::Event::Failed(RunFailed {
+                    error: Some(TaskError {
+                        code: "RECOVERY_TIMEOUT".into(),
+                        message: "Run recovery reconciliation timed out after controller restart"
+                            .into(),
+                        retryable: false,
+                        safe_to_retry: false,
                         commit_state: String::new(),
                     }),
                     attempt,
@@ -210,6 +331,7 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
 
     // Background task: expire leases
     let lease_state = state.clone();
+    let reconciliation_timeout = config.reconciliation_timeout;
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(config.lease_check_interval);
         loop {
@@ -219,6 +341,7 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
                 info!(task_id, run_id, "Task lease expired");
                 handle_expired_lease(&lease_state, task_id, run_id).await;
             }
+            sweep_reconciliation_timeouts(&lease_state, reconciliation_timeout).await;
         }
     });
 
@@ -371,6 +494,94 @@ mod tests {
             record.error_message.as_deref(),
             Some(format!("Task {task_id} lease expired (agent unresponsive)").as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn handle_expired_lease_transitions_reconciling_run_to_recovery_failed() {
+        let state = ControllerState::new(b"test-signing-key");
+        let (run_id, _) = {
+            let mut runs = state.runs.write().await;
+            runs.create_run("run-1".into(), "pipe".into(), None)
+        };
+        let task_id = {
+            let mut tasks = state.tasks.write().await;
+            let task_id = tasks.enqueue(run_id.clone(), b"yaml".to_vec(), false, None, 1);
+            let assignment = tasks
+                .poll("agent-1", Duration::from_secs(60), &state.epoch_gen)
+                .expect("task should be assigned");
+            assert_eq!(assignment.task_id, task_id);
+            task_id
+        };
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&run_id, InternalRunState::Reconciling)
+                .unwrap();
+        }
+
+        handle_expired_lease(&state, &task_id, &run_id).await;
+
+        let runs = state.runs.read().await;
+        let record = runs.get_run(&run_id).unwrap();
+        assert_eq!(record.state, InternalRunState::RecoveryFailed);
+        assert!(record
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("reconciliation timed out")));
+    }
+
+    #[tokio::test]
+    async fn handle_reconciliation_timeout_fails_stale_reconciling_run() {
+        let state = ControllerState::new(b"test-signing-key");
+        let (run_id, _) = {
+            let mut runs = state.runs.write().await;
+            runs.create_run("run-1".into(), "pipe".into(), None)
+        };
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&run_id, InternalRunState::Reconciling)
+                .unwrap();
+            runs.get_run_mut(&run_id).unwrap().recovery_started_at = Some(
+                std::time::SystemTime::now()
+                    .checked_sub(Duration::from_secs(120))
+                    .unwrap(),
+            );
+        }
+
+        sweep_reconciliation_timeouts(&state, Duration::from_secs(30)).await;
+
+        let runs = state.runs.read().await;
+        let record = runs.get_run(&run_id).unwrap();
+        assert_eq!(record.state, InternalRunState::RecoveryFailed);
+        assert!(record
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("reconciliation timed out")));
+    }
+
+    #[tokio::test]
+    async fn handle_reconciliation_timeout_leaves_fresh_reconciling_run_unchanged() {
+        let state = ControllerState::new(b"test-signing-key");
+        let (run_id, _) = {
+            let mut runs = state.runs.write().await;
+            runs.create_run("run-1".into(), "pipe".into(), None)
+        };
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&run_id, InternalRunState::Reconciling)
+                .unwrap();
+        }
+
+        sweep_reconciliation_timeouts(&state, Duration::from_secs(300)).await;
+
+        let runs = state.runs.read().await;
+        let record = runs.get_run(&run_id).unwrap();
+        assert_eq!(record.state, InternalRunState::Reconciling);
     }
 
     #[tokio::test]

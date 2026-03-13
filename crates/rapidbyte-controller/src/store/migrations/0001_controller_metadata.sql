@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS controller_runs (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
+    recovery_started_at TIMESTAMPTZ,
     current_task_id TEXT,
     current_agent_id TEXT,
     current_attempt INTEGER,
@@ -23,6 +24,17 @@ CREATE TABLE IF NOT EXISTS controller_runs (
     elapsed_seconds DOUBLE PRECISION NOT NULL DEFAULT 0,
     cursors_advanced BIGINT NOT NULL DEFAULT 0
 );
+
+ALTER TABLE controller_runs
+    ADD COLUMN IF NOT EXISTS recovery_started_at TIMESTAMPTZ;
+ALTER TABLE controller_runs
+    ADD COLUMN IF NOT EXISTS error_code TEXT;
+ALTER TABLE controller_runs
+    ADD COLUMN IF NOT EXISTS error_retryable BOOLEAN;
+ALTER TABLE controller_runs
+    ADD COLUMN IF NOT EXISTS error_safe_to_retry BOOLEAN;
+ALTER TABLE controller_runs
+    ADD COLUMN IF NOT EXISTS error_commit_state TEXT;
 
 CREATE TABLE IF NOT EXISTS controller_tasks (
     task_id TEXT PRIMARY KEY,

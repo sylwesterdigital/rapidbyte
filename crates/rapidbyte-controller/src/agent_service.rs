@@ -227,6 +227,7 @@ impl AgentService for AgentServiceImpl {
                     }
                 };
                 if claimed {
+                    drop(tasks);
                     self.state
                         .persist_run(&assignment.run_id)
                         .await
@@ -284,6 +285,7 @@ impl AgentService for AgentServiceImpl {
                 }
             };
             if claimed {
+                drop(tasks);
                 self.state
                     .persist_run(&assignment.run_id)
                     .await
@@ -547,8 +549,12 @@ impl AgentService for AgentServiceImpl {
                         runs.ensure_running(&run_id);
                         let _ = runs.transition(&run_id, InternalRunState::Failed);
                         if let Some(record) = runs.get_run_mut(&run_id) {
+                            record.error_code = error.map(|e| e.code.clone());
                             record.error_message =
                                 error.map(|e| format!("{}: {}", e.code, e.message));
+                            record.error_retryable = error.map(|e| e.retryable);
+                            record.error_safe_to_retry = error.map(|e| e.safe_to_retry);
+                            record.error_commit_state = error.map(|e| e.commit_state.clone());
                         }
                     }
                     self.state

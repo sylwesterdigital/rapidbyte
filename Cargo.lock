@@ -3687,6 +3687,7 @@ dependencies = [
  "syn",
  "tempfile",
  "tokio",
+ "tokio-postgres",
  "tokio-stream",
  "tokio-util",
  "tonic",

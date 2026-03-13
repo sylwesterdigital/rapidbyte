@@ -626,6 +626,7 @@ message RunEvent {
     RunCompleted completed = 3;
     RunFailed failed = 4;
     RunCancelled cancelled = 5;
+    RunStatus status = 6;
   }
 }
 
@@ -649,6 +650,11 @@ message RunFailed {
 }
 
 message RunCancelled {}
+
+message RunStatus {
+  RunState state = 1;
+  string message = 2;
+}
 
 // ──────────────────────────────────────────────
 // Agent Service — Agent-facing (control plane)
@@ -799,6 +805,8 @@ enum RunState {
   RUN_STATE_COMPLETED = 5;
   RUN_STATE_FAILED = 6;
   RUN_STATE_CANCELLED = 7;
+  RUN_STATE_RECONCILING = 8;
+  RUN_STATE_RECOVERY_FAILED = 9;
 }
 
 enum TaskOutcome {

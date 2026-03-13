@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use std::path::Path;
+use std::time::Duration;
 
 pub async fn execute(
     listen: &str,
@@ -10,6 +11,7 @@ pub async fn execute(
     auth_token: Option<&str>,
     allow_unauthenticated: bool,
     allow_insecure_signing_key: bool,
+    reconciliation_timeout: Option<Duration>,
     tls_cert: Option<&Path>,
     tls_key: Option<&Path>,
 ) -> Result<()> {
@@ -20,6 +22,7 @@ pub async fn execute(
         auth_token,
         allow_unauthenticated,
         allow_insecure_signing_key,
+        reconciliation_timeout,
         tls_cert,
         tls_key,
     )?;
@@ -33,6 +36,7 @@ fn build_config(
     auth_token: Option<&str>,
     allow_unauthenticated: bool,
     allow_insecure_signing_key: bool,
+    reconciliation_timeout: Option<Duration>,
     tls_cert: Option<&Path>,
     tls_key: Option<&Path>,
 ) -> Result<rapidbyte_controller::ControllerConfig> {
@@ -65,6 +69,9 @@ fn build_config(
     }
     config.allow_unauthenticated = allow_unauthenticated;
     config.allow_insecure_default_signing_key = allow_insecure_signing_key;
+    if let Some(timeout) = reconciliation_timeout {
+        config.reconciliation_timeout = timeout;
+    }
     if config.auth_tokens.is_empty() && !config.allow_unauthenticated {
         anyhow::bail!(
             "controller requires --auth-token / RAPIDBYTE_AUTH_TOKEN or --allow-unauthenticated"
@@ -111,6 +118,7 @@ mod tests {
             false,
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(config.auth_tokens, vec!["secret".to_string()]);
@@ -126,6 +134,7 @@ mod tests {
             None,
             false,
             false,
+            None,
             None,
             None,
         )
@@ -145,6 +154,7 @@ mod tests {
             false,
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(config.auth_tokens.is_empty());
@@ -160,6 +170,7 @@ mod tests {
             Some(""),
             false,
             false,
+            None,
             None,
             None,
         )
@@ -179,6 +190,7 @@ mod tests {
             false,
             None,
             None,
+            None,
         )
         .err()
         .unwrap();
@@ -194,6 +206,7 @@ mod tests {
             Some("secret"),
             false,
             false,
+            None,
             None,
             None,
         )
@@ -215,6 +228,7 @@ mod tests {
             true,
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(config.allow_insecure_default_signing_key);
@@ -229,6 +243,7 @@ mod tests {
             Some("secret"),
             false,
             false,
+            None,
             None,
             None,
         )
@@ -254,6 +269,7 @@ mod tests {
             None,
             true,
             false,
+            None,
             Some(cert_path.as_path()),
             Some(key_path.as_path()),
         )
@@ -274,11 +290,29 @@ mod tests {
             false,
             None,
             None,
+            None,
         )
         .err()
         .unwrap();
         assert!(err
             .to_string()
             .contains("metadata database URL must not be empty"));
+    }
+
+    #[test]
+    fn controller_execute_wires_reconciliation_timeout() {
+        let config = build_config(
+            "[::]:9090",
+            Some("postgresql://localhost/controller"),
+            Some("signing"),
+            Some("secret"),
+            false,
+            false,
+            Some(Duration::from_secs(42)),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(config.reconciliation_timeout, Duration::from_secs(42));
     }
 }
