@@ -1,5 +1,6 @@
 //! Shared controller state accessed by gRPC service handlers.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
@@ -23,6 +24,7 @@ pub struct ControllerState {
     pub registry: Arc<RwLock<AgentRegistry>>,
     pub watchers: Arc<RwLock<RunWatchers>>,
     pub previews: Arc<RwLock<PreviewStore>>,
+    pub preview_delete_retries: Arc<RwLock<HashSet<String>>>,
     pub epoch_gen: Arc<EpochGenerator>,
     pub ticket_signer: Arc<TicketSigner>,
     pub metadata_store: Option<Arc<dyn DurableMetadataStore>>,
@@ -68,6 +70,7 @@ impl ControllerState {
             registry: Arc::new(RwLock::new(registry)),
             watchers: Arc::new(RwLock::new(RunWatchers::new())),
             previews: Arc::new(RwLock::new(previews)),
+            preview_delete_retries: Arc::new(RwLock::new(HashSet::new())),
             epoch_gen: Arc::new(EpochGenerator::with_start(snapshot.max_lease_epoch)),
             ticket_signer: Arc::new(TicketSigner::new(signing_key)),
             metadata_store,

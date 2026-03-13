@@ -288,15 +288,15 @@ impl TaskQueue {
     }
 
     /// Find tasks with expired leases, transition them to `TimedOut`.
-    /// Returns `(task_id, run_id)` pairs for expired tasks.
-    pub fn expire_leases(&mut self) -> Vec<(String, String)> {
+    /// Returns the pre-timeout task snapshots for expired tasks.
+    pub fn expire_leases(&mut self) -> Vec<TaskRecord> {
         let mut expired = Vec::new();
 
         for record in self.tasks.values_mut() {
             if matches!(record.state, TaskState::Assigned | TaskState::Running) {
                 if let Some(lease) = &record.lease {
                     if lease.is_expired() {
-                        expired.push((record.task_id.clone(), record.run_id.clone()));
+                        expired.push(record.clone());
                         record.state = TaskState::TimedOut;
                         record.lease = None;
                     }
@@ -515,7 +515,8 @@ mod tests {
 
         let expired = q.expire_leases();
         assert_eq!(expired.len(), 1);
-        assert_eq!(expired[0], (assignment.task_id.clone(), "r1".to_string()));
+        assert_eq!(expired[0].task_id, assignment.task_id);
+        assert_eq!(expired[0].run_id, "r1");
         assert_eq!(
             q.get(&assignment.task_id).unwrap().state,
             TaskState::TimedOut

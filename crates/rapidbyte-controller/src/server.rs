@@ -101,11 +101,39 @@ async fn initialize_metadata_store(
     store::initialize_metadata_store(url).await
 }
 
-async fn handle_expired_lease(state: &ControllerState, task_id: &str, run_id: &str) {
+async fn rollback_background_timeout(
+    state: &ControllerState,
+    previous_run: crate::run_state::RunRecord,
+    previous_task: Option<crate::scheduler::TaskRecord>,
+) {
+    {
+        let mut runs = state.runs.write().await;
+        runs.restore_run(previous_run);
+    }
+    if let Some(previous_task) = previous_task {
+        let mut tasks = state.tasks.write().await;
+        tasks.restore_task(previous_task);
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn handle_expired_lease(
+    state: &ControllerState,
+    previous_task: crate::scheduler::TaskRecord,
+) {
+    let task_id = previous_task.task_id.clone();
+    let run_id = previous_task.run_id.clone();
+    let previous_run = state
+        .runs
+        .read()
+        .await
+        .get_run(&run_id)
+        .cloned()
+        .expect("run should exist for expired lease");
     let timeout_outcome = {
         let mut runs = state.runs.write().await;
         let target_state = if runs
-            .get_run(run_id)
+            .get_run(&run_id)
             .is_some_and(|record| record.state == InternalRunState::Reconciling)
         {
             InternalRunState::RecoveryFailed
@@ -113,8 +141,8 @@ async fn handle_expired_lease(state: &ControllerState, task_id: &str, run_id: &s
             InternalRunState::TimedOut
         };
 
-        if let Ok(()) = runs.transition(run_id, target_state) {
-            let record = runs.get_run_mut(run_id);
+        if let Ok(()) = runs.transition(&run_id, target_state) {
+            let record = runs.get_run_mut(&run_id);
             if let Some(r) = record {
                 let (code, msg, retryable, safe_to_retry) = if target_state
                     == InternalRunState::RecoveryFailed
@@ -145,11 +173,11 @@ async fn handle_expired_lease(state: &ControllerState, task_id: &str, run_id: &s
                 None
             }
         } else {
-            let actual_state = runs.get_run(run_id).map(|r| r.state);
+            let actual_state = runs.get_run(&run_id).map(|r| r.state);
             if let Some(actual_state) = actual_state {
                 tracing::warn!(
-                    task_id,
-                    run_id,
+                    task_id = %task_id,
+                    run_id = %run_id,
                     ?actual_state,
                     "Skipping lease-expiry terminal event because run could not transition to TimedOut"
                 );
@@ -158,21 +186,25 @@ async fn handle_expired_lease(state: &ControllerState, task_id: &str, run_id: &s
         }
     };
     let mut durable = true;
-    if let Err(error) = state.persist_task(task_id).await {
+    if let Err(error) = state.persist_task(&task_id).await {
         durable = false;
-        tracing::error!(task_id, run_id, ?error, "failed to persist expired task");
+        tracing::error!(task_id = %task_id, run_id = %run_id, ?error, "failed to persist expired task");
     }
-    if let Err(error) = state.persist_run(run_id).await {
+    if let Err(error) = state.persist_run(&run_id).await {
         durable = false;
-        tracing::error!(task_id, run_id, ?error, "failed to persist timed-out run");
+        tracing::error!(task_id = %task_id, run_id = %run_id, ?error, "failed to persist timed-out run");
+    }
+
+    if !durable {
+        rollback_background_timeout(state, previous_run, Some(previous_task)).await;
     }
 
     if durable {
         if let Some((code, msg, retryable, safe_to_retry, attempt)) = timeout_outcome {
             state.watchers.write().await.publish_terminal(
-                run_id,
+                &run_id,
                 RunEvent {
-                    run_id: run_id.to_string(),
+                    run_id: run_id.clone(),
                     event: Some(run_event::Event::Failed(RunFailed {
                         error: Some(TaskError {
                             code: code.into(),
@@ -188,13 +220,14 @@ async fn handle_expired_lease(state: &ControllerState, task_id: &str, run_id: &s
         }
     } else if timeout_outcome.is_some() {
         tracing::warn!(
-            task_id,
-            run_id,
+            task_id = %task_id,
+            run_id = %run_id,
             "skipping lease-expiry terminal publish because durable persistence failed"
         );
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_timeout: Duration) {
     let now = std::time::SystemTime::now();
     let stale_run_ids = {
@@ -212,7 +245,23 @@ async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_t
     };
 
     for run_id in stale_run_ids {
-        let (task_id, attempt) = {
+        let previous_run = state
+            .runs
+            .read()
+            .await
+            .get_run(&run_id)
+            .cloned()
+            .expect("reconciling run should exist");
+        let task_id = previous_run
+            .current_task
+            .as_ref()
+            .map(|task| task.task_id.clone());
+        let previous_task = if let Some(task_id) = task_id.as_deref() {
+            state.tasks.read().await.get(task_id).cloned()
+        } else {
+            None
+        };
+        let attempt = {
             let mut runs = state.runs.write().await;
             let Some(run) = runs.get_run(&run_id) else {
                 continue;
@@ -220,7 +269,6 @@ async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_t
             if run.state != InternalRunState::Reconciling {
                 continue;
             }
-            let task_id = run.current_task.as_ref().map(|task| task.task_id.clone());
             let attempt = run.attempt;
             if runs
                 .transition(&run_id, InternalRunState::RecoveryFailed)
@@ -236,7 +284,7 @@ async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_t
                 run.error_safe_to_retry = Some(false);
                 run.error_commit_state = Some(String::new());
             }
-            (task_id, attempt)
+            attempt
         };
 
         let mut durable = true;
@@ -266,6 +314,10 @@ async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_t
             );
         }
 
+        if !durable {
+            rollback_background_timeout(state, previous_run, previous_task).await;
+        }
+
         if durable {
             state.watchers.write().await.publish_terminal(
                 &run_id,
@@ -293,12 +345,27 @@ async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_t
 
 async fn cleanup_expired_previews(state: &ControllerState) -> usize {
     let expired_run_ids = { state.previews.write().await.remove_expired() };
-    for run_id in &expired_run_ids {
+    {
+        let mut retry_set = state.preview_delete_retries.write().await;
+        retry_set.extend(expired_run_ids);
+    }
+    let pending = state
+        .preview_delete_retries
+        .read()
+        .await
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut removed = 0usize;
+    for run_id in &pending {
         if let Err(error) = state.delete_preview(run_id).await {
             tracing::error!(run_id, ?error, "failed to delete expired durable preview");
+        } else {
+            state.preview_delete_retries.write().await.remove(run_id);
+            removed += 1;
         }
     }
-    expired_run_ids.len()
+    removed
 }
 
 fn spawn_preview_cleanup_task(
@@ -366,9 +433,9 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
         loop {
             interval.tick().await;
             let expired = lease_state.tasks.write().await.expire_leases();
-            for (task_id, run_id) in &expired {
-                info!(task_id, run_id, "Task lease expired");
-                handle_expired_lease(&lease_state, task_id, run_id).await;
+            for previous_task in expired {
+                info!(task_id = %previous_task.task_id, run_id = %previous_task.run_id, "Task lease expired");
+                handle_expired_lease(&lease_state, previous_task).await;
             }
             sweep_reconciliation_timeouts(&lease_state, reconciliation_timeout).await;
         }
@@ -515,7 +582,12 @@ mod tests {
                 .unwrap();
         }
 
-        handle_expired_lease(&state, &task_id, &run_id).await;
+        let previous_task = state.tasks.read().await.get(&task_id).unwrap().clone();
+        {
+            let mut tasks = state.tasks.write().await;
+            assert!(tasks.mark_timed_out(&task_id));
+        }
+        handle_expired_lease(&state, previous_task).await;
 
         let runs = state.runs.read().await;
         let record = runs.get_run(&run_id).unwrap();
@@ -550,7 +622,12 @@ mod tests {
                 .unwrap();
         }
 
-        handle_expired_lease(&state, &task_id, &run_id).await;
+        let previous_task = state.tasks.read().await.get(&task_id).unwrap().clone();
+        {
+            let mut tasks = state.tasks.write().await;
+            assert!(tasks.mark_timed_out(&task_id));
+        }
+        handle_expired_lease(&state, previous_task).await;
 
         let runs = state.runs.read().await;
         let record = runs.get_run(&run_id).unwrap();
@@ -562,7 +639,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_expired_lease_skips_publish_when_persist_fails() {
+    async fn handle_expired_lease_rolls_back_when_persist_fails() {
         let state = ControllerState::with_metadata_store(
             b"test-signing-key",
             FailingMetadataStore::new().fail_task_upsert_on(1),
@@ -587,7 +664,12 @@ mod tests {
         }
 
         let mut rx = state.watchers.write().await.subscribe(&run_id);
-        handle_expired_lease(&state, &task_id, &run_id).await;
+        let previous_task = state.tasks.read().await.get(&task_id).unwrap().clone();
+        {
+            let mut tasks = state.tasks.write().await;
+            assert!(tasks.mark_timed_out(&task_id));
+        }
+        handle_expired_lease(&state, previous_task).await;
 
         let recv = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
         assert!(
@@ -595,6 +677,11 @@ mod tests {
             "terminal event should not publish on persist failure"
         );
         assert_eq!(state.watchers.read().await.channel_count(), 1);
+        let task = state.tasks.read().await.get(&task_id).unwrap().clone();
+        assert_eq!(task.state, crate::scheduler::TaskState::Assigned);
+        assert!(task.lease.is_some());
+        let run = state.runs.read().await.get_run(&run_id).unwrap().clone();
+        assert_eq!(run.state, InternalRunState::Assigned);
     }
 
     #[tokio::test]
@@ -626,6 +713,47 @@ mod tests {
             .error_message
             .as_deref()
             .is_some_and(|message| message.contains("reconciliation timed out")));
+    }
+
+    #[tokio::test]
+    async fn handle_reconciliation_timeout_rolls_back_when_persist_fails() {
+        let state = ControllerState::with_metadata_store(
+            b"test-signing-key",
+            FailingMetadataStore::new().fail_run_upsert_on(1),
+        );
+        let (run_id, _) = {
+            let mut runs = state.runs.write().await;
+            runs.create_run("run-1".into(), "pipe".into(), None)
+        };
+        let task_id = {
+            let mut tasks = state.tasks.write().await;
+            let task_id = tasks.enqueue(run_id.clone(), b"yaml".to_vec(), false, None, 1);
+            let assignment = tasks
+                .poll("agent-1", Duration::from_secs(60), &state.epoch_gen)
+                .expect("task should be assigned");
+            assert_eq!(assignment.task_id, task_id);
+            task_id
+        };
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&run_id, InternalRunState::Reconciling)
+                .unwrap();
+            runs.get_run_mut(&run_id).unwrap().recovery_started_at = Some(
+                std::time::SystemTime::now()
+                    .checked_sub(Duration::from_secs(120))
+                    .unwrap(),
+            );
+        }
+
+        sweep_reconciliation_timeouts(&state, Duration::from_secs(30)).await;
+
+        let run = state.runs.read().await.get_run(&run_id).unwrap().clone();
+        assert_eq!(run.state, InternalRunState::Reconciling);
+        let task = state.tasks.read().await.get(&task_id).unwrap().clone();
+        assert_eq!(task.state, crate::scheduler::TaskState::Assigned);
+        assert!(task.lease.is_some());
     }
 
     #[tokio::test]
@@ -682,5 +810,41 @@ mod tests {
         assert!(previews.get("run-1").is_none());
         assert_eq!(previews.cleanup_expired(), 0);
         assert!(store.persisted_preview("run-1").is_none());
+        assert!(state.preview_delete_retries.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn preview_cleanup_retries_failed_durable_deletes() {
+        let store = FailingMetadataStore::new().fail_delete_preview_on(1);
+        let state = ControllerState::with_metadata_store(b"test-signing-key", store.clone());
+        let preview = crate::preview::PreviewEntry {
+            run_id: "run-1".into(),
+            task_id: "task-1".into(),
+            flight_endpoint: "localhost:9091".into(),
+            ticket: bytes::Bytes::from_static(b"ticket"),
+            streams: vec![],
+            created_at: std::time::Instant::now()
+                .checked_sub(Duration::from_secs(120))
+                .unwrap(),
+            ttl: Duration::from_secs(60),
+        };
+        {
+            let mut previews = state.previews.write().await;
+            previews.store(preview.clone());
+        }
+        state
+            .persist_preview_record(&preview)
+            .await
+            .expect("preview persistence should succeed");
+
+        let removed = cleanup_expired_previews(&state).await;
+        assert_eq!(removed, 0);
+        assert!(store.persisted_preview("run-1").is_some());
+        assert!(state.preview_delete_retries.read().await.contains("run-1"));
+
+        let removed = cleanup_expired_previews(&state).await;
+        assert_eq!(removed, 1);
+        assert!(store.persisted_preview("run-1").is_none());
+        assert!(state.preview_delete_retries.read().await.is_empty());
     }
 }

@@ -1327,11 +1327,13 @@ pub mod test_support {
         agent_upsert_fail_on: Option<usize>,
         preview_upsert_fail_on: Option<usize>,
         delete_run_fail_on: Option<usize>,
+        delete_preview_fail_on: Option<usize>,
         run_upsert_calls: usize,
         task_upsert_calls: usize,
         agent_upsert_calls: usize,
         preview_upsert_calls: usize,
         delete_run_calls: usize,
+        delete_preview_calls: usize,
         persisted_runs: HashMap<String, RunRecord>,
         persisted_tasks: HashMap<String, TaskRecord>,
         persisted_agents: HashMap<String, AgentRecord>,
@@ -1376,6 +1378,12 @@ pub mod test_support {
         #[must_use]
         pub fn fail_delete_run_on(self: Arc<Self>, call: usize) -> Arc<Self> {
             self.failures.lock().unwrap().delete_run_fail_on = Some(call);
+            self
+        }
+
+        #[must_use]
+        pub fn fail_delete_preview_on(self: Arc<Self>, call: usize) -> Arc<Self> {
+            self.failures.lock().unwrap().delete_preview_fail_on = Some(call);
             self
         }
 
@@ -1558,11 +1566,12 @@ pub mod test_support {
         }
 
         async fn delete_preview(&self, run_id: &str) -> anyhow::Result<()> {
-            self.failures
-                .lock()
-                .unwrap()
-                .persisted_previews
-                .remove(run_id);
+            let mut failures = self.failures.lock().unwrap();
+            failures.delete_preview_calls += 1;
+            if failures.delete_preview_fail_on == Some(failures.delete_preview_calls) {
+                anyhow::bail!("injected preview delete failure");
+            }
+            failures.persisted_previews.remove(run_id);
             Ok(())
         }
     }
