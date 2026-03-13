@@ -5,6 +5,12 @@ use std::time::SystemTime;
 
 use thiserror::Error;
 
+/// Error code for runs whose recovery reconciliation timed out.
+pub const ERROR_CODE_RECOVERY_TIMEOUT: &str = "RECOVERY_TIMEOUT";
+
+/// Error code for runs whose task lease expired (agent unresponsive).
+pub const ERROR_CODE_LEASE_EXPIRED: &str = "LEASE_EXPIRED";
+
 /// Run lifecycle states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunState {

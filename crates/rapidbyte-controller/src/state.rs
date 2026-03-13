@@ -205,33 +205,6 @@ impl ControllerState {
         metadata_store.persist_timeout_transition(run, task).await
     }
 
-    /// Persist preview metadata when durable metadata storage is configured.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the durable metadata write fails.
-    pub async fn persist_preview(&self, run_id: &str) -> anyhow::Result<()> {
-        let Some(metadata_store) = &self.metadata_store else {
-            return Ok(());
-        };
-
-        let preview = { self.previews.write().await.get(run_id).cloned() };
-        if let Some(preview) = preview {
-            metadata_store
-                .upsert_preview(
-                    &preview.run_id,
-                    &preview.task_id,
-                    &preview.flight_endpoint,
-                    preview.ticket.as_ref(),
-                    &preview.streams,
-                    preview_created_at(preview.created_at),
-                    preview.ttl,
-                )
-                .await?;
-        }
-        Ok(())
-    }
-
     /// Persist a preview snapshot directly.
     ///
     /// # Errors
@@ -605,7 +578,7 @@ mod tests {
         let state = ControllerState::from_snapshot(b"signing-key", None, snapshot);
 
         assert!(state.registry.blocking_read().get("agent-1").is_some());
-        let preview = state.previews.blocking_write().get("run-1").cloned();
+        let preview = state.previews.blocking_read().get("run-1").cloned();
         assert!(preview.is_some());
         assert_eq!(preview.unwrap().streams[0].stream, "users");
     }

@@ -210,16 +210,12 @@ impl PreviewStore {
     }
 
     #[must_use]
-    pub fn get(&mut self, run_id: &str) -> Option<&PreviewEntry> {
-        let expired = self
-            .entries
-            .get(run_id)
-            .is_some_and(|entry| entry.created_at.elapsed() >= entry.ttl);
-        if expired {
-            self.entries.remove(run_id);
+    pub fn get(&self, run_id: &str) -> Option<&PreviewEntry> {
+        let entry = self.entries.get(run_id)?;
+        if entry.created_at.elapsed() >= entry.ttl {
             return None;
         }
-        self.entries.get(run_id)
+        Some(entry)
     }
 
     pub fn remove_expired(&mut self) -> Vec<String> {
@@ -233,11 +229,6 @@ impl PreviewStore {
             let _ = self.entries.remove(run_id);
         }
         expired_run_ids
-    }
-
-    /// Remove expired entries. Returns the number removed.
-    pub fn cleanup_expired(&mut self) -> usize {
-        self.remove_expired().len()
     }
 
     #[must_use]
@@ -350,7 +341,8 @@ mod tests {
             ttl: Duration::from_secs(60),
         });
         assert!(store.get("r1").is_none());
-        assert_eq!(store.cleanup_expired(), 0);
+        // get() no longer removes expired entries; cleanup is done by remove_expired()
+        assert_eq!(store.remove_expired().len(), 1);
     }
 
     #[test]
@@ -377,7 +369,7 @@ mod tests {
             ttl: Duration::from_secs(60),
         });
 
-        let removed = store.cleanup_expired();
+        let removed = store.remove_expired().len();
         assert_eq!(removed, 1);
         assert!(store.get("r1").is_none());
         assert!(store.get("r2").is_some());
