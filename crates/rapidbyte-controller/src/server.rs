@@ -12,7 +12,9 @@ use crate::pipeline_service::PipelineServiceImpl;
 use crate::proto::rapidbyte::v1::agent_service_server::AgentServiceServer;
 use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineServiceServer;
 use crate::proto::rapidbyte::v1::{run_event, RunEvent, RunFailed, TaskError};
-use crate::run_state::RunState as InternalRunState;
+use crate::run_state::{
+    RunState as InternalRunState, ERROR_CODE_LEASE_EXPIRED, ERROR_CODE_RECOVERY_TIMEOUT,
+};
 use crate::state::ControllerState;
 use crate::store;
 
@@ -101,6 +103,45 @@ async fn initialize_metadata_store(
     store::initialize_metadata_store(url).await
 }
 
+struct TimeoutErrorInfo {
+    code: &'static str,
+    message: String,
+    retryable: bool,
+    safe_to_retry: bool,
+}
+
+fn set_run_error(run: &mut crate::run_state::RunRecord, error: &TimeoutErrorInfo) {
+    run.error_code = Some(error.code.into());
+    run.error_message = Some(error.message.clone());
+    run.error_retryable = Some(error.retryable);
+    run.error_safe_to_retry = Some(error.safe_to_retry);
+    run.error_commit_state = Some(String::new());
+}
+
+async fn publish_run_failed(
+    state: &ControllerState,
+    run_id: &str,
+    error: TimeoutErrorInfo,
+    attempt: u32,
+) {
+    state.watchers.write().await.publish_terminal(
+        run_id,
+        RunEvent {
+            run_id: run_id.to_string(),
+            event: Some(run_event::Event::Failed(RunFailed {
+                error: Some(TaskError {
+                    code: error.code.into(),
+                    message: error.message,
+                    retryable: error.retryable,
+                    safe_to_retry: error.safe_to_retry,
+                    commit_state: String::new(),
+                }),
+                attempt,
+            })),
+        },
+    );
+}
+
 async fn rollback_background_timeout(
     state: &ControllerState,
     previous_run: crate::run_state::RunRecord,
@@ -144,31 +185,25 @@ async fn handle_expired_lease(
         if let Ok(()) = runs.transition(&run_id, target_state) {
             let record = runs.get_run_mut(&run_id);
             if let Some(r) = record {
-                let (code, msg, retryable, safe_to_retry) = if target_state
-                    == InternalRunState::RecoveryFailed
-                {
-                    (
-                            "RECOVERY_TIMEOUT",
-                            format!(
-                                "Run recovery reconciliation timed out after controller restart for task {task_id}"
-                            ),
-                            false,
-                            false,
-                        )
+                let error_info = if target_state == InternalRunState::RecoveryFailed {
+                    TimeoutErrorInfo {
+                        code: ERROR_CODE_RECOVERY_TIMEOUT,
+                        message: format!(
+                            "Run recovery reconciliation timed out after controller restart for task {task_id}"
+                        ),
+                        retryable: false,
+                        safe_to_retry: false,
+                    }
                 } else {
-                    (
-                        "LEASE_EXPIRED",
-                        format!("Task {task_id} lease expired (agent unresponsive)"),
-                        true,
-                        true,
-                    )
+                    TimeoutErrorInfo {
+                        code: ERROR_CODE_LEASE_EXPIRED,
+                        message: format!("Task {task_id} lease expired (agent unresponsive)"),
+                        retryable: true,
+                        safe_to_retry: true,
+                    }
                 };
-                r.error_message = Some(msg.clone());
-                r.error_code = Some(code.into());
-                r.error_retryable = Some(retryable);
-                r.error_safe_to_retry = Some(safe_to_retry);
-                r.error_commit_state = Some(String::new());
-                Some((code, msg, retryable, safe_to_retry, r.attempt))
+                set_run_error(r, &error_info);
+                Some((error_info, r.attempt))
             } else {
                 None
             }
@@ -185,9 +220,9 @@ async fn handle_expired_lease(
             None
         }
     };
-    if timeout_outcome.is_none() {
+    let Some((error_info, attempt)) = timeout_outcome else {
         return;
-    }
+    };
     let timed_out_run = state
         .runs
         .read()
@@ -223,24 +258,7 @@ async fn handle_expired_lease(
     }
 
     if durable {
-        let (code, msg, retryable, safe_to_retry, attempt) =
-            timeout_outcome.expect("timeout outcome checked above");
-        state.watchers.write().await.publish_terminal(
-            &run_id,
-            RunEvent {
-                run_id: run_id.clone(),
-                event: Some(run_event::Event::Failed(RunFailed {
-                    error: Some(TaskError {
-                        code: code.into(),
-                        message: msg,
-                        retryable,
-                        safe_to_retry,
-                        commit_state: String::new(),
-                    }),
-                    attempt,
-                })),
-            },
-        );
+        publish_run_failed(state, &run_id, error_info, attempt).await;
     } else {
         tracing::warn!(
             task_id = %task_id,
@@ -255,15 +273,14 @@ async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_t
     let now = std::time::SystemTime::now();
     let stale_run_ids = {
         let runs = state.runs.read().await;
-        runs.all_runs()
+        runs.list_runs(Some(&[InternalRunState::Reconciling]))
             .into_iter()
-            .filter(|run| run.state == InternalRunState::Reconciling)
             .filter(|run| {
                 run.recovery_started_at
                     .and_then(|started_at| now.duration_since(started_at).ok())
                     .is_some_and(|elapsed| elapsed >= reconciliation_timeout)
             })
-            .map(|run| run.run_id)
+            .map(|run| run.run_id.clone())
             .collect::<Vec<_>>()
     };
 
@@ -300,12 +317,16 @@ async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_t
                 continue;
             }
             if let Some(run) = runs.get_run_mut(&run_id) {
-                run.error_code = Some("RECOVERY_TIMEOUT".into());
-                run.error_message =
-                    Some("Run recovery reconciliation timed out after controller restart".into());
-                run.error_retryable = Some(false);
-                run.error_safe_to_retry = Some(false);
-                run.error_commit_state = Some(String::new());
+                set_run_error(
+                    run,
+                    &TimeoutErrorInfo {
+                        code: ERROR_CODE_RECOVERY_TIMEOUT,
+                        message: "Run recovery reconciliation timed out after controller restart"
+                            .into(),
+                        retryable: false,
+                        safe_to_retry: false,
+                    },
+                );
             }
             attempt
         };
@@ -350,24 +371,19 @@ async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_t
         }
 
         if durable {
-            state.watchers.write().await.publish_terminal(
+            publish_run_failed(
+                state,
                 &run_id,
-                RunEvent {
-                    run_id: run_id.clone(),
-                    event: Some(run_event::Event::Failed(RunFailed {
-                        error: Some(TaskError {
-                            code: "RECOVERY_TIMEOUT".into(),
-                            message:
-                                "Run recovery reconciliation timed out after controller restart"
-                                    .into(),
-                            retryable: false,
-                            safe_to_retry: false,
-                            commit_state: String::new(),
-                        }),
-                        attempt,
-                    })),
+                TimeoutErrorInfo {
+                    code: ERROR_CODE_RECOVERY_TIMEOUT,
+                    message: "Run recovery reconciliation timed out after controller restart"
+                        .into(),
+                    retryable: false,
+                    safe_to_retry: false,
                 },
-            );
+                attempt,
+            )
+            .await;
         } else {
             tracing::warn!(run_id, "skipping reconciliation-timeout terminal publish because durable persistence failed");
         }
@@ -376,27 +392,26 @@ async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_t
 
 async fn cleanup_expired_previews(state: &ControllerState) -> usize {
     let expired_run_ids = { state.previews.write().await.remove_expired() };
-    {
+    let pending = {
         let mut retry_set = state.preview_delete_retries.write().await;
         retry_set.extend(expired_run_ids);
-    }
-    let pending = state
-        .preview_delete_retries
-        .read()
-        .await
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut removed = 0usize;
+        retry_set.iter().cloned().collect::<Vec<_>>()
+    };
+    let mut succeeded = Vec::new();
     for run_id in &pending {
         if let Err(error) = state.delete_preview(run_id).await {
             tracing::error!(run_id, ?error, "failed to delete expired durable preview");
         } else {
-            state.preview_delete_retries.write().await.remove(run_id);
-            removed += 1;
+            succeeded.push(run_id.clone());
         }
     }
-    removed
+    if !succeeded.is_empty() {
+        let mut retry_set = state.preview_delete_retries.write().await;
+        for run_id in &succeeded {
+            retry_set.remove(run_id);
+        }
+    }
+    succeeded.len()
 }
 
 fn spawn_preview_cleanup_task(
@@ -890,7 +905,7 @@ mod tests {
 
         let mut previews = state.previews.write().await;
         assert!(previews.get("run-1").is_none());
-        assert_eq!(previews.cleanup_expired(), 0);
+        assert_eq!(previews.remove_expired().len(), 0);
         assert!(store.persisted_preview("run-1").is_none());
         assert!(state.preview_delete_retries.read().await.is_empty());
     }

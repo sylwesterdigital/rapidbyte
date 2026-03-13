@@ -15,7 +15,9 @@ use crate::proto::rapidbyte::v1::{
     StreamPreview, SubmitPipelineRequest, SubmitPipelineResponse, TaskError, TaskRef,
     WatchRunRequest,
 };
-use crate::run_state::RunState as InternalRunState;
+use crate::run_state::{
+    RunState as InternalRunState, ERROR_CODE_LEASE_EXPIRED, ERROR_CODE_RECOVERY_TIMEOUT,
+};
 use crate::state::ControllerState;
 
 /// Maps internal `RunState` to proto `RunState` enum value.
@@ -59,8 +61,8 @@ fn from_proto_states(v: i32) -> Option<Vec<InternalRunState>> {
 fn terminal_error_for_run(record: &crate::run_state::RunRecord) -> Option<TaskError> {
     let message = record.error_message.clone()?;
     let (code, retryable, safe_to_retry) = match record.state {
-        InternalRunState::RecoveryFailed => ("RECOVERY_TIMEOUT".into(), false, false),
-        InternalRunState::TimedOut => ("LEASE_EXPIRED".into(), true, true),
+        InternalRunState::RecoveryFailed => (ERROR_CODE_RECOVERY_TIMEOUT.into(), false, false),
+        InternalRunState::TimedOut => (ERROR_CODE_LEASE_EXPIRED.into(), true, true),
         _ => (
             record.error_code.clone().unwrap_or_default(),
             record.error_retryable.unwrap_or(false),
@@ -559,7 +561,7 @@ impl PipelineService for PipelineServiceImpl {
 
         // Preview lookup with runs lock already released
         let preview = {
-            let mut previews = self.state.previews.write().await;
+            let previews = self.state.previews.read().await;
             previews.get(&run_id).map(|p| PreviewAccess {
                 state: PreviewState::Ready.into(),
                 flight_endpoint: p.flight_endpoint.clone(),

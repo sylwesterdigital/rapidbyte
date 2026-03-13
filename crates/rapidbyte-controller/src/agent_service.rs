@@ -620,10 +620,7 @@ impl AgentService for AgentServiceImpl {
         match outcome {
             TaskOutcome::Completed => {
                 let has_preview = req.preview.is_some();
-                let previous_preview = {
-                    let mut previews = self.state.previews.write().await;
-                    previews.get(&run_id).cloned()
-                };
+                let previous_preview = { self.state.previews.read().await.get(&run_id).cloned() };
                 {
                     let mut runs = self.state.runs.write().await;
                     runs.ensure_running(&run_id);
@@ -684,7 +681,7 @@ impl AgentService for AgentServiceImpl {
                     });
                 }
                 let new_preview = if req.preview.is_some() {
-                    self.state.previews.write().await.get(&run_id).cloned()
+                    self.state.previews.read().await.get(&run_id).cloned()
                 } else {
                     None
                 };
@@ -1646,7 +1643,7 @@ mod tests {
         assert_eq!(run.state, InternalRunState::Assigned);
         drop(runs);
 
-        assert!(state.previews.write().await.get(&run_id).is_none());
+        assert!(state.previews.read().await.get(&run_id).is_none());
 
         let retry = svc
             .complete_task(Request::new(request))
