@@ -1188,6 +1188,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires RAPIDBYTE_CONTROLLER_METADATA_TEST_DATABASE_URL"]
+    #[allow(clippy::too_many_lines)]
     async fn metadata_store_repaired_snapshot_preserves_original_recovery_started_at() {
         let admin_url = env::var("RAPIDBYTE_CONTROLLER_METADATA_TEST_DATABASE_URL")
             .expect("test database URL env var must be set");
