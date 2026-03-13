@@ -7,7 +7,8 @@ use chrono::{DateTime, Utc};
 use tokio_postgres::{Client, NoTls, Row};
 
 use crate::lease::Lease;
-use crate::preview::PreviewStreamEntry;
+use crate::preview::{PreviewEntry, PreviewStreamEntry};
+use crate::registry::AgentRecord;
 use crate::run_state::{CurrentTask, RunRecord, RunState};
 use crate::scheduler::{TaskRecord, TaskState};
 
@@ -18,6 +19,8 @@ pub const CONTROLLER_METADATA_MIGRATIONS: &str =
 pub struct MetadataSnapshot {
     pub runs: Vec<RunRecord>,
     pub tasks: Vec<TaskRecord>,
+    pub agents: Vec<AgentRecord>,
+    pub previews: Vec<PreviewEntry>,
     pub max_lease_epoch: u64,
 }
 
@@ -64,6 +67,20 @@ impl MetadataStore {
                 &[],
             )
             .await?;
+        let agent_rows = self
+            .client
+            .query(
+                "SELECT * FROM controller_agents ORDER BY created_at ASC",
+                &[],
+            )
+            .await?;
+        let preview_rows = self
+            .client
+            .query(
+                "SELECT * FROM controller_previews ORDER BY created_at ASC",
+                &[],
+            )
+            .await?;
 
         let runs = run_rows
             .iter()
@@ -72,6 +89,18 @@ impl MetadataStore {
         let tasks = task_rows
             .iter()
             .map(task_record_from_row)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let agents = agent_rows
+            .iter()
+            .map(agent_record_from_row)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let previews = preview_rows
+            .iter()
+            .filter_map(|row| match preview_entry_from_row(row) {
+                Ok(Some(entry)) => Some(Ok(entry)),
+                Ok(None) => None,
+                Err(error) => Some(Err(error)),
+            })
             .collect::<anyhow::Result<Vec<_>>>()?;
         let max_lease_epoch = tasks
             .iter()
@@ -82,6 +111,8 @@ impl MetadataStore {
         Ok(MetadataSnapshot {
             runs,
             tasks,
+            agents,
+            previews,
             max_lease_epoch,
         })
     }
@@ -268,6 +299,65 @@ impl MetadataStore {
             .await?;
         Ok(())
     }
+
+    /// Upsert a durable agent record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database write fails.
+    pub async fn upsert_agent(&self, agent: &AgentRecord) -> anyhow::Result<()> {
+        let max_tasks = i32::try_from(agent.max_tasks)?;
+        let active_tasks = i32::try_from(agent.active_tasks)?;
+        let memory_bytes = i64::try_from(agent.memory_bytes)?;
+        let last_heartbeat_at = to_datetime(system_time_from_instant(agent.last_heartbeat));
+
+        self.client
+            .execute(
+                "INSERT INTO controller_agents (
+                    agent_id, max_tasks, active_tasks, flight_endpoint, plugin_bundle_hash,
+                    available_plugins, memory_bytes, last_heartbeat_at, created_at, updated_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5,
+                    $6, $7, $8, NOW(), NOW()
+                )
+                ON CONFLICT (agent_id) DO UPDATE SET
+                    max_tasks = EXCLUDED.max_tasks,
+                    active_tasks = EXCLUDED.active_tasks,
+                    flight_endpoint = EXCLUDED.flight_endpoint,
+                    plugin_bundle_hash = EXCLUDED.plugin_bundle_hash,
+                    available_plugins = EXCLUDED.available_plugins,
+                    memory_bytes = EXCLUDED.memory_bytes,
+                    last_heartbeat_at = EXCLUDED.last_heartbeat_at,
+                    updated_at = NOW()",
+                &[
+                    &agent.agent_id,
+                    &max_tasks,
+                    &active_tasks,
+                    &agent.flight_endpoint,
+                    &agent.plugin_bundle_hash,
+                    &agent.available_plugins,
+                    &memory_bytes,
+                    &last_heartbeat_at,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Delete a durable agent record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database write fails.
+    pub async fn delete_agent(&self, agent_id: &str) -> anyhow::Result<()> {
+        self.client
+            .execute(
+                "DELETE FROM controller_agents WHERE agent_id = $1",
+                &[&agent_id],
+            )
+            .await?;
+        Ok(())
+    }
 }
 
 pub async fn initialize_metadata_store(database_url: &str) -> anyhow::Result<MetadataStore> {
@@ -407,6 +497,59 @@ fn task_record_from_row(row: &Row) -> anyhow::Result<TaskRecord> {
     })
 }
 
+fn agent_record_from_row(row: &Row) -> anyhow::Result<AgentRecord> {
+    Ok(AgentRecord {
+        agent_id: row.get("agent_id"),
+        max_tasks: u32::try_from(row.get::<_, i32>("max_tasks"))?,
+        active_tasks: u32::try_from(row.get::<_, i32>("active_tasks"))?,
+        flight_endpoint: row.get("flight_endpoint"),
+        plugin_bundle_hash: row.get("plugin_bundle_hash"),
+        last_heartbeat: instant_from_system_time(datetime_to_system_time(
+            row.get("last_heartbeat_at"),
+        )),
+        available_plugins: row.get("available_plugins"),
+        memory_bytes: u64::try_from(row.get::<_, i64>("memory_bytes"))?,
+    })
+}
+
+fn preview_entry_from_row(row: &Row) -> anyhow::Result<Option<PreviewEntry>> {
+    #[derive(serde::Deserialize)]
+    struct StoredPreviewStream {
+        stream: String,
+        rows: u64,
+        ticket: Vec<u8>,
+    }
+
+    let created_at = datetime_to_system_time(row.get("created_at"));
+    let expires_at = datetime_to_system_time(row.get("expires_at"));
+    let Some(ttl) = expires_at.duration_since(created_at).ok() else {
+        return Ok(None);
+    };
+    if expires_at <= SystemTime::now() {
+        return Ok(None);
+    }
+
+    let streams_json: serde_json::Value = row.get("streams_json");
+    let streams = serde_json::from_value::<Vec<StoredPreviewStream>>(streams_json)?
+        .into_iter()
+        .map(|stream| PreviewStreamEntry {
+            stream: stream.stream,
+            rows: stream.rows,
+            ticket: bytes::Bytes::from(stream.ticket),
+        })
+        .collect();
+
+    Ok(Some(PreviewEntry {
+        run_id: row.get("run_id"),
+        task_id: row.get("task_id"),
+        flight_endpoint: row.get("flight_endpoint"),
+        ticket: bytes::Bytes::from(row.get::<_, Vec<u8>>("ticket")),
+        streams,
+        created_at: instant_from_system_time(created_at),
+        ttl,
+    }))
+}
+
 fn to_datetime(time: SystemTime) -> DateTime<Utc> {
     time.into()
 }
@@ -426,6 +569,21 @@ fn lease_expiry_from_datetime(expires_at: DateTime<Utc>) -> Instant {
         Ok(remaining) => Instant::now() + remaining,
         Err(_) => Instant::now(),
     }
+}
+
+fn instant_from_system_time(time: SystemTime) -> Instant {
+    match SystemTime::now().duration_since(time) {
+        Ok(elapsed) => Instant::now()
+            .checked_sub(elapsed)
+            .unwrap_or_else(Instant::now),
+        Err(_) => Instant::now(),
+    }
+}
+
+fn system_time_from_instant(time: Instant) -> SystemTime {
+    SystemTime::now()
+        .checked_sub(time.elapsed())
+        .unwrap_or_else(SystemTime::now)
 }
 
 #[cfg(test)]
@@ -502,6 +660,35 @@ mod tests {
             .upsert_task(&task)
             .await
             .expect("task upsert should succeed");
+        store
+            .upsert_agent(&AgentRecord {
+                agent_id: "agent-1".into(),
+                max_tasks: 4,
+                active_tasks: 1,
+                flight_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: "hash".into(),
+                last_heartbeat: Instant::now(),
+                available_plugins: vec!["source-postgres".into()],
+                memory_bytes: 1024,
+            })
+            .await
+            .expect("agent upsert should succeed");
+        store
+            .upsert_preview(
+                "run-1",
+                "task-1",
+                "localhost:9091",
+                b"ticket",
+                &[PreviewStreamEntry {
+                    stream: "users".into(),
+                    rows: 3,
+                    ticket: bytes::Bytes::from_static(b"users-ticket"),
+                }],
+                now,
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("preview upsert should succeed");
 
         let snapshot = store
             .load_snapshot()
@@ -510,6 +697,8 @@ mod tests {
 
         assert_eq!(snapshot.runs.len(), 1);
         assert_eq!(snapshot.tasks.len(), 1);
+        assert_eq!(snapshot.agents.len(), 1);
+        assert_eq!(snapshot.previews.len(), 1);
         assert_eq!(snapshot.max_lease_epoch, 7);
         assert_eq!(
             snapshot.runs[0].idempotency_key.as_deref(),
@@ -520,6 +709,8 @@ mod tests {
             Some("agent-1")
         );
         assert_eq!(snapshot.tasks[0].limit, Some(25));
+        assert_eq!(snapshot.agents[0].agent_id, "agent-1");
+        assert_eq!(snapshot.previews[0].streams[0].stream, "users");
 
         admin_client
             .batch_execute(&format!("DROP SCHEMA \"{schema}\" CASCADE"))

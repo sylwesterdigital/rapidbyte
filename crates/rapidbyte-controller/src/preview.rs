@@ -201,6 +201,10 @@ impl PreviewStore {
         self.entries.insert(entry.run_id.clone(), entry);
     }
 
+    pub fn restore(&mut self, entry: PreviewEntry) {
+        self.store(entry);
+    }
+
     #[must_use]
     pub fn get(&mut self, run_id: &str) -> Option<&PreviewEntry> {
         let expired = self
@@ -219,6 +223,11 @@ impl PreviewStore {
         let before = self.entries.len();
         self.entries.retain(|_, e| e.created_at.elapsed() < e.ttl);
         before - self.entries.len()
+    }
+
+    #[must_use]
+    pub fn all_entries(&self) -> Vec<PreviewEntry> {
+        self.entries.values().cloned().collect()
     }
 }
 
@@ -357,5 +366,27 @@ mod tests {
         assert_eq!(removed, 1);
         assert!(store.get("r1").is_none());
         assert!(store.get("r2").is_some());
+    }
+
+    #[test]
+    fn preview_store_restore_rehydrates_entry() {
+        let mut store = PreviewStore::new();
+        store.restore(PreviewEntry {
+            run_id: "r1".into(),
+            task_id: "t1".into(),
+            flight_endpoint: "localhost:9091".into(),
+            ticket: bytes::Bytes::from_static(b"ticket"),
+            streams: vec![PreviewStreamEntry {
+                stream: "users".into(),
+                rows: 2,
+                ticket: bytes::Bytes::from_static(b"users-ticket"),
+            }],
+            created_at: Instant::now(),
+            ttl: Duration::from_secs(60),
+        });
+
+        let entry = store.get("r1").unwrap();
+        assert_eq!(entry.task_id, "t1");
+        assert_eq!(entry.streams[0].rows, 2);
     }
 }

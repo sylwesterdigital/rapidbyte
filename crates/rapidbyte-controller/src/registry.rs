@@ -86,6 +86,11 @@ impl AgentRegistry {
         self.agents.get(agent_id)
     }
 
+    /// Restore an agent record loaded from durable storage.
+    pub fn restore_agent(&mut self, record: AgentRecord) {
+        self.agents.insert(record.agent_id.clone(), record);
+    }
+
     /// Remove an agent from the registry.
     pub fn remove(&mut self, agent_id: &str) -> Option<AgentRecord> {
         self.agents.remove(agent_id)
@@ -111,6 +116,12 @@ impl AgentRegistry {
     #[must_use]
     pub fn list(&self) -> Vec<&AgentRecord> {
         self.agents.values().collect()
+    }
+
+    /// Snapshot all registered agents.
+    #[must_use]
+    pub fn all_agents(&self) -> Vec<AgentRecord> {
+        self.agents.values().cloned().collect()
     }
 }
 
@@ -197,5 +208,24 @@ mod tests {
         register_test_agent(&mut reg, "agent-1");
         register_test_agent(&mut reg, "agent-2");
         assert_eq!(reg.list().len(), 2);
+    }
+
+    #[test]
+    fn restore_agent_makes_agent_available() {
+        let mut reg = AgentRegistry::new();
+        reg.restore_agent(AgentRecord {
+            agent_id: "agent-1".into(),
+            max_tasks: 2,
+            active_tasks: 1,
+            flight_endpoint: "localhost:9091".into(),
+            plugin_bundle_hash: "hash123".into(),
+            last_heartbeat: Instant::now(),
+            available_plugins: vec!["source-postgres".into()],
+            memory_bytes: 1024,
+        });
+
+        let record = reg.get("agent-1").unwrap();
+        assert_eq!(record.active_tasks, 1);
+        assert_eq!(record.flight_endpoint, "localhost:9091");
     }
 }

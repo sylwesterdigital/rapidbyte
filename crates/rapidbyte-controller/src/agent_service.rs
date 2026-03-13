@@ -94,6 +94,12 @@ impl AgentService for AgentServiceImpl {
             req.available_plugins,
             req.memory_bytes,
         );
+        drop(registry);
+
+        self.state
+            .persist_agent(&agent_id)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
 
         tracing::info!(agent_id, "Agent registered");
         Ok(Response::new(RegisterAgentResponse { agent_id }))
@@ -112,6 +118,10 @@ impl AgentService for AgentServiceImpl {
                 .heartbeat(&req.agent_id, req.active_tasks)
                 .map_err(|e| Status::not_found(e.to_string()))?;
         }
+        self.state
+            .persist_agent(&req.agent_id)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
 
         // Renew leases for active tasks reported by the agent
         if !req.active_leases.is_empty() {
@@ -654,6 +664,40 @@ mod tests {
         assert!(!resp.agent_id.is_empty());
         // Should be a valid UUID
         assert!(uuid::Uuid::parse_str(&resp.agent_id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_accepts_restored_agent() {
+        let state = test_state();
+        state
+            .registry
+            .write()
+            .await
+            .restore_agent(crate::registry::AgentRecord {
+                agent_id: "restored-agent".into(),
+                max_tasks: 1,
+                active_tasks: 0,
+                flight_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                last_heartbeat: std::time::Instant::now(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            });
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let resp = svc
+            .heartbeat(Request::new(HeartbeatRequest {
+                agent_id: "restored-agent".into(),
+                active_tasks: 0,
+                active_leases: vec![],
+                cpu_usage: 0.0,
+                memory_used_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(resp.directives.is_empty());
     }
 
     #[tokio::test]

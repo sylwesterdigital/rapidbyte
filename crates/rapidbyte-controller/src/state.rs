@@ -52,12 +52,22 @@ impl ControllerState {
             tasks.restore_task(task);
         }
 
+        let mut registry = AgentRegistry::new();
+        for agent in snapshot.agents {
+            registry.restore_agent(agent);
+        }
+
+        let mut previews = PreviewStore::new();
+        for preview in snapshot.previews {
+            previews.restore(preview);
+        }
+
         Self {
             runs: Arc::new(RwLock::new(runs)),
             tasks: Arc::new(RwLock::new(tasks)),
-            registry: Arc::new(RwLock::new(AgentRegistry::new())),
+            registry: Arc::new(RwLock::new(registry)),
             watchers: Arc::new(RwLock::new(RunWatchers::new())),
-            previews: Arc::new(RwLock::new(PreviewStore::new())),
+            previews: Arc::new(RwLock::new(previews)),
             epoch_gen: Arc::new(EpochGenerator::with_start(snapshot.max_lease_epoch)),
             ticket_signer: Arc::new(TicketSigner::new(signing_key)),
             metadata_store,
@@ -141,6 +151,34 @@ impl ControllerState {
         }
         Ok(())
     }
+
+    /// Persist an agent record when durable metadata storage is configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable metadata write fails.
+    pub async fn persist_agent(&self, agent_id: &str) -> anyhow::Result<()> {
+        let Some(metadata_store) = &self.metadata_store else {
+            return Ok(());
+        };
+        let agent = { self.registry.read().await.get(agent_id).cloned() };
+        if let Some(agent) = agent {
+            metadata_store.upsert_agent(&agent).await?;
+        }
+        Ok(())
+    }
+
+    /// Delete an agent record from durable metadata storage when configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable metadata write fails.
+    pub async fn delete_agent(&self, agent_id: &str) -> anyhow::Result<()> {
+        let Some(metadata_store) = &self.metadata_store else {
+            return Ok(());
+        };
+        metadata_store.delete_agent(agent_id).await
+    }
 }
 
 fn normalize_recovery_snapshot(mut snapshot: MetadataSnapshot) -> MetadataSnapshot {
@@ -175,8 +213,11 @@ fn preview_created_at(created_at: Instant) -> SystemTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::preview::{PreviewEntry, PreviewStreamEntry};
+    use crate::registry::AgentRecord;
     use crate::run_state::{RunRecord, RunState};
     use crate::scheduler::{TaskRecord, TaskState};
+    use std::time::Duration;
 
     #[test]
     fn from_snapshot_rebuilds_runs_tasks_and_epoch_seed() {
@@ -210,6 +251,8 @@ mod tests {
                 limit: None,
                 assigned_agent_id: None,
             }],
+            agents: vec![],
+            previews: vec![],
             max_lease_epoch: 7,
         };
 
@@ -261,6 +304,8 @@ mod tests {
                 limit: None,
                 assigned_agent_id: Some("agent-1".into()),
             }],
+            agents: vec![],
+            previews: vec![],
             max_lease_epoch: 11,
         };
 
@@ -271,5 +316,44 @@ mod tests {
             RunState::Reconciling
         );
         assert_eq!(state.epoch_gen.next(), 12);
+    }
+
+    #[test]
+    fn from_snapshot_rehydrates_agents_and_previews() {
+        let snapshot = MetadataSnapshot {
+            runs: vec![],
+            tasks: vec![],
+            agents: vec![AgentRecord {
+                agent_id: "agent-1".into(),
+                max_tasks: 2,
+                active_tasks: 1,
+                flight_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: "hash123".into(),
+                last_heartbeat: Instant::now(),
+                available_plugins: vec!["source-postgres".into()],
+                memory_bytes: 1024,
+            }],
+            previews: vec![PreviewEntry {
+                run_id: "run-1".into(),
+                task_id: "task-1".into(),
+                flight_endpoint: "localhost:9091".into(),
+                ticket: bytes::Bytes::from_static(b"ticket"),
+                streams: vec![PreviewStreamEntry {
+                    stream: "users".into(),
+                    rows: 4,
+                    ticket: bytes::Bytes::from_static(b"users-ticket"),
+                }],
+                created_at: Instant::now(),
+                ttl: Duration::from_secs(60),
+            }],
+            max_lease_epoch: 0,
+        };
+
+        let state = ControllerState::from_snapshot(b"signing-key", None, snapshot);
+
+        assert!(state.registry.blocking_read().get("agent-1").is_some());
+        let preview = state.previews.blocking_write().get("run-1").cloned();
+        assert!(preview.is_some());
+        assert_eq!(preview.unwrap().streams[0].stream, "users");
     }
 }

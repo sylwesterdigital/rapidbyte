@@ -200,6 +200,9 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
             interval.tick().await;
             let dead = reap_state.registry.write().await.reap_dead(reap_timeout);
             for agent_id in &dead {
+                if let Err(error) = reap_state.delete_agent(agent_id).await {
+                    tracing::error!(agent_id, ?error, "failed to delete reaped agent");
+                }
                 info!(agent_id, "Reaped dead agent");
             }
         }
