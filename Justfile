@@ -51,10 +51,10 @@ _build-host:
 
 [private]
 _build-plugins:
-    cd plugins/sources/postgres && cargo build {{ if MODE == "release" { "--release" } else { "" } }}
-    cd plugins/destinations/postgres && cargo build {{ if MODE == "release" { "--release" } else { "" } }}
-    cd plugins/transforms/sql && cargo build {{ if MODE == "release" { "--release" } else { "" } }}
-    cd plugins/transforms/validate && cargo build {{ if MODE == "release" { "--release" } else { "" } }}
+    ./scripts/build-plugin.sh plugins/sources/postgres {{ MODE }}
+    ./scripts/build-plugin.sh plugins/destinations/postgres {{ MODE }}
+    ./scripts/build-plugin.sh plugins/transforms/sql {{ MODE }}
+    ./scripts/build-plugin.sh plugins/transforms/validate {{ MODE }}
     mkdir -p target/plugins/sources target/plugins/destinations target/plugins/transforms
     cp plugins/sources/postgres/target/wasm32-wasip2/{{ MODE }}/source_postgres.wasm target/plugins/sources/postgres.wasm
     cp plugins/destinations/postgres/target/wasm32-wasip2/{{ MODE }}/dest_postgres.wasm target/plugins/destinations/postgres.wasm
