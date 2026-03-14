@@ -1,3 +1,6 @@
+
+![No Docker](./images/what.png)
+
 # Running locally without Docker
 
 > Work in progress.
