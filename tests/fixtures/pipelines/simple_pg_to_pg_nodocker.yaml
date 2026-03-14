@@ -1,0 +1,30 @@
+version: "1.0"
+pipeline: test_pg_to_pg_nodocker
+
+source:
+  use: postgres
+  config:
+    host: ${TEST_SOURCE_PG_HOST}
+    port: ${TEST_SOURCE_PG_PORT}
+    user: ${PGUSER}
+    password: ""
+    database: ${SOURCE_DB}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+    - name: orders
+      sync_mode: full_refresh
+
+destination:
+  use: postgres
+  config:
+    host: ${TEST_DEST_PG_HOST}
+    port: ${TEST_DEST_PG_PORT}
+    user: ${PGUSER}
+    password: ""
+    database: ${DEST_DB}
+    schema: ${DEST_SCHEMA}
+  write_mode: append
+
+state:
+  backend: sqlite

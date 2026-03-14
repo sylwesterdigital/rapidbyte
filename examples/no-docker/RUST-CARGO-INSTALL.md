@@ -48,3 +48,50 @@ Adjust the ports if local PostgreSQL uses different ones.
 * verified that `cargo` and `rustc` now work
 
 
+#If Rust and Cargo are installe, then
+
+Run these next, from the repo root:
+
+```bash
+cargo build --release
+```
+
+Then build the plugins:
+
+```bash
+./scripts/build-plugin.sh plugins/sources/postgres release
+./scripts/build-plugin.sh plugins/destinations/postgres release
+./scripts/build-plugin.sh plugins/transforms/sql release
+./scripts/build-plugin.sh plugins/transforms/validate release
+```
+
+Then place the plugin artifacts where the app expects them:
+
+```bash
+mkdir -p target/plugins/sources target/plugins/destinations target/plugins/transforms
+
+cp plugins/sources/postgres/target/wasm32-wasip2/release/source_postgres.wasm target/plugins/sources/postgres.wasm
+cp plugins/destinations/postgres/target/wasm32-wasip2/release/dest_postgres.wasm target/plugins/destinations/postgres.wasm
+cp plugins/transforms/sql/target/wasm32-wasip2/release/transform_sql.wasm target/plugins/transforms/sql.wasm
+cp plugins/transforms/validate/target/wasm32-wasip2/release/transform_validate.wasm target/plugins/transforms/validate.wasm
+```
+
+Then set:
+
+```bash
+export RAPIDBYTE_PLUGIN_DIR=target/plugins
+```
+
+Then seed your local Postgres:
+
+```bash
+./scripts/seed-dev.sh 1000000
+```
+
+Then run the example pipeline:
+
+```bash
+./target/release/rapidbyte run tests/fixtures/pipelines/simple_pg_to_pg.yaml -vv
+```
+
+If the first command fails, paste that error and I’ll give the exact next fix.
