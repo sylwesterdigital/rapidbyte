@@ -1,4 +1,3 @@
-````md
 ![No Docker](./images/what.png)
 
 # Running Rapidbyte locally without Docker
@@ -822,7 +821,4 @@ A working no-Docker setup means:
 * a dedicated no-Docker pipeline reads from source and writes to destination
 * the original Docker-oriented files stay untouched
 
-```
 
-This version is intentionally the “everything someone needs to proceed, including where it breaks and why” dump.
-```
